@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
@@ -8,7 +8,12 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="ParserTests.fs" />
+    <Compile Include="LexerTests.fs" />
+    <Compile Include="ExpressionTests.fs" />
+    <Compile Include="QueryTests.fs" />
+    <Compile Include="DmlTests.fs" />
+    <Compile Include="DdlTests.fs" />
+    <Compile Include="SqlParserTests.fs" />
   </ItemGroup>
 
   <ItemGroup>
