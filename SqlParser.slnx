@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="SqlParser/SqlParser.fsproj" />
+  <Project Path="SqlParser.Tests/SqlParser.Tests.fsproj" />
+</Solution>
