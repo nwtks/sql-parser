@@ -155,6 +155,7 @@ and WindowFunction =
 and Query =
     | SelectQuery of SelectStatement
     | SetOperation of Query * SetOperator * Query
+    | WithQuery of bool * Cte list * Query
 
 and Cte =
     { Name: string

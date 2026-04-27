@@ -37,13 +37,6 @@ module ExpressionParser =
             | ids -> ColumnReference ids
         |> withExprPosition
 
-    let pQuery, pQueryRef = createParserForwardedToRef<Query, unit> ()
-
-    let pSubqueryExpr =
-        between (token (pstring "(")) (token (pstring ")")) pQuery
-        |>> SubqueryExpression
-        |> withExprPosition
-
     let pCastExpr =
         pKeyword "CAST"
         >>. between (token (pstring "(")) (token (pstring ")")) (pExpression .>> pKeyword "AS" .>>. pDataType)
@@ -225,6 +218,28 @@ module ExpressionParser =
                 (pSpec .>>. opt pExpression .>> pKeyword "FROM" .>>. pExpression)
         |>> (fun ((spec, char), source) -> Trim(spec, char, source))
         |> withExprPosition
+
+    let pQuery, pQueryRef = createParserForwardedToRef<Query, unit> ()
+
+    let pSubqueryExpr =
+        between (token (pstring "(")) (token (pstring ")")) pQuery
+        |>> SubqueryExpression
+        |> withExprPosition
+
+    let pCte =
+        pIdentifier
+        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifier (token (pstring ","))))
+        .>> pKeyword "AS"
+        .>>. between (token (pstring "(")) (token (pstring ")")) pQuery
+        |>> fun ((name, cols), q) ->
+            { Name = name
+              Columns = cols
+              Query = q }
+
+    let pWithClause =
+        pKeyword "WITH" >>. opt (pKeyword "RECURSIVE" >>% true)
+        .>>. sepBy1 pCte (token (pstring ","))
+        |>> fun (recu, ctes) -> Option.defaultValue false recu, ctes
 
     let pPredicateSuffix pExpr =
         choice

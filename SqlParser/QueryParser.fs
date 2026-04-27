@@ -194,4 +194,11 @@ module QueryParser =
     let pQuery = ExpressionParser.pQuery
 
     pQueryRef.Value <-
-        chainl1 (pSelectStatement |>> SelectQuery) (pSetOperator |>> fun op -> fun l r -> SetOperation(l, op, r))
+        let pQueryBody =
+            chainl1 (pSelectStatement |>> SelectQuery) (pSetOperator |>> fun op -> fun l r -> SetOperation(l, op, r))
+
+        attempt (
+            pWithClause .>>. pQueryBody
+            |>> fun ((recu, ctes), q) -> WithQuery(recu, ctes, q)
+        )
+        <|> pQueryBody

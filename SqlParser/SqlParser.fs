@@ -6,6 +6,7 @@ open SqlParser.Lexer
 open SqlParser.QueryParser
 open SqlParser.DmlParser
 open SqlParser.DdlParser
+open SqlParser.ExpressionParser
 
 module SqlParser =
     let withStmtPosition p =
@@ -32,21 +33,9 @@ module SqlParser =
               pTruncateStatement ]
 
     let pWithStatement =
-        let pCte =
-            pIdentifier
-            .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifier (token (pstring ","))))
-            .>> pKeyword "AS"
-            .>>. between (token (pstring "(")) (token (pstring ")")) pQuery
-            |>> fun ((name, cols), q) ->
-                { Name = name
-                  Columns = cols
-                  Query = q }
-
-        pKeyword "WITH" >>. opt (pKeyword "RECURSIVE" >>% true)
-        .>>. sepBy1 pCte (token (pstring ","))
-        .>>. (pDml |> withStmtPosition)
+        pWithClause .>>. (pDml |> withStmtPosition)
         |>> fun ((recu, ctes), stmt) ->
-            { Kind = WithStatement(Option.defaultValue false recu, ctes, stmt.Kind)
+            { Kind = WithStatement(recu, ctes, stmt.Kind)
               Pos = stmt.Pos }
 
     let pStatement, pStatementRef = createParserForwardedToRef<Statement, unit> ()

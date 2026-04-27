@@ -343,3 +343,12 @@ let ``Unicode identifier verification`` () =
         | [ Column({ Kind = Identifier "id" }, _) ] -> ()
         | res -> failwithf "Expected Identifier ID, got %A" res
     | res -> failwithf "Expected Select, got %A" res
+
+[<Fact>]
+let ``Subquery with WITH clause verification`` () =
+    match parse "SELECT * FROM (WITH cte AS (SELECT 1 AS val) SELECT * FROM cte) AS t" with
+    | Select(SelectQuery q) ->
+        match q.From with
+        | Some { Kind = Subquery(WithQuery(false, [ cte ], _), "T", _) } -> Assert.Equal("CTE", cte.Name)
+        | res -> Assert.Fail(sprintf "Expected Subquery with WithQuery, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
