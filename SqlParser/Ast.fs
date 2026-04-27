@@ -45,9 +45,12 @@ type DataType =
     | NationalCharacter of int option
     | NationalVarchar of int option
     | NationalCharacterLargeObject of int option
+    | Binary of int option
+    | VarBinary of int option
     | BinaryLargeObject of int option
     | Numeric of int option * int option
     | Decimal of int option * int option
+    | DecFloat of int option
     | SmallInt
     | Integer
     | BigInt
@@ -71,10 +74,16 @@ type JoinType =
     | FullJoin
     | CrossJoin
 
+type SetOperatorKind =
+    | Union
+    | Intersect
+    | Except
+
 type SetOperator =
-    | Union of bool
-    | Intersect of bool
-    | Except of bool
+    { Kind: SetOperatorKind
+      IsAll: bool
+      IsDistinct: bool
+      Corresponding: string list option option }
 
 type NullsOrder =
     | NullsFirst
@@ -98,7 +107,17 @@ type ExpressionKind =
     | Case of Expression option * (Expression * Expression) list * Expression option
     | SubqueryExpression of Query
     | Star
+    | Parameter of string
+    | WindowFunction of WindowFunction
     | ColumnReference of string list
+    | Between of Expression * bool * bool * Expression * Expression // expr, isNot, isSymmetric, start, end
+    | InList of Expression * bool * Expression list // expr, isNot, list
+    | InSubquery of Expression * bool * Query // expr, isNot, subquery
+    | IsNull of Expression * bool // expr, isNot
+    | IsBoolean of Expression * bool * bool option // expr, isNot, value (Some true=TRUE, Some false=FALSE, None=UNKNOWN)
+    | Extract of string * Expression // field, source
+    | Position of Expression * Expression * string option // target, source, unit
+    | Trim of string option * Expression option * Expression // specification, character, source
 
 and Expression = { Kind: ExpressionKind; Pos: Position }
 
@@ -126,6 +145,12 @@ and WindowDefinition =
       PartitionBy: Expression list
       OrderBy: (Expression * bool * NullsOrder option) list
       Frame: WindowFrame option }
+
+and WindowFunction =
+    { Function: string
+      Args: Expression list
+      IsDistinct: bool
+      Window: WindowDefinition }
 
 and Query =
     | SelectQuery of SelectStatement
@@ -158,6 +183,11 @@ and JoinSource =
 
 and ColumnSource = Column of Expression * string option
 
+and FetchClause =
+    { Count: Expression
+      IsPercent: bool
+      WithTies: bool }
+
 and SelectStatement =
     { IsDistinct: bool
       Columns: ColumnSource list
@@ -168,7 +198,7 @@ and SelectStatement =
       Window: (string * WindowDefinition) list
       OrderBy: (Expression * bool * NullsOrder option) list
       Offset: Expression option
-      Fetch: Expression option
+      Fetch: FetchClause option
       Locking: LockingClause option }
 
 type InsertSource =

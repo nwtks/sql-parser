@@ -11,9 +11,7 @@ let parse sql =
 
 [<Fact>]
 let ``Full Statement parsing verification`` () =
-    let sql = "WITH cte AS (SELECT * FROM users) SELECT * FROM cte"
-
-    match parse sql with
+    match parse "WITH cte AS (SELECT * FROM users) SELECT * FROM cte" with
     | WithStatement(false, [ { Name = "CTE" } ], Select _) -> ()
     | res -> Assert.Fail(sprintf "Expected WithStatement, got %A" res)
 

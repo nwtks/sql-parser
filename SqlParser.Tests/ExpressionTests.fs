@@ -34,9 +34,7 @@ let ``Unary operations verification`` () =
 
 [<Fact>]
 let ``Case expression verification`` () =
-    let sql = "SELECT CASE WHEN a = 1 THEN 'one' ELSE 'other' END"
-
-    match parse sql with
+    match parse "SELECT CASE WHEN a = 1 THEN 'one' ELSE 'other' END" with
     | Case(None,
            [ { Kind = BinaryOp(Equal, { Kind = Identifier "A" }, { Kind = Literal(Number 1m) }) },
              { Kind = Literal(String "one") } ],
@@ -58,40 +56,50 @@ let ``Expression precedence verification`` () =
     | res -> Assert.Fail(sprintf "Precedence fail: %A" res)
 
 [<Fact>]
-let ``Aggregate and Window functions verification`` () =
+let ``Aggregate functions verification`` () =
     match parse "SELECT COUNT(DISTINCT id)" with
     | FunctionCall("COUNT", true, [ { Kind = Identifier "ID" } ], None) -> ()
     | res -> Assert.Fail(sprintf "Expected COUNT(DISTINCT id), got %A" res)
 
+[<Fact>]
+let ``Window functions verification`` () =
     match parse "SELECT ROW_NUMBER() OVER (ORDER BY id DESC)" with
-    | FunctionCall("ROW_NUMBER", false, [], Some window) ->
-        match window.OrderBy with
-        | [ { Kind = Identifier "ID" }, false, None ] -> ()
-        | _ -> Assert.Fail(sprintf "Expected OrderBy id DESC in window, got %A" window.OrderBy)
+    | WindowFunction { Function = "ROW_NUMBER"
+                       Args = []
+                       IsDistinct = false
+                       Window = { ExistingWindowName = None
+                                  PartitionBy = []
+                                  OrderBy = [ { Kind = Identifier "ID"
+                                                Pos = { Line = 1L; Column = 36L } },
+                                              false,
+                                              None ]
+                                  Frame = None } } -> ()
     | res -> Assert.Fail(sprintf "Expected ROW_NUMBER() OVER ..., got %A" res)
 
     match parse "SELECT SUM(salary) OVER (PARTITION BY dept_id ORDER BY hire_date)" with
-    | FunctionCall("SUM", false, [ { Kind = Identifier "SALARY" } ], Some window) ->
-        match window.PartitionBy with
-        | [ { Kind = Identifier "DEPT_ID" } ] -> ()
-        | _ -> Assert.Fail "Expected PartitionBy dept_id"
-
-        match window.OrderBy with
-        | [ { Kind = Identifier "HIRE_DATE" }, true, None ] -> ()
-        | _ -> Assert.Fail "Expected OrderBy hire_date"
+    | WindowFunction { Function = "SUM"
+                       Args = [ { Kind = Identifier "SALARY" } ]
+                       IsDistinct = false
+                       Window = { ExistingWindowName = None
+                                  PartitionBy = [ { Kind = Identifier "DEPT_ID" } ]
+                                  OrderBy = [ { Kind = Identifier "HIRE_DATE" }, true, None ]
+                                  Frame = None } } -> ()
     | res -> Assert.Fail(sprintf "Expected SUM(...) OVER ..., got %A" res)
 
 [<Fact>]
-let ``ORDER BY NULLS verification`` () =
-    let parseOrder sql =
-        match SqlParser.parse sql with
-        | Choice1Of2 { Kind = Select(SelectQuery s) } -> s.OrderBy.[0]
-        | _ -> failwith "fail"
+let ``Concatenated hex literal verification`` () =
+    match parse "SELECT X'0102' '0304'" with
+    | Literal(Literal.Binary [| 1uy; 2uy; 3uy; 4uy |]) -> ()
+    | res -> Assert.Fail(sprintf "Expected Binary literal, got %A" res)
 
-    match parseOrder "SELECT id ORDER BY id DESC NULLS FIRST" with
-    | { Kind = Identifier "ID" }, false, Some NullsFirst -> ()
-    | res -> Assert.Fail(sprintf "Expected id DESC NULLS FIRST, got %A" res)
+[<Fact>]
+let ``POSITION verification`` () =
+    match parse "SELECT POSITION('a' IN 'abc')" with
+    | Position({ Kind = Literal(String "a") }, { Kind = Literal(String "abc") }, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected Position, got %A" res)
 
-    match parseOrder "SELECT id ORDER BY name NULLS LAST" with
-    | { Kind = Identifier "NAME" }, true, Some NullsLast -> ()
-    | res -> Assert.Fail(sprintf "Expected name ASC NULLS LAST, got %A" res)
+[<Fact>]
+let ``TRIM verification`` () =
+    match parse "SELECT TRIM(BOTH ' ' FROM ' abc ')" with
+    | Trim(Some "BOTH", Some { Kind = Literal(String " ") }, { Kind = Literal(String " abc ") }) -> ()
+    | res -> Assert.Fail(sprintf "Expected Trim, got %A" res)

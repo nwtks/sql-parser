@@ -8,7 +8,8 @@ module Lexer =
 
     let reservedWords =
         Set.ofList
-            [ "ADD"
+            [ "ABS"
+              "ACOS"
               "ALL"
               "ALLOCATE"
               "ALTER"
@@ -16,13 +17,20 @@ module Lexer =
               "ANY"
               "ARE"
               "ARRAY"
+              "ARRAY_AGG"
+              "ARRAY_MAX_CARDINALITY"
               "AS"
               "ASENSITIVE"
+              "ASIN"
               "ASYMMETRIC"
               "AT"
+              "ATAN"
               "ATOMIC"
               "AUTHORIZATION"
+              "AVG"
               "BEGIN"
+              "BEGIN_FRAME"
+              "BEGIN_PARTITION"
               "BETWEEN"
               "BIGINT"
               "BINARY"
@@ -32,29 +40,50 @@ module Lexer =
               "BY"
               "CALL"
               "CALLED"
+              "CARDINALITY"
               "CASCADED"
               "CASE"
               "CAST"
+              "CEIL"
+              "CEILING"
               "CHAR"
               "CHARACTER"
+              "CHARACTER_LENGTH"
+              "CHAR_LENGTH"
               "CHECK"
+              "CLASSIFIER"
               "CLOB"
               "CLOSE"
+              "COALESCE"
               "COLLATE"
+              "COLLECT"
               "COLUMN"
               "COMMIT"
+              "CONDITION"
               "CONNECT"
               "CONSTRAINT"
-              "CONTINUE"
+              "CONTAINS"
+              "CONVERT"
+              "COPY"
+              "CORR"
               "CORRESPONDING"
+              "COS"
+              "COSH"
+              "COUNT"
+              "COVAR_POP"
+              "COVAR_SAMP"
               "CREATE"
               "CROSS"
               "CUBE"
+              "CUME_DIST"
               "CURRENT"
+              "CURRENT_CATALOG"
               "CURRENT_DATE"
               "CURRENT_DEFAULT_TRANSFORM_GROUP"
               "CURRENT_PATH"
               "CURRENT_ROLE"
+              "CURRENT_ROW"
+              "CURRENT_SCHEMA"
               "CURRENT_TIME"
               "CURRENT_TIMESTAMP"
               "CURRENT_TRANSFORM_GROUP_FOR_TYPE"
@@ -65,10 +94,13 @@ module Lexer =
               "DAY"
               "DEALLOCATE"
               "DEC"
+              "DECFLOAT"
               "DECIMAL"
               "DECLARE"
               "DEFAULT"
+              "DEFINE"
               "DELETE"
+              "DENSE_RANK"
               "DEREF"
               "DESCRIBE"
               "DETERMINISTIC"
@@ -80,67 +112,97 @@ module Lexer =
               "EACH"
               "ELEMENT"
               "ELSE"
+              "EMPTY"
               "END"
-              "END-EXEC"
+              "END_FRAME"
+              "END_PARTITION"
+              "EQUALS"
               "ESCAPE"
+              "EVERY"
               "EXCEPT"
-              "EXCLUDE"
               "EXEC"
               "EXECUTE"
               "EXISTS"
+              "EXP"
               "EXTERNAL"
               "EXTRACT"
               "FALSE"
               "FETCH"
               "FILTER"
+              "FIRST_VALUE"
               "FLOAT"
-              "FOLLOWING"
+              "FLOOR"
               "FOR"
               "FOREIGN"
+              "FRAME_ROW"
               "FREE"
               "FROM"
               "FULL"
               "FUNCTION"
+              "FUSION"
               "GET"
               "GLOBAL"
               "GRANT"
               "GROUP"
               "GROUPING"
+              "GROUPS"
               "HAVING"
               "HOLD"
               "HOUR"
               "IDENTITY"
-              "IMMEDIATE"
               "IN"
               "INDICATOR"
+              "INITIAL"
               "INNER"
               "INOUT"
-              "INPUT"
               "INSENSITIVE"
               "INSERT"
               "INT"
               "INTEGER"
               "INTERSECT"
+              "INTERSECTION"
               "INTERVAL"
               "INTO"
               "IS"
-              "ISOLATION"
               "JOIN"
+              "JSON_ARRAY"
+              "JSON_ARRAYAGG"
+              "JSON_EXISTS"
+              "JSON_OBJECT"
+              "JSON_OBJECTAGG"
+              "JSON_QUERY"
+              "JSON_TABLE"
+              "JSON_TABLE_PRIMITIVE"
+              "JSON_VALUE"
+              "LAG"
               "LANGUAGE"
               "LARGE"
+              "LAST_VALUE"
               "LATERAL"
+              "LEAD"
               "LEADING"
               "LEFT"
               "LIKE"
-              "LIMIT"
+              "LIKE_REGEX"
+              "LISTAGG"
+              "LN"
               "LOCAL"
               "LOCALTIME"
               "LOCALTIMESTAMP"
+              "LOG"
+              "LOG10"
+              "LOWER"
               "MATCH"
+              "MATCHES"
+              "MATCH_NUMBER"
+              "MATCH_RECOGNIZE"
+              "MAX"
               "MEMBER"
               "MERGE"
               "METHOD"
+              "MIN"
               "MINUTE"
+              "MOD"
               "MODIFIES"
               "MODULE"
               "MONTH"
@@ -150,35 +212,53 @@ module Lexer =
               "NCHAR"
               "NCLOB"
               "NEW"
-              "NEXT"
               "NO"
               "NONE"
+              "NORMALIZE"
               "NOT"
+              "NTH_VALUE"
+              "NTILE"
               "NULL"
               "NULLIF"
               "NUMERIC"
+              "OCCURRENCES_REGEX"
+              "OCTET_LENGTH"
               "OF"
               "OFFSET"
               "OLD"
+              "OMIT"
               "ON"
+              "ONE"
               "ONLY"
               "OPEN"
               "OR"
               "ORDER"
-              "OTHERS"
               "OUT"
               "OUTER"
-              "OUTPUT"
               "OVER"
               "OVERLAPS"
+              "OVERLAY"
               "PARAMETER"
               "PARTITION"
-              "PRECEDING"
+              "PATTERN"
+              "PER"
+              "PERCENT"
+              "PERCENTILE_CONT"
+              "PERCENTILE_DISC"
+              "PERCENT_RANK"
+              "PERIOD"
+              "PORTION"
+              "POSITION"
+              "POSITION_REGEX"
+              "POWER"
+              "PRECEDES"
               "PRECISION"
               "PREPARE"
               "PRIMARY"
               "PROCEDURE"
+              "PTF"
               "RANGE"
+              "RANK"
               "READS"
               "REAL"
               "RECURSIVE"
@@ -204,16 +284,23 @@ module Lexer =
               "ROLLUP"
               "ROW"
               "ROWS"
+              "ROW_NUMBER"
+              "RUNNING"
               "SAVEPOINT"
+              "SCOPE"
               "SCROLL"
               "SEARCH"
               "SECOND"
+              "SEEK"
               "SELECT"
               "SENSITIVE"
               "SESSION_USER"
               "SET"
-              "SHARE"
+              "SHOW"
               "SIMILAR"
+              "SIN"
+              "SINH"
+              "SKIP"
               "SMALLINT"
               "SOME"
               "SPECIFIC"
@@ -222,27 +309,42 @@ module Lexer =
               "SQLEXCEPTION"
               "SQLSTATE"
               "SQLWARNING"
+              "SQRT"
               "START"
               "STATIC"
+              "STDDEV_POP"
+              "STDDEV_SAMP"
               "SUBMULTISET"
+              "SUBSET"
+              "SUBSTRING"
+              "SUBSTRING_REGEX"
+              "SUCCEEDS"
+              "SUM"
               "SYMMETRIC"
               "SYSTEM"
+              "SYSTEM_TIME"
               "SYSTEM_USER"
               "TABLE"
+              "TABLESAMPLE"
+              "TAN"
+              "TANH"
               "THEN"
-              "TIES"
               "TIME"
               "TIMESTAMP"
               "TIMEZONE_HOUR"
               "TIMEZONE_MINUTE"
               "TO"
               "TRAILING"
+              "TRANSLATE"
+              "TRANSLATE_REGEX"
               "TRANSLATION"
               "TREAT"
               "TRIGGER"
+              "TRIM"
+              "TRIM_ARRAY"
               "TRUE"
+              "TRUNCATE"
               "UESCAPE"
-              "UNBOUNDED"
               "UNION"
               "UNIQUE"
               "UNKNOWN"
@@ -253,10 +355,13 @@ module Lexer =
               "USING"
               "VALUE"
               "VALUES"
-              "VAR_POP"
-              "VAR_SAMP"
+              "VALUE_OF"
+              "VARBINARY"
               "VARCHAR"
               "VARYING"
+              "VAR_POP"
+              "VAR_SAMP"
+              "VERSIONING"
               "WHEN"
               "WHENEVER"
               "WHERE"
@@ -270,10 +375,10 @@ module Lexer =
     let nonReservedWords =
         Set.ofList
             [ "A"
-              "ABS"
               "ABSOLUTE"
               "ACTION"
               "ADA"
+              "ADD"
               "ADMIN"
               "AFTER"
               "ALWAYS"
@@ -282,55 +387,41 @@ module Lexer =
               "ASSIGNMENT"
               "ATTRIBUTE"
               "ATTRIBUTES"
-              "AVG"
               "BEFORE"
               "BERNOULLI"
               "BREADTH"
               "C"
-              "CARDINALITY"
               "CASCADE"
               "CATALOG"
               "CATALOG_NAME"
-              "CEIL"
-              "CEILING"
               "CHAIN"
-              "CHARACTERISTICS"
-              "CHARACTERS"
-              "CHARACTER_LENGTH"
+              "CHAINING"
               "CHARACTER_SET_CATALOG"
               "CHARACTER_SET_NAME"
               "CHARACTER_SET_SCHEMA"
-              "CHAR_LENGTH"
-              "CHECKED"
+              "CHARACTERISTICS"
+              "CHARACTERS"
               "CLASS_ORIGIN"
-              "COALESCE"
               "COBOL"
-              "CODE_UNITS"
               "COLLATION"
               "COLLATION_CATALOG"
               "COLLATION_NAME"
               "COLLATION_SCHEMA"
-              "COLLECT"
+              "COLUMNS"
               "COLUMN_NAME"
               "COMMAND_FUNCTION"
               "COMMAND_FUNCTION_CODE"
               "COMMITTED"
-              "CONDITION"
+              "CONDITIONAL"
               "CONDITION_NUMBER"
+              "CONNECTION"
               "CONNECTION_NAME"
-              "CONSTRAINTS"
               "CONSTRAINT_CATALOG"
               "CONSTRAINT_NAME"
               "CONSTRAINT_SCHEMA"
-              "CONSTRUCTORS"
-              "CONTAINS"
-              "CONVERT"
-              "CORR"
-              "COUNT"
-              "COVAR_POP"
-              "COVAR_SAMP"
-              "CUME_DIST"
-              "CURRENT_COLLATION"
+              "CONSTRAINTS"
+              "CONSTRUCTOR"
+              "CONTINUE"
               "CURSOR_NAME"
               "DATA"
               "DATETIME_INTERVAL_CODE"
@@ -341,88 +432,116 @@ module Lexer =
               "DEFINED"
               "DEFINER"
               "DEGREE"
-              "DENSE_RANK"
               "DEPTH"
               "DERIVED"
               "DESC"
+              "DESCRIBE_CATALOG"
+              "DESCRIBE_NAME"
+              "DESCRIBE_PROCEDURE_SPECIFIC_CATALOG"
+              "DESCRIBE_PROCEDURE_SPECIFIC_NAME"
+              "DESCRIBE_PROCEDURE_SPECIFIC_SCHEMA"
+              "DESCRIBE_SCHEMA"
               "DESCRIPTOR"
               "DIAGNOSTICS"
               "DISPATCH"
               "DOMAIN"
               "DYNAMIC_FUNCTION"
               "DYNAMIC_FUNCTION_CODE"
-              "EQUALS"
-              "EVERY"
-              "EXCEPTION"
+              "ENCODING"
+              "ENFORCED"
+              "ERROR"
               "EXCLUDE"
               "EXCLUDING"
-              "EXP"
-              "EXTRACT"
+              "EXPRESSION"
               "FINAL"
+              "FINISH"
+              "FINISH_CATALOG"
+              "FINISH_NAME"
+              "FINISH_PROCEDURE_SPECIFIC_CATALOG"
+              "FINISH_PROCEDURE_SPECIFIC_NAME"
+              "FINISH_PROCEDURE_SPECIFIC_SCHEMA"
+              "FINISH_SCHEMA"
               "FIRST"
-              "FLOOR"
+              "FLAG"
               "FOLLOWING"
+              "FORMAT"
               "FORTRAN"
               "FOUND"
-              "FUSION"
+              "FULFILL"
+              "FULFILL_CATALOG"
+              "FULFILL_NAME"
+              "FULFILL_PROCEDURE_SPECIFIC_CATALOG"
+              "FULFILL_PROCEDURE_SPECIFIC_NAME"
+              "FULFILL_PROCEDURE_SPECIFIC_SCHEMA"
+              "FULFILL_SCHEMA"
               "G"
               "GENERAL"
+              "GENERATED"
               "GO"
               "GOTO"
               "GRANTED"
+              "HAS_PASS_THROUGH_COLUMNS"
+              "HAS_PASS_THRU_COLS"
               "HIERARCHY"
+              "IGNORE"
+              "IMMEDIATE"
+              "IMMEDIATELY"
               "IMPLEMENTATION"
               "INCLUDING"
               "INCREMENT"
               "INITIALLY"
+              "INPUT"
               "INSTANCE"
               "INSTANTIABLE"
-              "INTERSECTION"
+              "INSTEAD"
               "INVOKER"
               "ISOLATION"
+              "IS_PRUNABLE"
+              "JSON"
               "K"
+              "KEEP"
               "KEY"
+              "KEYS"
               "KEY_MEMBER"
               "KEY_TYPE"
               "LAST"
               "LENGTH"
               "LEVEL"
-              "LN"
               "LOCATOR"
-              "LOWER"
               "M"
               "MAP"
               "MATCHED"
-              "MAX"
               "MAXVALUE"
               "MESSAGE_LENGTH"
               "MESSAGE_OCTET_LENGTH"
               "MESSAGE_TEXT"
-              "MIN"
               "MINVALUE"
-              "MOD"
               "MORE"
               "MUMPS"
               "NAME"
               "NAMES"
+              "NESTED"
               "NESTING"
               "NEXT"
-              "NORMALIZE"
+              "NFC"
+              "NFD"
+              "NFKC"
+              "NFKD"
               "NORMALIZED"
               "NULLABLE"
-              "NULLIF"
               "NULLS"
               "NUMBER"
               "OBJECT"
               "OCTETS"
-              "OCTET_LENGTH"
               "OPTION"
               "OPTIONS"
               "ORDERING"
               "ORDINALITY"
               "OTHERS"
-              "OVERLAY"
+              "OUTPUT"
+              "OVERFLOW"
               "OVERRIDING"
+              "P"
               "PAD"
               "PARAMETER_MODE"
               "PARAMETER_NAME"
@@ -432,35 +551,43 @@ module Lexer =
               "PARAMETER_SPECIFIC_SCHEMA"
               "PARTIAL"
               "PASCAL"
+              "PASS"
+              "PASSING"
+              "PAST"
               "PATH"
-              "PERCENTILE_CONT"
-              "PERCENTILE_DISC"
-              "PERCENT_RANK"
               "PLACING"
+              "PLAN"
               "PLI"
-              "POSITION"
-              "POWER"
               "PRECEDING"
               "PRESERVE"
               "PRIOR"
+              "PRIVATE"
+              "PRIVATE_PARAMETERS"
+              "PRIVATE_PARAMS_S"
               "PRIVILEGES"
+              "PRUNE"
               "PUBLIC"
-              "RANK"
+              "QUOTES"
               "READ"
               "RELATIVE"
               "REPEATABLE"
+              "RESPECT"
               "RESTART"
+              "RESTRICT"
               "RETURNED_CARDINALITY"
               "RETURNED_LENGTH"
               "RETURNED_OCTET_LENGTH"
               "RETURNED_SQLSTATE"
+              "RETURNING"
+              "RETURNS_ONLY_PASS_THROUGH"
+              "RET_ONLY_PASS_THRU"
               "ROLE"
               "ROUTINE"
               "ROUTINE_CATALOG"
               "ROUTINE_NAME"
               "ROUTINE_SCHEMA"
               "ROW_COUNT"
-              "ROW_NUMBER"
+              "SCALAR"
               "SCALE"
               "SCHEMA"
               "SCHEMA_NAME"
@@ -480,19 +607,23 @@ module Lexer =
               "SOURCE"
               "SPACE"
               "SPECIFIC_NAME"
-              "SQRT"
+              "START_CATALOG"
+              "START_NAME"
+              "START_PROCEDURE_SPECIFIC_CATALOG"
+              "START_PROCEDURE_SPECIFIC_NAME"
+              "START_PROCEDURE_SPECIFIC_SCHEMA"
+              "START_SCHEMA"
               "STATE"
               "STATEMENT"
-              "STDDEV_POP"
-              "STDDEV_SAMP"
+              "STRING"
               "STRUCTURE"
               "STYLE"
               "SUBCLASS_ORIGIN"
-              "SUBSTRING"
-              "SUM"
-              "TABLESAMPLE"
+              "T"
               "TABLE_NAME"
+              "TABLE_SEMANTICS"
               "TEMPORARY"
+              "THROUGH"
               "TIES"
               "TOP_LEVEL_COUNT"
               "TRANSACTION"
@@ -501,14 +632,13 @@ module Lexer =
               "TRANSACTION_ACTIVE"
               "TRANSFORM"
               "TRANSFORMS"
-              "TRANSLATE"
               "TRIGGER_CATALOG"
               "TRIGGER_NAME"
               "TRIGGER_SCHEMA"
-              "TRIM"
               "TYPE"
               "UNBOUNDED"
               "UNCOMMITTED"
+              "UNCONDITIONAL"
               "UNDER"
               "UNNAMED"
               "USAGE"
@@ -516,8 +646,12 @@ module Lexer =
               "USER_DEFINED_TYPE_CODE"
               "USER_DEFINED_TYPE_NAME"
               "USER_DEFINED_TYPE_SCHEMA"
+              "UTF16"
+              "UTF32"
+              "UTF8"
               "VIEW"
               "WORK"
+              "WRAPPER"
               "WRITE"
               "ZONE" ]
 
@@ -534,58 +668,109 @@ module Lexer =
             else
                 fail "not a reserved word"
 
-    let pKeyword s : Parser<string, unit> =
+    let pKeyword s =
         attempt (pstringCI s .>> notFollowedBy (asciiLetter <|> digit <|> pchar '_'))
         .>> ws
 
-    let pIdentifier: Parser<string, unit> =
-        let isIdentifierFirstChar c = isLetter c || c = '_'
-        let isIdentifierChar c = isLetter c || isDigit c || c = '_'
+    let isIdentifierFirstChar c = isLetter c || c = '_'
+    let isIdentifierChar c = isLetter c || isDigit c || c = '_'
 
+    let pIdentifierRaw =
+        many1Satisfy2L isIdentifierFirstChar isIdentifierChar "identifier"
+        |>> (fun s -> s.ToUpperInvariant())
+        .>> ws
+
+    let pIdentifier =
         let pRegularIdentifier =
             attempt (
-                many1Satisfy2L isIdentifierFirstChar isIdentifierChar "identifier"
+                pIdentifierRaw
                 >>= fun s ->
-                    let upper = s.ToUpperInvariant()
-
-                    if reservedWords.Contains upper then
+                    if reservedWords.Contains s then
                         fail "reserved word"
                     else
-                        preturn upper
+                        preturn s
             )
 
         let pDelimitedIdentifier =
             between (pchar '\"') (pchar '\"') (manyChars (attempt (pstring "\"\"") >>% '\"' <|> noneOf "\""))
 
-        pRegularIdentifier <|> pDelimitedIdentifier .>> ws
+        let pUnicodeDelimitedIdentifier =
+            pchar 'U' >>. pchar '&' >>. pDelimitedIdentifier
+            .>>. opt (pKeyword "UESCAPE" >>. pchar '\'' >>. anyChar .>> pchar '\'')
+            |>> fun (id, esc) -> id
+
+        choice
+            [ attempt pUnicodeDelimitedIdentifier
+              pRegularIdentifier
+              pDelimitedIdentifier ]
+        .>> ws
 
     let pQuote = pchar '\''
     let pCharacterRepresentation = attempt (pstring "''") >>% '\'' <|> noneOf "'"
 
+    let pSeparator =
+        skipMany (
+            skipMany1 (pchar ' ' <|> pchar '\t' <|> pchar '\n' <|> pchar '\r')
+            <|> (attempt (pstring "--") >>. skipMany (noneOf "\n") >>. skipChar '\n')
+            <|> (attempt (pstring "/*") >>. skipCharsTillString "*/" true 10000 >>% ())
+        )
+
     let pCharacterStringLiteral: Parser<string, unit> =
-        between pQuote pQuote (manyChars pCharacterRepresentation)
-        .>>. many (attempt (ws >>. between pQuote pQuote (manyChars pCharacterRepresentation)))
+        let pSegment = between pQuote pQuote (manyChars pCharacterRepresentation)
+
+        pSegment .>>. many (attempt (pSeparator >>. pSegment))
         |>> fun (first, rest) -> String.concat "" (first :: rest)
         .>> ws
 
     let pNationalCharacterStringLiteral: Parser<string, unit> =
         pchar 'N' >>. pCharacterStringLiteral
 
+    let pHexit = hex <|> digit
+
     let pHexStringLiteral: Parser<byte[], unit> =
-        pchar 'X'
-        >>. between
+        let pSegment =
+            between
                 pQuote
                 pQuote
                 (many (
-                    hex <|> digit .>>. (hex <|> digit)
+                    pHexit .>>. pHexit
                     |>> fun (h1, h2) -> System.Convert.ToByte(sprintf "%c%c" h1 h2, 16)
                 ))
-        |>> List.toArray
+
+        pchar 'X' >>. pSegment .>>. many (attempt (pSeparator >>. pSegment))
+        |>> fun (first, rest) -> List.toArray (List.concat (first :: rest))
         .>> ws
+
+    let pUnicodeEscapeSpecifier =
+        opt (pKeyword "UESCAPE" >>. pQuote >>. anyChar .>> pQuote)
+
+    let pampersand = pchar '&'
+
+    [<TailCall>]
+    let rec loopCount p n acc =
+        if n = 0 then
+            preturn (List.rev acc)
+        else
+            p >>= fun x -> loopCount p (n - 1) (x :: acc)
+
+    let pCount n p = loopCount p n []
+
+    let pUnicode4DigitEscape =
+        pchar '\\' >>. pCount 4 pHexit
+        |>> fun chars -> System.Convert.ToChar(System.Convert.ToInt32(System.String(List.toArray chars), 16))
+
+    let pUnicode6DigitEscape =
+        pstring "\\+" >>. pCount 6 pHexit
+        |>> fun chars -> System.Char.ConvertFromUtf32(System.Convert.ToInt32(System.String(List.toArray chars), 16))
+
+    let pUnicodeCharacterStringLiteral: Parser<string, unit> =
+        pchar 'U' >>. pampersand >>. pCharacterStringLiteral
+        .>>. pUnicodeEscapeSpecifier
+        |>> fun (s, esc) -> s
 
     let pUnsignedInteger: Parser<uint64, unit> = many1Chars digit |>> uint64
 
-    let pExactNumericLiteral: Parser<decimal, unit> =
+    let pExactNumericLiteral =
         attempt (
             pipe2 (many1Chars digit) (opt (pchar '.' >>. manyChars digit)) (fun p f ->
                 match f with
@@ -595,7 +780,7 @@ module Lexer =
         <|> (pchar '.' >>. many1Chars digit |>> fun f -> decimal ("0." + f))
         .>> ws
 
-    let pApproximateNumericLiteral: Parser<decimal, unit> =
+    let pApproximateNumericLiteral =
         attempt (
             pipe3
                 pExactNumericLiteral
@@ -623,3 +808,8 @@ module Lexer =
         pKeyword "TRUE" >>% true
         <|> (pKeyword "FALSE" >>% false)
         <|> (pKeyword "UNKNOWN" >>% false)
+
+    let pQuestionMark: Parser<char, unit> = pchar '?' .>> ws
+
+    let pHostParameter: Parser<string, unit> =
+        pchar ':' >>. pIdentifier |>> (fun name -> ":" + name) .>> ws

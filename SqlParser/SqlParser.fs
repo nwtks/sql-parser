@@ -8,13 +8,28 @@ open SqlParser.DmlParser
 open SqlParser.DdlParser
 
 module SqlParser =
-    let withStmtPosition (p: Parser<StatementKind, unit>) : Parser<Statement, unit> =
+    let withStmtPosition p =
         getPosition .>>. p
         |>> fun (pos, kind) ->
             { Kind = kind
               Pos = { Line = pos.Line; Column = pos.Column } }
 
-    let pStatement, pStatementRef = createParserForwardedToRef<Statement, unit> ()
+    let pDml =
+        choice
+            [ attempt (pQuery |>> Select)
+              pInsertStatement
+              pUpdateStatement
+              pDeleteStatement
+              pMergeStatement ]
+
+    let pDdl =
+        choice
+            [ attempt pCreateTableStatement
+              attempt pCreateIndexStatement
+              attempt pCreateViewStatement
+              pDropStatement
+              pAlterTableStatement
+              pTruncateStatement ]
 
     let pWithStatement =
         let pCte =
@@ -29,25 +44,18 @@ module SqlParser =
 
         pKeyword "WITH" >>. opt (pKeyword "RECURSIVE" >>% true)
         .>>. sepBy1 pCte (token (pstring ","))
-        .>>. pStatement
+        .>>. (pDml |> withStmtPosition)
         |>> fun ((recu, ctes), stmt) ->
             { Kind = WithStatement(Option.defaultValue false recu, ctes, stmt.Kind)
               Pos = stmt.Pos }
 
+    let pStatement, pStatementRef = createParserForwardedToRef<Statement, unit> ()
+
     pStatementRef.Value <-
         choice
             [ attempt pWithStatement
-              attempt (pQuery |>> Select |> withStmtPosition)
-              attempt (pInsertStatement |> withStmtPosition)
-              attempt (pUpdateStatement |> withStmtPosition)
-              attempt (pDeleteStatement |> withStmtPosition)
-              attempt (pMergeStatement |> withStmtPosition)
-              attempt (pCreateTableStatement |> withStmtPosition)
-              attempt (pCreateIndexStatement |> withStmtPosition)
-              attempt (pCreateViewStatement |> withStmtPosition)
-              attempt (pDropStatement |> withStmtPosition)
-              attempt (pAlterTableStatement |> withStmtPosition)
-              attempt (pTruncateStatement |> withStmtPosition) ]
+              attempt (pDml |> withStmtPosition)
+              attempt (pDdl |> withStmtPosition) ]
 
     let parse sql =
         match run (ws >>. pStatement .>> eof) sql with

@@ -11,9 +11,7 @@ let parse sql =
 
 [<Fact>]
 let ``CREATE TABLE verification`` () =
-    let sql = "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100) NOT NULL)"
-
-    match parse sql with
+    match parse "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100) NOT NULL)" with
     | CreateTable { Table = "USERS"
                     Columns = [ id; name ] } ->
         Assert.Equal("ID", id.Name)
@@ -26,9 +24,7 @@ let ``CREATE TABLE verification`` () =
 
 [<Fact>]
 let ``CREATE INDEX verification`` () =
-    let sql = "CREATE UNIQUE INDEX idx_name ON users (name)"
-
-    match parse sql with
+    match parse "CREATE UNIQUE INDEX idx_name ON users (name)" with
     | CreateIndex { Name = "IDX_NAME"
                     Table = "USERS"
                     Columns = [ "NAME" ]
@@ -43,26 +39,20 @@ let ``DROP statements verification`` () =
 
 [<Fact>]
 let ``CREATE VIEW verification`` () =
-    let sql = "CREATE VIEW my_view AS SELECT * FROM t1"
-
-    match parse sql with
+    match parse "CREATE VIEW my_view AS SELECT * FROM t1" with
     | CreateView { Name = "MY_VIEW"
                    Query = SelectQuery _ } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateView, got %A" res)
 
 [<Fact>]
 let ``ALTER TABLE verification`` () =
-    let sql = "ALTER TABLE users ADD COLUMN age INT"
-
-    match parse sql with
+    match parse "ALTER TABLE users ADD COLUMN age INT" with
     | AlterTable { Table = "USERS"
                    Action = AddColumn { Name = "AGE"; DataType = Integer } } -> ()
     | res -> Assert.Fail(sprintf "Expected AlterTable, got %A" res)
 
 [<Fact>]
 let ``TRUNCATE TABLE verification`` () =
-    let sql = "TRUNCATE TABLE logs"
-
-    match parse sql with
+    match parse "TRUNCATE TABLE logs" with
     | Truncate "LOGS" -> ()
     | res -> Assert.Fail(sprintf "Expected Truncate, got %A" res)

@@ -49,9 +49,12 @@ module Types =
 
     let pBinaryType =
         choice
-            [ attempt (pKeyword "BINARY" .>> pKeyword "LARGE" .>> pKeyword "OBJECT")
+            [ attempt (pKeyword "BINARY" .>> pKeyword "VARYING") >>% VarBinary
+              pKeyword "VARBINARY" >>% VarBinary
+              attempt (pKeyword "BINARY" .>> pKeyword "LARGE" .>> pKeyword "OBJECT")
               >>% BinaryLargeObject
-              pKeyword "BLOB" >>% BinaryLargeObject ]
+              pKeyword "BLOB" >>% BinaryLargeObject
+              pKeyword "BINARY" >>% Binary ]
         .>>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
         |>> fun (typ, len) -> typ len
 
@@ -85,6 +88,9 @@ module Types =
                       | Some(p, s) -> p, s
                       | None -> None, None
                   )
+              pKeyword "DECFLOAT"
+              >>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
+              |>> DecFloat
               pKeyword "SMALLINT" >>% SmallInt
               pKeyword "INTEGER" >>% Integer
               pKeyword "INT" >>% Integer
@@ -99,15 +105,21 @@ module Types =
               attempt (pKeyword "DOUBLE" .>> pKeyword "PRECISION") >>% DoublePrecision ]
 
     let pDateTimeType =
+        let pTz =
+            opt (pKeyword "WITH" <|> pKeyword "WITHOUT" .>> pKeyword "TIME" .>> pKeyword "ZONE")
+            |>> function
+                | Some "WITH" -> true
+                | _ -> false
+
         choice
             [ pKeyword "DATE" >>% DateType
               pKeyword "TIME"
               >>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
-              .>>. (opt (pKeyword "WITH" >>. pKeyword "TIME" >>. pKeyword "ZONE") |>> Option.isSome)
+              .>>. pTz
               |>> fun (p, tz) -> TimeType(p, tz)
               pKeyword "TIMESTAMP"
               >>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
-              .>>. (opt (pKeyword "WITH" >>. pKeyword "TIME" >>. pKeyword "ZONE") |>> Option.isSome)
+              .>>. pTz
               |>> fun (p, tz) -> TimestampType(p, tz) ]
 
     let pIntervalType =
@@ -121,6 +133,15 @@ module Types =
                 (sepBy1 (pIdentifier .>>. pDataType) (token (pstring ",")))
         |>> RowType
 
+    let pCollectionType =
+        pDataType
+        .>>. choice
+            [ pKeyword "ARRAY"
+              .>>. opt (between (token (pstring "[")) (token (pstring "]")) pUnsignedInteger)
+              |>> fun (_, len) -> fun t -> ArrayType(t, Option.map int len)
+              pKeyword "MULTISET" >>% MultisetType ]
+        |>> fun (t, f) -> f t
+
     pDataTypeRef.Value <-
         choice
             [ attempt pCharacterType
@@ -132,4 +153,5 @@ module Types =
               attempt pDateTimeType
               attempt pIntervalType
               attempt pRowType
+              attempt pCollectionType
               pIdentifier |>> UserDefinedType ]

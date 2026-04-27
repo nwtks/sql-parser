@@ -11,9 +11,7 @@ let parse sql =
 
 [<Fact>]
 let ``INSERT verification`` () =
-    let sql = "INSERT INTO users (id, name) VALUES (1, 'alice')"
-
-    match parse sql with
+    match parse "INSERT INTO users (id, name) VALUES (1, 'alice')" with
     | Insert { Table = "USERS"
                Columns = Some [ "ID"; "NAME" ]
                Source = Values [ [ { Kind = Literal(Number 1m) }; { Kind = Literal(String "alice") } ] ] } -> ()
@@ -21,9 +19,7 @@ let ``INSERT verification`` () =
 
 [<Fact>]
 let ``UPDATE verification`` () =
-    let sql = "UPDATE users SET name = 'bob' WHERE id = 1"
-
-    match parse sql with
+    match parse "UPDATE users SET name = 'bob' WHERE id = 1" with
     | Update { Table = "USERS"
                Set = [ "NAME", { Kind = Literal(String "bob") } ]
                Where = Some { Kind = BinaryOp(Equal, { Kind = Identifier "ID" }, { Kind = Literal(Number 1m) }) } } ->
@@ -32,9 +28,7 @@ let ``UPDATE verification`` () =
 
 [<Fact>]
 let ``DELETE verification`` () =
-    let sql = "DELETE FROM users WHERE id = 1"
-
-    match parse sql with
+    match parse "DELETE FROM users WHERE id = 1" with
     | Delete { Table = "USERS"
                Where = Some { Kind = BinaryOp(Equal, { Kind = Identifier "ID" }, { Kind = Literal(Number 1m) }) } } ->
         ()
@@ -42,10 +36,10 @@ let ``DELETE verification`` () =
 
 [<Fact>]
 let ``MERGE verification`` () =
-    let sql =
-        "MERGE INTO target AS t USING source AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name WHEN NOT MATCHED THEN INSERT (id, name) VALUES (s.id, s.name)"
-
-    match parse sql with
+    match
+        parse
+            "MERGE INTO target AS t USING source AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name WHEN NOT MATCHED THEN INSERT (id, name) VALUES (s.id, s.name)"
+    with
     | Merge { Target = "TARGET"
               TargetAlias = Some "T"
               On = { Kind = BinaryOp(Equal,

@@ -1,73 +1,72 @@
-# SQL-2003 Parser for F#
+# SQL Parser in F#
 
-A robust SQL parser implemented in F# using the [FParsec](https://www.quanttec.com/fparsec/) library, specifically designed to align with the **ISO/IEC 9075:2003 (SQL-2003)** standard.
+A SQL parser implemented in F# using [FParsec](https://www.quanttec.com/fparsec/), aligned with the **SQL-2016 foundation grammar**. This implementation is based on the [SQL-2016 Foundation Grammar](https://raw.githubusercontent.com/JakeWheat/sql-overview/refs/heads/master/sql-2016-foundation-grammar.txt) provided by the [sql-overview](https://github.com/JakeWheat/sql-overview) project.
 
 ## Features
 
-### 1. Lexical Analysis
-- **Standard Keywords**: Full support for approx. 700 SQL-2003 reserved and non-reserved words.
-- **Identifiers**: Support for regular identifiers, delimited identifiers (`"id"`), and Unicode escaping.
-- **Literals**: Comprehensive literal parsing including:
-    - Numeric (Exact and Approximate)
-    - Character strings, National strings (`N'...'`), and Hex strings (`X'...'`)
-    - DateTime literals (`DATE`, `TIME`, `TIMESTAMP`)
-    - Boolean literals (`TRUE`, `FALSE`, `UNKNOWN`)
-    - Intervals
+### 🔍 Querying (SELECT)
+- **Standard Clauses**: `SELECT` (including `DISTINCT`/`ALL`), `FROM`, `WHERE`, `GROUP BY`, `HAVING`, `WINDOW`, `ORDER BY`.
+- **Advanced Clauses**: `OFFSET`, `FETCH FIRST/NEXT` (with `PERCENT` and `WITH TIES`).
+- **Set Operations**: `UNION`, `INTERSECT`, `EXCEPT` (with `ALL`/`DISTINCT` and `CORRESPONDING`).
+- **Window Functions**: Full support for `OVER` clauses, partition by, order by, and frame definitions (`ROWS`/`RANGE` between boundaries).
+- **Common Table Expressions (CTEs)**: Support for `WITH` and `WITH RECURSIVE`.
 
-### 2. Expression Parsing
-- **Operator Precedence**: Correct handling of SQL operator precedence (Concatenation, Arithmetic, Comparison, Boolean).
-- **Special Expressions**: Support for `CASE`, `CAST`, function calls, and subqueries within expressions.
+### 📝 Data Manipulation (DML)
+- `INSERT INTO ... VALUES / SELECT`
+- `UPDATE ... SET ... WHERE`
+- `DELETE FROM ... WHERE`
+- `MERGE INTO ... USING ... ON ...`
+- `TRUNCATE TABLE`
 
-### 3. Query & DML
-- **SELECT**: Supports `JOIN` (Inner, Left, Right, Full, Cross), `WHERE`, `GROUP BY`, `HAVING`, and `ORDER BY`.
-- **Set Operations**: `UNION`, `INTERSECT`, and `EXCEPT` (including `ALL` qualifier).
-- **CTEs**: Common Table Expressions using `WITH` and `WITH RECURSIVE`.
-- **DML**: Full support for `INSERT`, `UPDATE`, `DELETE`, and the standard `MERGE` statement.
+### 🏗️ Data Definition (DDL)
+- `CREATE TABLE` (including column constraints like `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, `CHECK`, `REFERENCES`).
+- `CREATE INDEX` (including `UNIQUE`).
+- `CREATE VIEW`.
+- `DROP` (Table, View, Index).
+- `ALTER TABLE` (Add/Drop column/constraint, Alter column).
 
-### 4. Basic DDL
-- **CREATE TABLE**: Support for column definitions, data types, and basic constraints.
-- **CREATE INDEX**: Support for unique and standard indexes.
+### 🔢 Expressions & Types
+- **Operators**: Arithmetic (`+`, `-`, `*`, `/`), Comparison (`=`, `<>`, `<`, `<=`, `>`, `>=`), Logical (`AND`, `OR`, `NOT`), Concatenation (`||`).
+- **Predicates**: `BETWEEN`, `IN`, `LIKE`, `SIMILAR TO`, `IS NULL`, `IS TRUE/FALSE/UNKNOWN`.
+- **Functions**: `EXTRACT`, `POSITION`, `TRIM`, `CAST`, `CASE`, `COALESCE`, `NULLIF`.
+- **Types**: Full SQL type system including `VARCHAR`, `NUMERIC`, `TIMESTAMP WITH TIME ZONE`, `INTERVAL`, `ARRAY`, `ROW`, etc.
+- **Literals**: String, Hex (`X'...'`), Unicode (`U&'...'`), Binary, Date/Time, Numeric, Boolean.
+
+## Usage
+
+### Parsing a Statement
+
+```fsharp
+open SqlParser
+
+let sql = "SELECT name, SUM(salary) OVER (PARTITION BY dept) FROM employees WHERE active = TRUE"
+
+match SqlParser.parse sql with
+| Choice1Of2 stmt ->
+    printfn "Successfully parsed statement of kind: %A" stmt.Kind
+| Choice2Of2 (ParseError(msg, pos)) ->
+    printfn "Parse error: %s at line %d, col %d" msg pos.Line pos.Column
+```
 
 ## Project Structure
 
-The parser is designed with a modular architecture:
-- `Lexer.fs`: Lexical tokens and basic elements.
-- `Ast.fs`: Strongly typed Abstract Syntax Tree.
-- `Types.fs`: SQL-2003 data types.
-- `ExpressionParser.fs`: Scalar expression and operator precedence logic.
-- `QueryParser.fs`: SELECT and set operation structures.
-- `DmlParser.fs`: INSERT, UPDATE, DELETE, and MERGE logic.
-- `DdlParser.fs`: CREATE TABLE and CREATE INDEX logic.
-- `SqlParser.fs`: Main entry point and CTE handling.
+- `Ast.fs`: Defines the Abstract Syntax Tree (AST) for SQL statements and expressions.
+- `Lexer.fs`: Contains the lexing logic, reserved words, and literal parsers.
+- `Types.fs`: Parsers for SQL data types.
+- `ExpressionParser.fs`: Handles operator precedence and expression parsing.
+- `QueryParser.fs`: Main logic for `SELECT` queries and set operations.
+- `DmlParser.fs`: Parsers for `INSERT`, `UPDATE`, `DELETE`, `MERGE`.
+- `DdlParser.fs`: Parsers for schema modification statements.
+- `SqlParser.fs`: Main entry point and `WITH` clause handling.
 
-## Getting Started
+## Running Tests
 
-### Prerequisites
-- .NET 8.0 SDK or later.
+The project uses xUnit for testing. To run the tests:
 
-### Running Tests
-The project includes a comprehensive test suite in `SqlParser.Tests`.
 ```bash
 dotnet test
 ```
 
-### Usage Example
-```fsharp
-open SqlParser
-
-let sql = "SELECT id, name FROM users WHERE age > 18"
-match SqlParser.parse sql with
-| Choice1Of2 (stmt, pos) -> 
-    printfn "Successfully parsed statement at line %d" pos.Line
-| Choice2Of2 (ParseError (msg, pos)) -> 
-    printfn "Parse error: %s at %d:%d" msg pos.Line pos.Column
-```
-
-## Current Status
-- **Phase 1 (Foundation)**: 100% Complete.
-- **Phase 2 (Scalar Expressions)**: 100% Complete.
-- **Phase 3 (Query, DML & DDL)**: Core features implemented.
-- **Verification**: 22/23 unit tests passing.
-
 ## License
+
 This project is licensed under the MIT License.
