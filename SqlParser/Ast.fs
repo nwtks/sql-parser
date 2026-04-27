@@ -17,8 +17,6 @@ type BinaryOperator =
     | And
     | Or
     | Concatenate
-    | StringLike
-    | SimilarTo
 
 type UnaryOperator =
     | Not
@@ -115,6 +113,12 @@ type ExpressionKind =
     | InSubquery of Expression * bool * Query // expr, isNot, subquery
     | IsNull of Expression * bool // expr, isNot
     | IsBoolean of Expression * bool * bool option // expr, isNot, value (Some true=TRUE, Some false=FALSE, None=UNKNOWN)
+    | Exists of Query
+    | Unique of Query
+    | IsDistinctFrom of Expression * bool * Expression // l, isNot, r
+    | Overlaps of Expression * Expression
+    | Like of Expression * bool * Expression * Expression option // source, isNot, pattern, escape
+    | SimilarTo of Expression * bool * Expression * Expression option // source, isNot, pattern, escape
     | Extract of string * Expression // field, source
     | Position of Expression * Expression * string option // target, source, unit
     | Trim of string option * Expression option * Expression // specification, character, source

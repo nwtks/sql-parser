@@ -219,6 +219,26 @@ module ExpressionParser =
         |>> (fun ((spec, char), source) -> Trim(spec, char, source))
         |> withExprPosition
 
+    let pFunctionCallExpr =
+        let pArgs =
+            between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (opt (pKeyword "DISTINCT" >>% true <|> (pKeyword "ALL" >>% false))
+                 .>>. sepBy pExpression (token (pstring ",")))
+
+        pIdentifierRaw .>>. pArgs .>>. opt pWindowDefinition
+        |>> fun ((name, (dist, args)), window) ->
+            match window with
+            | Some w ->
+                WindowFunction
+                    { Function = name
+                      Args = args
+                      IsDistinct = Option.defaultValue false dist
+                      Window = w }
+            | None -> FunctionCall(name, Option.defaultValue false dist, args, None)
+        |> withExprPosition
+
     let pQuery, pQueryRef = createParserForwardedToRef<Query, unit> ()
 
     let pSubqueryExpr =
@@ -284,26 +304,48 @@ module ExpressionParser =
                               | Choice2Of2 b -> IsBoolean(e, Option.isSome isNot, b)
 
                           { Expression.Kind = kind; Pos = e.Pos }
+              )
+              attempt (
+                  pKeyword "IS" >>. opt (pKeyword "NOT")
+                  .>> pKeyword "DISTINCT"
+                  .>> pKeyword "FROM"
+                  .>>. pExpr
+                  |>> fun (isNot, r) ->
+                      fun l ->
+                          { Kind = IsDistinctFrom(l, Option.isSome isNot, r)
+                            Pos = l.Pos }
+              )
+              attempt (
+                  pKeyword "OVERLAPS" >>. pExpr
+                  |>> fun r -> fun l -> { Kind = Overlaps(l, r); Pos = l.Pos }
+              )
+              attempt (
+                  opt (pKeyword "NOT") .>> pKeyword "LIKE"
+                  .>>. pExpr
+                  .>>. opt (pKeyword "ESCAPE" >>. pExpr)
+                  |>> fun ((isNot, pattern), escape) ->
+                      fun l ->
+                          { Kind = Like(l, Option.isSome isNot, pattern, escape)
+                            Pos = l.Pos }
+              )
+              attempt (
+                  opt (pKeyword "NOT") .>> attempt (pKeyword "SIMILAR" .>> pKeyword "TO")
+                  .>>. pExpr
+                  .>>. opt (pKeyword "ESCAPE" >>. pExpr)
+                  |>> fun ((isNot, pattern), escape) ->
+                      fun l ->
+                          { Kind = SimilarTo(l, Option.isSome isNot, pattern, escape)
+                            Pos = l.Pos }
               ) ]
 
-    let pFunctionCallExpr =
-        let pArgs =
-            between
-                (token (pstring "("))
-                (token (pstring ")"))
-                (opt (pKeyword "DISTINCT" >>% true <|> (pKeyword "ALL" >>% false))
-                 .>>. sepBy pExpression (token (pstring ",")))
+    let pExistsExpr =
+        pKeyword "EXISTS" >>. between (token (pstring "(")) (token (pstring ")")) pQuery
+        |>> Exists
+        |> withExprPosition
 
-        pIdentifierRaw .>>. pArgs .>>. opt pWindowDefinition
-        |>> fun ((name, (dist, args)), window) ->
-            match window with
-            | Some w ->
-                WindowFunction
-                    { Function = name
-                      Args = args
-                      IsDistinct = Option.defaultValue false dist
-                      Window = w }
-            | None -> FunctionCall(name, Option.defaultValue false dist, args, None)
+    let pUniqueExpr =
+        pKeyword "UNIQUE" >>. between (token (pstring "(")) (token (pstring ")")) pQuery
+        |>> Unique
         |> withExprPosition
 
     let pTerm =
@@ -317,6 +359,8 @@ module ExpressionParser =
               attempt pTrimExpr
               attempt pFunctionCallExpr
               attempt pSubqueryExpr
+              attempt pExistsExpr
+              attempt pUniqueExpr
               attempt pLiteralExpr
               attempt pParameterExpr
               attempt pStarExpr
@@ -348,32 +392,6 @@ module ExpressionParser =
     addInfix "<=" 5 Associativity.Left (fun x y -> BinaryOp(LessThanOrEqual, x, y))
     addInfix ">" 5 Associativity.Left (fun x y -> BinaryOp(GreaterThan, x, y))
     addInfix ">=" 5 Associativity.Left (fun x y -> BinaryOp(GreaterThanOrEqual, x, y))
-
-    let wsWord = notFollowedBy (asciiLetter <|> digit <|> pchar '_') >>. ws
-
-    opp.AddOperator(
-        InfixOperator(
-            "LIKE",
-            wsWord,
-            5,
-            Associativity.Left,
-            fun x y ->
-                { Kind = BinaryOp(StringLike, x, y)
-                  Pos = x.Pos }
-        )
-    )
-
-    opp.AddOperator(
-        InfixOperator(
-            "SIMILAR TO",
-            wsWord,
-            5,
-            Associativity.Left,
-            fun x y ->
-                { Kind = BinaryOp(SimilarTo, x, y)
-                  Pos = x.Pos }
-        )
-    )
 
     let pPredicateExpr =
         opp.ExpressionParser .>>. many (pPredicateSuffix opp.ExpressionParser)
