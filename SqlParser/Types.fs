@@ -1,13 +1,13 @@
 namespace SqlParser
 
 open FParsec
-open SqlParser.Ast
 open SqlParser.Lexer
+open SqlParser.ExpressionParser
 
 module Types =
-    let pUnsignedInteger = pUnsignedInteger
+    let pDataType = ExpressionParser.pDataType
 
-    let pDataType, pDataTypeRef = createParserForwardedToRef<DataType, unit> ()
+    let pUnsignedInteger = pUnsignedInteger
 
     let pCharacterType =
         choice
@@ -130,7 +130,7 @@ module Types =
         >>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (sepBy1 (pIdentifier .>>. pDataType) (token (pstring ",")))
+                (sepBy1 (pIdentifierExpr .>>. pDataType) (token (pstring ",")))
         |>> RowType
 
     let pCollectionType =
@@ -154,4 +154,4 @@ module Types =
               attempt pIntervalType
               attempt pRowType
               attempt pCollectionType
-              pIdentifier |>> UserDefinedType ]
+              pIdentifierExpr |>> UserDefinedType ]

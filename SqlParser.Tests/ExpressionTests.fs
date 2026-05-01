@@ -2,14 +2,12 @@ module SqlParser.Tests.ExpressionTests
 
 open Xunit
 open SqlParser
-open SqlParser.Ast
 
 let parseExpr sql =
     match SqlParser.parse sql with
-    | Choice1Of2 { Kind = Select(SelectQuery s)
-                   Pos = _ } -> s.Columns.[0] |> fun (Column(e, _)) -> e
-    | Choice1Of2 res -> failwithf "Expected Select, got %A" res
-    | Choice2Of2(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
+    | Ok { Kind = Select(SelectQuery s) } -> s.Columns.[0] |> fun (Column(e, _)) -> e
+    | Ok res -> failwithf "Expected Select, got %A" res
+    | Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
 
 let parse sql = (parseExpr sql).Kind
 
@@ -17,7 +15,7 @@ let parse sql = (parseExpr sql).Kind
 let ``Literal expressions verification`` () =
     Assert.Equal(Literal(Number 123m), parse "SELECT 123")
     Assert.Equal(Literal(String "hello"), parse "SELECT 'hello'")
-    Assert.Equal(Literal(Bool true), parse "SELECT TRUE")
+    Assert.Equal(Literal(Bool(Some true)), parse "SELECT TRUE")
     Assert.Equal(Literal Null, parse "SELECT NULL")
 
 [<Fact>]
@@ -44,7 +42,7 @@ let ``Case expression verification`` () =
 [<Fact>]
 let ``Function call verification`` () =
     match parse "SELECT COUNT(*)" with
-    | FunctionCall("COUNT", false, [ { Kind = Star } ], None) -> ()
+    | FunctionCall({ Kind = Identifier "COUNT" }, false, [ { Kind = Star } ], None) -> ()
     | res -> Assert.Fail(sprintf "Expected COUNT(*), got %A" res)
 
 [<Fact>]
@@ -58,13 +56,13 @@ let ``Expression precedence verification`` () =
 [<Fact>]
 let ``Aggregate functions verification`` () =
     match parse "SELECT COUNT(DISTINCT id)" with
-    | FunctionCall("COUNT", true, [ { Kind = Identifier "ID" } ], None) -> ()
+    | FunctionCall({ Kind = Identifier "COUNT" }, true, [ { Kind = Identifier "ID" } ], None) -> ()
     | res -> Assert.Fail(sprintf "Expected COUNT(DISTINCT id), got %A" res)
 
 [<Fact>]
 let ``Window functions verification`` () =
     match parse "SELECT ROW_NUMBER() OVER (ORDER BY id DESC)" with
-    | WindowFunction { Function = "ROW_NUMBER"
+    | WindowFunction { Function = { Kind = Identifier "ROW_NUMBER" }
                        Args = []
                        IsDistinct = false
                        Window = { ExistingWindowName = None
@@ -77,7 +75,7 @@ let ``Window functions verification`` () =
     | res -> Assert.Fail(sprintf "Expected ROW_NUMBER() OVER ..., got %A" res)
 
     match parse "SELECT SUM(salary) OVER (PARTITION BY dept_id ORDER BY hire_date)" with
-    | WindowFunction { Function = "SUM"
+    | WindowFunction { Function = { Kind = Identifier "SUM" }
                        Args = [ { Kind = Identifier "SALARY" } ]
                        IsDistinct = false
                        Window = { ExistingWindowName = None

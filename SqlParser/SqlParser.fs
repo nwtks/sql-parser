@@ -1,14 +1,15 @@
 namespace SqlParser
 
 open FParsec
-open SqlParser.Ast
 open SqlParser.Lexer
-open SqlParser.QueryParser
 open SqlParser.DmlParser
 open SqlParser.DdlParser
 open SqlParser.ExpressionParser
+open SqlParser.QueryParser
 
 module SqlParser =
+    let pStatement, pStatementRef = createParserForwardedToRef<Statement, unit> ()
+
     let withStmtPosition p =
         getPosition .>>. p
         |>> fun (pos, kind) ->
@@ -38,8 +39,6 @@ module SqlParser =
             { Kind = WithStatement(recu, ctes, stmt.Kind)
               Pos = stmt.Pos }
 
-    let pStatement, pStatementRef = createParserForwardedToRef<Statement, unit> ()
-
     pStatementRef.Value <-
         choice
             [ attempt pWithStatement
@@ -48,9 +47,9 @@ module SqlParser =
 
     let parse sql =
         match run (ws >>. pStatement .>> eof) sql with
-        | Success(res, _, _) -> Choice1Of2 res
+        | Success(res, _, _) -> Result.Ok res
         | Failure(msg, error, _) ->
-            Choice2Of2(
+            Result.Error(
                 ParseError(
                     msg,
                     { Line = int64 error.Position.Line

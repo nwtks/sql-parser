@@ -1,12 +1,12 @@
 namespace SqlParser
 
 open FParsec
-open SqlParser.Ast
 open SqlParser.Lexer
-open SqlParser.Types
 
 module ExpressionParser =
     let pExpression, pExpressionRef = createParserForwardedToRef<Expression, unit> ()
+    let pDataType, pDataTypeRef = createParserForwardedToRef<DataType, unit> ()
+    let pQuery, pQueryRef = createParserForwardedToRef<Query, unit> ()
 
     let withExprPosition p =
         getPosition .>>. p
@@ -16,15 +16,16 @@ module ExpressionParser =
 
     let pLiteralExpr =
         choice
-            [ attempt (pCharacterStringLiteral |>> String |>> Literal)
+            [ attempt (pKeyword "NULL" >>% Null |>> Literal)
+              attempt (pCharacterStringLiteral |>> String |>> Literal)
+              attempt (pNationalCharacterStringLiteral |>> NationalString |>> Literal)
+              attempt (pUnicodeCharacterStringLiteral |>> UnicodeString |>> Literal)
               attempt (pNumericLiteral |>> Number |>> Literal)
               attempt (pBooleanLiteral |>> Bool |>> Literal)
-              attempt (pKeyword "NULL" >>% Null |>> Literal)
               attempt (pDateLiteral |>> Date |>> Literal)
               attempt (pTimeLiteral |>> Time |>> Literal)
               attempt (pTimestampLiteral |>> Timestamp |>> Literal)
-              attempt (pHexStringLiteral |>> Ast.Binary |>> Literal)
-              attempt (pNationalCharacterStringLiteral |>> NationalString |>> Literal) ]
+              attempt (pHexStringLiteral |>> Literal.Binary |>> Literal) ]
         |> withExprPosition
 
     let pIdentifierExpr = pIdentifier |>> Identifier |> withExprPosition
@@ -89,34 +90,10 @@ module ExpressionParser =
             )
         |> withExprPosition
 
-    [<TailCall>]
-    let rec buildCoalesce acc =
-        function
-        | [] -> acc
-        | e :: tail ->
-            let newAcc =
-                Case(
-                    None,
-                    [ ({ Kind =
-                          UnaryOp(
-                              Not,
-                              { Kind = BinaryOp(Equal, e, { Kind = Literal Null; Pos = e.Pos })
-                                Pos = e.Pos }
-                          )
-                         Pos = e.Pos },
-                       e) ],
-                    Some { Kind = acc; Pos = e.Pos }
-                )
-
-            tail |> buildCoalesce newAcc
-
     let pCoalesceExpr =
         pKeyword "COALESCE"
         >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ",")))
-        |>> fun exprs ->
-            match List.rev exprs with
-            | [] -> Literal Null
-            | last :: rest -> buildCoalesce last.Kind rest
+        |>> fun exprs -> Case(None, exprs |> List.map (fun e -> { Kind = IsNull(e, true); Pos = e.Pos }, e), None)
         |> withExprPosition
 
     let pCaseExpr =
@@ -175,13 +152,16 @@ module ExpressionParser =
         >>. (between
                  (token (pstring "("))
                  (token (pstring ")"))
-                 (opt pIdentifier .>>. opt pPartitionBy .>>. opt pOrderBy .>>. opt pWindowFrame
+                 (opt pIdentifierExpr
+                  .>>. opt pPartitionBy
+                  .>>. opt pOrderBy
+                  .>>. opt pWindowFrame
                   |>> fun (((name, pb), ob), frame) ->
                       { ExistingWindowName = name
                         PartitionBy = Option.defaultValue [] pb
                         OrderBy = Option.defaultValue [] ob
                         Frame = frame })
-             <|> (pIdentifier
+             <|> (pIdentifierExpr
                   |>> fun name ->
                       { ExistingWindowName = Some name
                         PartitionBy = []
@@ -193,7 +173,7 @@ module ExpressionParser =
 
     let pExtractExpr =
         pKeyword "EXTRACT"
-        >>. between (token (pstring "(")) (token (pstring ")")) (pIdentifier .>> pKeyword "FROM" .>>. pExpression)
+        >>. between (token (pstring "(")) (token (pstring ")")) (pIdentifierExpr .>> pKeyword "FROM" .>>. pExpression)
         |>> Extract
         |> withExprPosition
 
@@ -204,8 +184,8 @@ module ExpressionParser =
                 (token (pstring ")"))
                 (pExpression .>> pKeyword "IN"
                  .>>. pExpression
-                 .>>. opt (pKeyword "USING" >>. pIdentifier))
-        |>> (fun ((target, source), unit) -> Position(target, source, unit))
+                 .>>. opt (pKeyword "USING" >>. pIdentifierExpr))
+        |>> (fun ((target, source), unit) -> ExpressionKind.Position(target, source, unit))
         |> withExprPosition
 
     let pTrimExpr =
@@ -227,7 +207,9 @@ module ExpressionParser =
                 (opt (pKeyword "DISTINCT" >>% true <|> (pKeyword "ALL" >>% false))
                  .>>. sepBy pExpression (token (pstring ",")))
 
-        pIdentifierRaw .>>. pArgs .>>. opt pWindowDefinition
+        pIdentifierRaw |>> Identifier |> withExprPosition
+        .>>. pArgs
+        .>>. opt pWindowDefinition
         |>> fun ((name, (dist, args)), window) ->
             match window with
             | Some w ->
@@ -239,16 +221,14 @@ module ExpressionParser =
             | None -> FunctionCall(name, Option.defaultValue false dist, args, None)
         |> withExprPosition
 
-    let pQuery, pQueryRef = createParserForwardedToRef<Query, unit> ()
-
     let pSubqueryExpr =
         between (token (pstring "(")) (token (pstring ")")) pQuery
         |>> SubqueryExpression
         |> withExprPosition
 
     let pCte =
-        pIdentifier
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifier (token (pstring ","))))
+        pIdentifierExpr
+        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ","))))
         .>> pKeyword "AS"
         .>>. between (token (pstring "(")) (token (pstring ")")) pQuery
         |>> fun ((name, cols), q) ->

@@ -52,6 +52,6 @@ let ``Date, Time, Timestamp literals are parsed correctly`` () =
 
 [<Fact>]
 let ``Boolean literals are parsed correctly`` () =
-    Assert.True(test pBooleanLiteral "TRUE")
-    Assert.False(test pBooleanLiteral "FALSE")
-    Assert.False(test pBooleanLiteral "UNKNOWN")
+    Assert.Equal(Some true, test pBooleanLiteral "TRUE")
+    Assert.Equal(Some false, test pBooleanLiteral "FALSE")
+    Assert.Equal(None, test pBooleanLiteral "UNKNOWN")

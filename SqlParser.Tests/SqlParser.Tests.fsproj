@@ -30,7 +30,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\SqlParser\SqlParser.fsproj" />
+    <ProjectReference Include="../SqlParser/SqlParser.fsproj" />
   </ItemGroup>
 
 </Project>

@@ -1,7 +1,6 @@
 namespace SqlParser
 
 open FParsec
-open SqlParser.Ast
 open SqlParser.Lexer
 open SqlParser.ExpressionParser
 open SqlParser.Types
@@ -9,7 +8,7 @@ open SqlParser.Types
 module DdlParser =
     let pColumnDefinition =
         pipe5
-            pIdentifier
+            pIdentifierExpr
             pDataType
             (opt (pKeyword "NOT" >>. pKeyword "NULL" >>% false <|> (pKeyword "NULL" >>% true)))
             (opt (pKeyword "PRIMARY" >>. pKeyword "KEY") |>> Option.isSome)
@@ -22,16 +21,16 @@ module DdlParser =
                   DefaultValue = def })
 
     let pCreateTableStatement =
-        pKeyword "CREATE" >>. pKeyword "TABLE" >>. pIdentifier
+        pKeyword "CREATE" >>. pKeyword "TABLE" >>. pIdentifierExpr
         .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pColumnDefinition (token (pstring ",")))
         |>> fun (name, cols) -> { Table = name; Columns = cols } |> CreateTable
 
     let pCreateIndexStatement =
         pKeyword "CREATE" >>. opt (pKeyword "UNIQUE" >>% true) .>> pKeyword "INDEX"
-        .>>. pIdentifier
+        .>>. pIdentifierExpr
         .>> pKeyword "ON"
-        .>>. pIdentifier
-        .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifier (token (pstring ",")))
+        .>>. pIdentifierExpr
+        .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
         |>> fun (((unique, name), table), cols) ->
             { Name = name
               Table = table
@@ -40,16 +39,16 @@ module DdlParser =
             |> CreateIndex
 
     let pCreateViewStatement =
-        pKeyword "CREATE" >>. pKeyword "VIEW" >>. pIdentifier .>> pKeyword "AS"
+        pKeyword "CREATE" >>. pKeyword "VIEW" >>. pIdentifierExpr .>> pKeyword "AS"
         .>>. pQuery
         |>> fun (name, query) -> { Name = name; Query = query } |> CreateView
 
     let pDropStatement =
         pKeyword "DROP"
         >>. choice
-                [ attempt (pKeyword "TABLE" >>. pIdentifier) |>> DropTable
-                  attempt (pKeyword "INDEX" >>. pIdentifier) |>> DropIndex
-                  attempt (pKeyword "VIEW" >>. pIdentifier) |>> DropView ]
+                [ attempt (pKeyword "TABLE" >>. pIdentifierExpr) |>> DropTable
+                  attempt (pKeyword "INDEX" >>. pIdentifierExpr) |>> DropIndex
+                  attempt (pKeyword "VIEW" >>. pIdentifierExpr) |>> DropView ]
         |>> Drop
 
     let pAlterTableStatement =
@@ -57,11 +56,11 @@ module DdlParser =
             choice
                 [ attempt (pKeyword "ADD" >>. opt (pKeyword "COLUMN") >>. pColumnDefinition)
                   |>> AddColumn
-                  attempt (pKeyword "DROP" >>. opt (pKeyword "COLUMN") >>. pIdentifier)
+                  attempt (pKeyword "DROP" >>. opt (pKeyword "COLUMN") >>. pIdentifierExpr)
                   |>> DropColumn ]
 
-        pKeyword "ALTER" >>. pKeyword "TABLE" >>. pIdentifier .>>. pAction
+        pKeyword "ALTER" >>. pKeyword "TABLE" >>. pIdentifierExpr .>>. pAction
         |>> fun (name, action) -> { Table = name; Action = action } |> AlterTable
 
     let pTruncateStatement =
-        pKeyword "TRUNCATE" >>. opt (pKeyword "TABLE") >>. pIdentifier |>> Truncate
+        pKeyword "TRUNCATE" >>. opt (pKeyword "TABLE") >>. pIdentifierExpr |>> Truncate

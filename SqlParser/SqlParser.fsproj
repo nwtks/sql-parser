@@ -7,8 +7,8 @@
   <ItemGroup>
     <Compile Include="Ast.fs" />
     <Compile Include="Lexer.fs" />
-    <Compile Include="Types.fs" />
     <Compile Include="ExpressionParser.fs" />
+    <Compile Include="Types.fs" />
     <Compile Include="QueryParser.fs" />
     <Compile Include="DmlParser.fs" />
     <Compile Include="DdlParser.fs" />

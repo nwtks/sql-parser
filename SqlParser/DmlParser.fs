@@ -1,15 +1,14 @@
 namespace SqlParser
 
 open FParsec
-open SqlParser.Ast
 open SqlParser.Lexer
 open SqlParser.ExpressionParser
 open SqlParser.QueryParser
 
 module DmlParser =
     let pInsertStatement =
-        pKeyword "INSERT" >>. pKeyword "INTO" >>. pIdentifier
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifier (token (pstring ","))))
+        pKeyword "INSERT" >>. pKeyword "INTO" >>. pIdentifierExpr
+        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ","))))
         .>>. (pKeyword "VALUES"
               >>. sepBy1
                       (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ","))))
@@ -23,8 +22,8 @@ module DmlParser =
             |> Insert
 
     let pUpdateStatement =
-        pKeyword "UPDATE" >>. pIdentifier .>> pKeyword "SET"
-        .>>. sepBy1 (pIdentifier .>> token (pstring "=") .>>. pExpression) (token (pstring ","))
+        pKeyword "UPDATE" >>. pIdentifierExpr .>> pKeyword "SET"
+        .>>. sepBy1 (pIdentifierExpr .>> token (pstring "=") .>>. pExpression) (token (pstring ","))
         .>>. opt (pKeyword "WHERE" >>. pExpression)
         |>> fun ((table, sets), whr) ->
             { Table = table
@@ -33,7 +32,7 @@ module DmlParser =
             |> Update
 
     let pDeleteStatement =
-        pKeyword "DELETE" >>. pKeyword "FROM" >>. pIdentifier
+        pKeyword "DELETE" >>. pKeyword "FROM" >>. pIdentifierExpr
         .>>. opt (pKeyword "WHERE" >>. pExpression)
         |>> fun (table, whr) -> { Table = table; Where = whr } |> Delete
 
@@ -41,12 +40,12 @@ module DmlParser =
         let pAction =
             choice
                 [ attempt (pKeyword "UPDATE" >>. pKeyword "SET")
-                  >>. sepBy1 (pIdentifier .>> token (pstring "=") .>>. pExpression) (token (pstring ","))
+                  >>. sepBy1 (pIdentifierExpr .>> token (pstring "=") .>>. pExpression) (token (pstring ","))
                   |>> MergeUpdate
                   pKeyword "DELETE" >>% MergeDelete
                   pKeyword "INSERT"
                   >>. opt (
-                      between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifier (token (pstring ",")))
+                      between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
                   )
                   .>> pKeyword "VALUES"
                   .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ",")))
@@ -65,8 +64,8 @@ module DmlParser =
                   Condition = filter
                   Action = action }
 
-        pKeyword "MERGE" >>. pKeyword "INTO" >>. pIdentifier
-        .>>. opt (opt (pKeyword "AS") >>. pIdentifier)
+        pKeyword "MERGE" >>. pKeyword "INTO" >>. pIdentifierExpr
+        .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
         .>> pKeyword "USING"
         .>>. pTableSource
         .>> pKeyword "ON"

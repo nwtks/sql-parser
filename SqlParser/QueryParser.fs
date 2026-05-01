@@ -1,22 +1,23 @@
 namespace SqlParser
 
 open FParsec
-open SqlParser.Ast
 open SqlParser.Lexer
 open SqlParser.ExpressionParser
 
 module QueryParser =
+    let pQuery = ExpressionParser.pQuery
+
     let withTablePosition p =
         getPosition .>>. p
         |>> fun (pos, kind) ->
             { TableSource.Kind = kind
               Pos = { Line = pos.Line; Column = pos.Column } }
 
-    let pAlias = attempt (pKeyword "AS") >>. pIdentifier <|> pIdentifier
+    let pAlias = attempt (pKeyword "AS") >>. pIdentifierExpr <|> pIdentifierExpr
 
     let pFullAlias =
         pAlias
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifier (token (pstring ","))))
+        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ","))))
 
     let pValuesSource =
         let pRow =
@@ -40,7 +41,7 @@ module QueryParser =
         choice
             [ pKeyword "ON" >>. pExpression |>> On
               pKeyword "USING"
-              >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifier (token (pstring ",")))
+              >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
               |>> Using ]
 
     let pColumnSource =
@@ -73,11 +74,11 @@ module QueryParser =
         >>. (pKeyword "UPDATE" >>% ForUpdate <|> (pKeyword "SHARE" >>% ForShare))
 
     let pWindowDefItem =
-        pIdentifier .>> pKeyword "AS"
+        pIdentifierExpr .>> pKeyword "AS"
         .>>. between
             (token (pstring "("))
             (token (pstring ")"))
-            (opt pIdentifier
+            (opt pIdentifierExpr
              .>>. opt (
                  pKeyword "PARTITION"
                  >>. pKeyword "BY"
@@ -110,7 +111,8 @@ module QueryParser =
               )
               |> withTablePosition
               attempt (between (token (pstring "(")) (token (pstring ")")) pTableSource)
-              attempt (pIdentifier .>>. opt (attempt pAlias) |>> Table) |> withTablePosition ]
+              attempt (pIdentifierExpr .>>. opt (attempt pAlias) |>> Table)
+              |> withTablePosition ]
 
     let pJoinedTableSuffix =
         opt (pKeyword "NATURAL" >>% true)
@@ -174,7 +176,7 @@ module QueryParser =
             pKeyword "CORRESPONDING"
             >>. opt (
                 pKeyword "BY"
-                >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifier (token (pstring ",")))
+                >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
             )
 
         let pOp opKind opStr =
@@ -190,8 +192,6 @@ module QueryParser =
                   Corresponding = corr }
 
         choice [ pOp Union "UNION"; pOp Intersect "INTERSECT"; pOp Except "EXCEPT" ]
-
-    let pQuery = ExpressionParser.pQuery
 
     pQueryRef.Value <-
         let pQueryBody =

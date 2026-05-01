@@ -2,36 +2,36 @@ module SqlParser.Tests.QueryTests
 
 open Xunit
 open SqlParser
-open SqlParser.Ast
 
 let parse sql =
     match SqlParser.parse sql with
-    | Choice1Of2 { Kind = res } -> res
-    | Choice2Of2(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
+    | Ok res -> res.Kind
+    | Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
 
 [<Fact>]
 let ``TableSource types verification`` () =
     match parse "SELECT * FROM users" with
     | Select(SelectQuery s) ->
         match s.From with
-        | Some { Kind = Table("USERS", None) } -> ()
-        | _ -> Assert.Fail "Expected Table"
-    | _ -> Assert.Fail "Expected Select"
+        | Some { Kind = Table({ Kind = Identifier "USERS" }, None) } -> ()
+        | res -> Assert.Fail(sprintf "Expected Table, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
     match parse "SELECT * FROM users AS u" with
     | Select(SelectQuery s) ->
         match s.From with
-        | Some { Kind = Table("USERS", Some "U") } -> ()
-        | _ -> Assert.Fail "Expected Table"
-    | _ -> Assert.Fail "Expected Select"
+        | Some { Kind = Table({ Kind = Identifier "USERS" }, Some { Kind = Identifier "U" }) } -> ()
+        | res -> Assert.Fail(sprintf "Expected Table, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
     match parse "SELECT * FROM (SELECT id FROM users) sub" with
     | Select(SelectQuery s) ->
         match s.From with
-        | Some { Kind = Subquery(SelectQuery { Columns = [ Column({ Kind = Identifier "ID" }, None) ] }, "SUB", None) } ->
-            ()
+        | Some { Kind = Subquery(SelectQuery { Columns = [ Column({ Kind = Identifier "ID" }, None) ] },
+                                 { Kind = Identifier "SUB" },
+                                 None) } -> ()
         | res -> Assert.Fail(sprintf "Expected Subquery, got %A" res)
-    | _ -> Assert.Fail "Expected Select"
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``Join types verification`` () =
@@ -48,7 +48,7 @@ let ``Join types verification`` () =
             match s.From with
             | Some { Kind = JoinedTable { JoinType = jt } } when jt = expected -> ()
             | res -> Assert.Fail(sprintf "Expected Join %A for %s, got %A" expected join res)
-        | _ -> Assert.Fail "Expected Select"
+        | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``Full SELECT structure verification`` () =
@@ -123,7 +123,7 @@ let ``Set operations verification`` () =
 let ``SELECT DISTINCT verification`` () =
     match parse "SELECT DISTINCT name FROM users" with
     | Select(SelectQuery s) -> Assert.True(s.IsDistinct)
-    | _ -> Assert.Fail "Expected Select"
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``Offset and Fetch verification`` () =
@@ -131,19 +131,22 @@ let ``Offset and Fetch verification`` () =
     | Select(SelectQuery s) ->
         match s.Offset with
         | Some { Kind = Literal(Number 20m) } -> ()
-        | _ -> Assert.Fail "Expected Offset 20"
+        | res -> Assert.Fail(sprintf "Expected Offset 20, got %A" res)
 
         match s.Fetch with
         | Some { Count = { Kind = Literal(Number 10m) } } -> ()
-        | _ -> Assert.Fail "Expected Fetch 10"
-    | _ -> Assert.Fail "Expected Select"
+        | res -> Assert.Fail(sprintf "Expected Fetch 10, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``VALUES as Table Source verification`` () =
     match parse "SELECT * FROM (VALUES (1, 'a'), (2, 'b')) AS t(id, name)" with
     | Select(SelectQuery s) ->
         match s.From with
-        | Some { Kind = ValuesTable(rows, "T", Some [ "ID"; "NAME" ]) } -> Assert.Equal(2, rows.Length)
+        | Some { Kind = ValuesTable(rows,
+                                    { Kind = Identifier "T" },
+                                    Some [ { Kind = Identifier "ID" }; { Kind = Identifier "NAME" } ]) } ->
+            Assert.Equal(2, rows.Length)
         | res -> Assert.Fail(sprintf "Expected ValuesTable, got %A" res)
     | _ -> Assert.Fail "Expected Select"
 
@@ -152,9 +155,11 @@ let ``Subquery with Column Aliases verification`` () =
     match parse "SELECT a, b FROM (SELECT 1, 2) AS t(a, b)" with
     | Select(SelectQuery s) ->
         match s.From with
-        | Some { Kind = Subquery(_, "T", Some [ "A"; "B" ]) } -> ()
+        | Some { Kind = Subquery(_,
+                                 { Kind = Identifier "T" },
+                                 Some [ { Kind = Identifier "A" }; { Kind = Identifier "B" } ]) } -> ()
         | res -> Assert.Fail(sprintf "Expected Subquery with aliases, got %A" res)
-    | _ -> Assert.Fail "Expected Select"
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``NATURAL JOIN and USING verification`` () =
@@ -164,14 +169,15 @@ let ``NATURAL JOIN and USING verification`` () =
         | Some { Kind = JoinedTable { IsNatural = true
                                       JoinType = InnerJoin } } -> ()
         | res -> Assert.Fail(sprintf "Expected NATURAL JOIN, got %A" res)
-    | _ -> Assert.Fail "Expected Select"
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
     match parse "SELECT * FROM t1 JOIN t2 USING (id, name)" with
     | Select(SelectQuery s) ->
         match s.From with
-        | Some { Kind = JoinedTable { Condition = Some(Using [ "ID"; "NAME" ]) } } -> ()
+        | Some { Kind = JoinedTable { Condition = Some(Using [ { Kind = Identifier "ID" }; { Kind = Identifier "NAME" } ]) } } ->
+            ()
         | res -> Assert.Fail(sprintf "Expected JOIN USING, got %A" res)
-    | _ -> Assert.Fail "Expected Select"
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
     match parse "SELECT * FROM t1 NATURAL LEFT JOIN t2" with
     | Select(SelectQuery s) ->
@@ -179,24 +185,24 @@ let ``NATURAL JOIN and USING verification`` () =
         | Some { Kind = JoinedTable { IsNatural = true
                                       JoinType = LeftJoin } } -> ()
         | res -> Assert.Fail(sprintf "Expected NATURAL LEFT JOIN, got %A" res)
-    | _ -> Assert.Fail "Expected Select"
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``Locking clause verification`` () =
     match parse "SELECT * FROM users FOR UPDATE" with
     | Select(SelectQuery s) -> Assert.Equal(Some ForUpdate, s.Locking)
-    | _ -> Assert.Fail "Expected Select"
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
     match parse "SELECT * FROM users FOR SHARE" with
     | Select(SelectQuery s) -> Assert.Equal(Some ForShare, s.Locking)
-    | _ -> Assert.Fail "Expected Select"
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``Window functions verification`` () =
     match parse "SELECT SUM(salary) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)" with
     | Select(SelectQuery s) ->
         match s.Columns.[0] with
-        | Column({ Kind = WindowFunction { Function = "SUM"
+        | Column({ Kind = WindowFunction { Function = { Kind = Identifier "SUM" }
                                            Args = [ { Kind = Identifier "SALARY" } ]
                                            IsDistinct = false
                                            Window = { ExistingWindowName = None
@@ -207,12 +213,12 @@ let ``Window functions verification`` () =
                                                                      End = Some CurrentRow } } } },
                  _) -> ()
         | res -> Assert.Fail(sprintf "Expected WindowFunction, got %A" res)
-    | _ -> Assert.Fail "Expected Select"
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
     match parse "SELECT AVG(price) OVER (ORDER BY dt RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING)" with
     | Select(SelectQuery s) ->
         match s.Columns.[0] with
-        | Column({ Kind = WindowFunction { Function = "AVG"
+        | Column({ Kind = WindowFunction { Function = { Kind = Identifier "AVG" }
                                            Args = [ { Kind = Identifier "PRICE" } ]
                                            IsDistinct = false
                                            Window = { ExistingWindowName = None
@@ -223,39 +229,39 @@ let ``Window functions verification`` () =
                                                                      End = Some(Following { Kind = Literal(Number 1m) }) } } } },
                  _) -> ()
         | res -> Assert.Fail(sprintf "Expected WindowFunction, got %A" res)
-    | _ -> Assert.Fail "Expected Select"
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``Window clause verification`` () =
     match parse "SELECT SUM(salary) OVER w FROM emps WINDOW w AS (PARTITION BY dept ORDER BY salary)" with
     | Select(SelectQuery s) ->
         match s.Window.[0] with
-        | "W", { PartitionBy = [ { Kind = Identifier "DEPT" } ] } -> ()
-        | _ -> Assert.Fail "Expected Window definition"
+        | { Kind = Identifier "W" }, { PartitionBy = [ { Kind = Identifier "DEPT" } ] } -> ()
+        | res -> Assert.Fail(sprintf "Expected Window definition, got %A" res)
 
         match s.Columns.[0] with
-        | Column({ Kind = WindowFunction { Function = "SUM"
+        | Column({ Kind = WindowFunction { Function = { Kind = Identifier "SUM" }
                                            Args = [ { Kind = Identifier "SALARY" } ]
                                            IsDistinct = false
-                                           Window = { ExistingWindowName = Some "W"
+                                           Window = { ExistingWindowName = Some { Kind = Identifier "W" }
                                                       PartitionBy = []
                                                       OrderBy = []
                                                       Frame = None } } },
                  _) -> ()
         | res -> Assert.Fail(sprintf "Expected WindowFunction, got %A" res)
-    | _ -> Assert.Fail "Expected Select"
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
     match parse "SELECT SUM(a) OVER (w ROWS UNBOUNDED PRECEDING) FROM t WINDOW w AS (PARTITION BY b)" with
     | Select(SelectQuery s) ->
         match s.Window.[0] with
-        | "W", { PartitionBy = [ { Kind = Identifier "B" } ] } -> ()
-        | _ -> Assert.Fail "Expected Window definition"
+        | { Kind = Identifier "W" }, { PartitionBy = [ { Kind = Identifier "B" } ] } -> ()
+        | res -> Assert.Fail(sprintf "Expected Window definition, got %A" res)
 
         match s.Columns.[0] with
-        | Column({ Kind = WindowFunction { Function = "SUM"
+        | Column({ Kind = WindowFunction { Function = { Kind = Identifier "SUM" }
                                            Args = [ { Kind = Identifier "A" } ]
                                            IsDistinct = false
-                                           Window = { ExistingWindowName = Some "W"
+                                           Window = { ExistingWindowName = Some { Kind = Identifier "W" }
                                                       PartitionBy = []
                                                       OrderBy = []
                                                       Frame = Some { Unit = Rows
@@ -263,7 +269,7 @@ let ``Window clause verification`` () =
                                                                      End = None } } } },
                  _) -> ()
         | res -> Assert.Fail(sprintf "Expected WindowFunction, got %A" res)
-    | _ -> Assert.Fail "Expected Select"
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``ORDER BY NULLS verification`` () =
@@ -291,8 +297,8 @@ let ``BETWEEN verification`` () =
                                 false,
                                 { Kind = Literal(Number 1m) },
                                 { Kind = Literal(Number 10m) }) } -> ()
-        | res -> failwithf "Expected Between, got %A" res
-    | res -> failwithf "Expected Select, got %A" res
+        | res -> Assert.Fail(sprintf "Expected Between, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``IN list verification`` () =
@@ -304,8 +310,8 @@ let ``IN list verification`` () =
                                [ { Kind = Literal(Number 1m) }
                                  { Kind = Literal(Number 2m) }
                                  { Kind = Literal(Number 3m) } ]) } -> ()
-        | res -> failwithf "Expected InList, got %A" res
-    | res -> failwithf "Expected Select, got %A" res
+        | res -> Assert.Fail(sprintf "Expected InList, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``IS NULL verification`` () =
@@ -313,8 +319,8 @@ let ``IS NULL verification`` () =
     | Select(SelectQuery q) ->
         match q.Where with
         | Some { Kind = IsNull({ Kind = Identifier "X" }, true) } -> ()
-        | res -> failwithf "Expected IsNull(true), got %A" res
-    | res -> failwithf "Expected Select, got %A" res
+        | res -> Assert.Fail(sprintf "Expected IsNull(true), got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``FETCH clause verification`` () =
@@ -324,16 +330,19 @@ let ``FETCH clause verification`` () =
         | Some { Count = { Kind = Literal(Number 10m) }
                  IsPercent = false
                  WithTies = false } -> ()
-        | res -> failwithf "Expected Fetch 10, got %A" res
-    | res -> failwithf "Expected Select, got %A" res
+        | res -> Assert.Fail(sprintf "Expected Fetch 10, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``UNION CORRESPONDING verification`` () =
     match parse "SELECT a FROM t1 UNION CORRESPONDING BY (a) SELECT a FROM t2" with
     | Select(SetOperation(_, op, _)) ->
         Assert.Equal(Union, op.Kind)
-        Assert.Equal(Some(Some [ "A" ]), op.Corresponding)
-    | res -> failwithf "Expected SetOperation, got %A" res
+
+        match op.Corresponding with
+        | Some(Some [ { Kind = Identifier "A" } ]) -> ()
+        | res -> Assert.Fail(sprintf "Expected Union Corresponding, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``Unicode identifier verification`` () =
@@ -341,14 +350,16 @@ let ``Unicode identifier verification`` () =
     | Select(SelectQuery q) ->
         match q.Columns with
         | [ Column({ Kind = Identifier "id" }, _) ] -> ()
-        | res -> failwithf "Expected Identifier ID, got %A" res
-    | res -> failwithf "Expected Select, got %A" res
+        | res -> Assert.Fail(sprintf "Expected Identifier ID, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``Subquery with WITH clause verification`` () =
     match parse "SELECT * FROM (WITH cte AS (SELECT 1 AS val) SELECT * FROM cte) AS t" with
     | Select(SelectQuery q) ->
         match q.From with
-        | Some { Kind = Subquery(WithQuery(false, [ cte ], _), "T", _) } -> Assert.Equal("CTE", cte.Name)
+        | Some { Kind = Subquery(WithQuery(false, [ { Name = { Kind = Identifier "CTE" } } ], _),
+                                 { Kind = Identifier "T" },
+                                 _) } -> ()
         | res -> Assert.Fail(sprintf "Expected Subquery with WithQuery, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)

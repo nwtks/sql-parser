@@ -1,4 +1,4 @@
-namespace SqlParser.Ast
+namespace SqlParser
 
 type Position = { Line: int64; Column: int64 }
 type ParseError = ParseError of string * Position
@@ -28,13 +28,37 @@ type Literal =
     | NationalString of string
     | UnicodeString of string
     | Number of decimal
-    | Bool of bool
+    | Bool of bool option
     | Date of string
     | Time of string
     | Timestamp of string
     | Interval of string * string
     | Binary of byte[]
     | Null
+
+type JoinType =
+    | InnerJoin
+    | LeftJoin
+    | RightJoin
+    | FullJoin
+    | CrossJoin
+
+type SetOperatorKind =
+    | Union
+    | Intersect
+    | Except
+
+type NullsOrder =
+    | NullsFirst
+    | NullsLast
+
+type LockingClause =
+    | ForUpdate
+    | ForShare
+
+type WindowFrameUnit =
+    | Rows
+    | Range
 
 type DataType =
     | Character of int option
@@ -60,47 +84,17 @@ type DataType =
     | TimeType of int option * bool
     | TimestampType of int option * bool
     | IntervalType of string
-    | RowType of (string * DataType) list
+    | RowType of (Expression * DataType) list
     | ArrayType of DataType * int option
     | MultisetType of DataType
-    | UserDefinedType of string
+    | UserDefinedType of Expression
 
-type JoinType =
-    | InnerJoin
-    | LeftJoin
-    | RightJoin
-    | FullJoin
-    | CrossJoin
-
-type SetOperatorKind =
-    | Union
-    | Intersect
-    | Except
-
-type SetOperator =
-    { Kind: SetOperatorKind
-      IsAll: bool
-      IsDistinct: bool
-      Corresponding: string list option option }
-
-type NullsOrder =
-    | NullsFirst
-    | NullsLast
-
-type LockingClause =
-    | ForUpdate
-    | ForShare
-
-type WindowFrameUnit =
-    | Rows
-    | Range
-
-type ExpressionKind =
+and ExpressionKind =
     | Literal of Literal
     | Identifier of string
     | BinaryOp of BinaryOperator * Expression * Expression
     | UnaryOp of UnaryOperator * Expression
-    | FunctionCall of string * bool * Expression list * WindowDefinition option
+    | FunctionCall of Expression * bool * Expression list * WindowDefinition option
     | Cast of Expression * DataType
     | Case of Expression option * (Expression * Expression) list * Expression option
     | SubqueryExpression of Query
@@ -108,20 +102,20 @@ type ExpressionKind =
     | Parameter of string
     | WindowFunction of WindowFunction
     | ColumnReference of string list
-    | Between of Expression * bool * bool * Expression * Expression // expr, isNot, isSymmetric, start, end
-    | InList of Expression * bool * Expression list // expr, isNot, list
-    | InSubquery of Expression * bool * Query // expr, isNot, subquery
-    | IsNull of Expression * bool // expr, isNot
-    | IsBoolean of Expression * bool * bool option // expr, isNot, value (Some true=TRUE, Some false=FALSE, None=UNKNOWN)
+    | Between of Expression * bool * bool * Expression * Expression
+    | InList of Expression * bool * Expression list
+    | InSubquery of Expression * bool * Query
+    | IsNull of Expression * bool
+    | IsBoolean of Expression * bool * bool option
     | Exists of Query
     | Unique of Query
-    | IsDistinctFrom of Expression * bool * Expression // l, isNot, r
+    | IsDistinctFrom of Expression * bool * Expression
     | Overlaps of Expression * Expression
-    | Like of Expression * bool * Expression * Expression option // source, isNot, pattern, escape
-    | SimilarTo of Expression * bool * Expression * Expression option // source, isNot, pattern, escape
-    | Extract of string * Expression // field, source
-    | Position of Expression * Expression * string option // target, source, unit
-    | Trim of string option * Expression option * Expression // specification, character, source
+    | Like of Expression * bool * Expression * Expression option
+    | SimilarTo of Expression * bool * Expression * Expression option
+    | Extract of Expression * Expression
+    | Position of Expression * Expression * Expression option
+    | Trim of string option * Expression option * Expression
 
 and Expression = { Kind: ExpressionKind; Pos: Position }
 
@@ -145,16 +139,22 @@ and WindowFrame =
       Exclusion: WindowFrameExclusion option }
 
 and WindowDefinition =
-    { ExistingWindowName: string option
+    { ExistingWindowName: Expression option
       PartitionBy: Expression list
       OrderBy: (Expression * bool * NullsOrder option) list
       Frame: WindowFrame option }
 
 and WindowFunction =
-    { Function: string
+    { Function: Expression
       Args: Expression list
       IsDistinct: bool
       Window: WindowDefinition }
+
+and SetOperator =
+    { Kind: SetOperatorKind
+      IsAll: bool
+      IsDistinct: bool
+      Corresponding: Expression list option option }
 
 and Query =
     | SelectQuery of SelectStatement
@@ -162,14 +162,14 @@ and Query =
     | WithQuery of bool * Cte list * Query
 
 and Cte =
-    { Name: string
-      Columns: string list option
+    { Name: Expression
+      Columns: Expression list option
       Query: Query }
 
 and TableSourceKind =
-    | Table of string * string option
-    | Subquery of Query * string * string list option
-    | ValuesTable of Expression list list * string * string list option
+    | Table of Expression * Expression option
+    | Subquery of Query * Expression * Expression list option
+    | ValuesTable of Expression list list * Expression * Expression list option
     | JoinedTable of JoinSource
 
 and TableSource =
@@ -177,7 +177,7 @@ and TableSource =
 
 and JoinCondition =
     | On of Expression
-    | Using of string list
+    | Using of Expression list
 
 and JoinSource =
     { JoinType: JoinType
@@ -186,7 +186,7 @@ and JoinSource =
       Right: TableSource
       Condition: JoinCondition option }
 
-and ColumnSource = Column of Expression * string option
+and ColumnSource = Column of Expression * Expression option
 
 and FetchClause =
     { Count: Expression
@@ -200,7 +200,7 @@ and SelectStatement =
       Where: Expression option
       GroupBy: Expression list
       Having: Expression option
-      Window: (string * WindowDefinition) list
+      Window: (Expression * WindowDefinition) list
       OrderBy: (Expression * bool * NullsOrder option) list
       Offset: Expression option
       Fetch: FetchClause option
@@ -211,17 +211,17 @@ type InsertSource =
     | Query of Query
 
 type InsertStatement =
-    { Table: string
-      Columns: string list option
+    { Table: Expression
+      Columns: Expression list option
       Source: InsertSource }
 
 type UpdateStatement =
-    { Table: string
-      Set: (string * Expression) list
+    { Table: Expression
+      Set: (Expression * Expression) list
       Where: Expression option }
 
 type DeleteStatement =
-    { Table: string
+    { Table: Expression
       Where: Expression option }
 
 type MergeMatchCondition =
@@ -229,9 +229,9 @@ type MergeMatchCondition =
     | NotMatched
 
 type MergeAction =
-    | MergeUpdate of (string * Expression) list
+    | MergeUpdate of (Expression * Expression) list
     | MergeDelete
-    | MergeInsert of string list option * Expression list
+    | MergeInsert of Expression list option * Expression list
 
 type MergeWhenClause =
     { MatchCondition: MergeMatchCondition
@@ -239,42 +239,42 @@ type MergeWhenClause =
       Action: MergeAction }
 
 type MergeStatement =
-    { Target: string
-      TargetAlias: string option
+    { Target: Expression
+      TargetAlias: Expression option
       Source: TableSource
       On: Expression
       WhenClauses: MergeWhenClause list }
 
 type ColumnDefinition =
-    { Name: string
+    { Name: Expression
       DataType: DataType
       IsNullable: bool option
       IsPrimaryKey: bool
       DefaultValue: Expression option }
 
 type CreateTableStatement =
-    { Table: string
+    { Table: Expression
       Columns: ColumnDefinition list }
 
 type CreateIndexStatement =
-    { Name: string
-      Table: string
-      Columns: string list
+    { Name: Expression
+      Table: Expression
+      Columns: Expression list
       Unique: bool }
 
-type CreateViewStatement = { Name: string; Query: Query }
+type CreateViewStatement = { Name: Expression; Query: Query }
 
 type DropStatement =
-    | DropTable of string
-    | DropIndex of string
-    | DropView of string
+    | DropTable of Expression
+    | DropIndex of Expression
+    | DropView of Expression
 
 type AlterTableAction =
     | AddColumn of ColumnDefinition
-    | DropColumn of string
+    | DropColumn of Expression
 
 type AlterTableStatement =
-    { Table: string
+    { Table: Expression
       Action: AlterTableAction }
 
 type StatementKind =
@@ -288,7 +288,7 @@ type StatementKind =
     | CreateView of CreateViewStatement
     | Drop of DropStatement
     | AlterTable of AlterTableStatement
-    | Truncate of string
+    | Truncate of Expression
     | WithStatement of bool * Cte list * StatementKind
 
 type Statement = { Kind: StatementKind; Pos: Position }
