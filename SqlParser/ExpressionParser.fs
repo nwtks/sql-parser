@@ -190,7 +190,12 @@ module ExpressionParser =
         |> withExprPosition
 
     let pTrimExpr =
-        let pSpec = opt (pKeyword "LEADING" <|> pKeyword "TRAILING" <|> pKeyword "BOTH")
+        let pSpec =
+            opt (
+                pKeyword "LEADING" >>% Leading
+                <|> (pKeyword "TRAILING" >>% Trailing)
+                <|> (pKeyword "BOTH" >>% Both)
+            )
 
         pKeyword "TRIM"
         >>. between

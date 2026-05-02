@@ -2,6 +2,7 @@ module SqlParser.Tests.LexerTests
 
 open Xunit
 open FParsec
+open SqlParser
 open SqlParser.Lexer
 
 let test p s =
@@ -46,9 +47,34 @@ let ``Binary literals are parsed correctly`` () =
 
 [<Fact>]
 let ``Date, Time, Timestamp literals are parsed correctly`` () =
-    Assert.Equal("2023-01-01", test pDateLiteral "DATE '2023-01-01'")
-    Assert.Equal("12:00:00", test pTimeLiteral "TIME '12:00:00'")
-    Assert.Equal("2023-01-01 12:00:00", test pTimestampLiteral "TIMESTAMP '2023-01-01 12:00:00'")
+    Assert.Equal({ Year = 2023; Month = 1; Day = 1 }, test pDateLiteral "DATE '2023-01-01'")
+
+    Assert.Equal(
+        { Hour = 12
+          Minute = 0
+          Second = 0m
+          TzOffset = None },
+        test pTimeLiteral "TIME '12:00:00'"
+    )
+
+    Assert.Equal(
+        { Date = { Year = 2023; Month = 1; Day = 1 }
+          Time =
+            { Hour = 12
+              Minute = 0
+              Second = 0m
+              TzOffset = None } },
+        test pTimestampLiteral "TIMESTAMP '2023-01-01 12:00:00'"
+    )
+
+[<Fact>]
+let ``Interval literals are parsed correctly`` () =
+    Assert.Equal(
+        { IsNegative = false
+          ValueString = "1-2"
+          Qualifier = IntervalQualifier.Range(Year, Month) },
+        test pIntervalLiteral "INTERVAL '1-2' YEAR TO MONTH"
+    )
 
 [<Fact>]
 let ``Boolean literals are parsed correctly`` () =

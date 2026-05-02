@@ -23,16 +23,45 @@ type UnaryOperator =
     | Plus
     | Minus
 
+type DateValue = { Year: int; Month: int; Day: int }
+
+type TimeZoneOffset = { Sign: int; Hours: int; Minutes: int }
+
+type TimeValue =
+    { Hour: int
+      Minute: int
+      Second: decimal
+      TzOffset: TimeZoneOffset option }
+
+type TimestampValue = { Date: DateValue; Time: TimeValue }
+
+type DateTimeField =
+    | Year
+    | Month
+    | Day
+    | Hour
+    | Minute
+    | Second
+
+type IntervalQualifier =
+    | SingleField of DateTimeField
+    | Range of DateTimeField * DateTimeField
+
+type IntervalValue =
+    { IsNegative: bool
+      ValueString: string
+      Qualifier: IntervalQualifier }
+
 type Literal =
     | String of string
     | NationalString of string
     | UnicodeString of string
     | Number of decimal
     | Bool of bool option
-    | Date of string
-    | Time of string
-    | Timestamp of string
-    | Interval of string * string
+    | Date of DateValue
+    | Time of TimeValue
+    | Timestamp of TimestampValue
+    | Interval of IntervalValue
     | Binary of byte[]
     | Null
 
@@ -59,6 +88,11 @@ type LockingClause =
 type WindowFrameUnit =
     | Rows
     | Range
+
+type TrimSpecification =
+    | Both
+    | Leading
+    | Trailing
 
 type DataType =
     | Character of int option
@@ -115,7 +149,7 @@ and ExpressionKind =
     | SimilarTo of Expression * bool * Expression * Expression option
     | Extract of Expression * Expression
     | Position of Expression * Expression * Expression option
-    | Trim of string option * Expression option * Expression
+    | Trim of TrimSpecification option * Expression option * Expression
 
 and Expression = { Kind: ExpressionKind; Pos: Position }
 

@@ -99,5 +99,5 @@ let ``POSITION verification`` () =
 [<Fact>]
 let ``TRIM verification`` () =
     match parse "SELECT TRIM(BOTH ' ' FROM ' abc ')" with
-    | Trim(Some "BOTH", Some { Kind = Literal(String " ") }, { Kind = Literal(String " abc ") }) -> ()
+    | Trim(Some Both, Some { Kind = Literal(String " ") }, { Kind = Literal(String " abc ") }) -> ()
     | res -> Assert.Fail(sprintf "Expected Trim, got %A" res)

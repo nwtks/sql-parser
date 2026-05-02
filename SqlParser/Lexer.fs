@@ -446,7 +446,7 @@ module Lexer =
     let pDelimitedIdentifier =
         between (pchar '\"') (pchar '\"') (manyChars (attempt (pstring "\"\"") >>% '\"' <|> noneOf "\""))
 
-    let pUnicodeBodyIdent esc =
+    let pUnicodeDelimitedIdentifierBody esc =
         many (
             choice
                 [ attempt (pUnicode6DigitEscape esc)
@@ -462,7 +462,7 @@ module Lexer =
         >>. pchar '&'
         >>. lookAhead (pDelimitedIdentifier .>>. pUnicodeEscapeSpecifier |>> snd)
         >>= fun esc ->
-            between (pchar '"') (pchar '"') (pUnicodeBodyIdent esc)
+            between (pchar '"') (pchar '"') (pUnicodeDelimitedIdentifierBody esc)
             .>> pUnicodeEscapeSpecifier
 
     let pIdentifier =
@@ -481,17 +481,16 @@ module Lexer =
             <|> (attempt (pstring "/*") >>. skipCharsTillString "*/" true 10000 >>% ())
         )
 
-    let pCharacterStringLiteral: Parser<string, unit> =
+    let pCharacterStringLiteral =
         let pSegment = between pQuote pQuote (manyChars pCharacterRepresentation)
 
         pSegment .>>. many (attempt (pSeparator >>. pSegment))
         |>> fun (first, rest) -> String.concat "" (first :: rest)
         .>> ws
 
-    let pNationalCharacterStringLiteral: Parser<string, unit> =
-        pchar 'N' >>. pCharacterStringLiteral
+    let pNationalCharacterStringLiteral = pchar 'N' >>. pCharacterStringLiteral
 
-    let pHexStringLiteral: Parser<byte[], unit> =
+    let pHexStringLiteral =
         let pSegment =
             between
                 pQuote
@@ -505,7 +504,7 @@ module Lexer =
         |>> fun (first, rest) -> first :: rest |> List.concat |> List.toArray
         .>> ws
 
-    let pUnicodeBodyStr esc =
+    let pUnicodeCharacterStringLiteralBody esc =
         many (
             choice
                 [ attempt (pUnicode6DigitEscape esc)
@@ -516,12 +515,12 @@ module Lexer =
         )
         |>> String.concat ""
 
-    let pUnicodeCharacterStringLiteral: Parser<string, unit> =
+    let pUnicodeCharacterStringLiteral =
         pchar 'U'
         >>. pchar '&'
         >>. lookAhead (pCharacterStringLiteral .>>. pUnicodeEscapeSpecifier |>> snd)
         >>= fun esc ->
-            let pSegment = between pQuote pQuote (pUnicodeBodyStr esc)
+            let pSegment = between pQuote pQuote (pUnicodeCharacterStringLiteralBody esc)
 
             pSegment .>>. many (attempt (pSeparator >>. pSegment))
             |>> fun (f, rest) -> String.concat "" (f :: rest)
@@ -552,42 +551,72 @@ module Lexer =
     let pNumericLiteral: Parser<decimal, unit> =
         attempt pApproximateNumericLiteral <|> pExactNumericLiteral
 
-    let pDateString = between pQuote pQuote (many1Chars (noneOf "'"))
-    let pDateLiteral: Parser<string, unit> = pKeyword "DATE" >>. pDateString .>> ws
-
-    let pTimeString = between pQuote pQuote (many1Chars (noneOf "'"))
-    let pTimeLiteral: Parser<string, unit> = pKeyword "TIME" >>. pTimeString .>> ws
-
-    let pTimestampString = between pQuote pQuote (many1Chars (noneOf "'"))
-
-    let pTimestampLiteral: Parser<string, unit> =
-        pKeyword "TIMESTAMP" >>. pTimestampString .>> ws
-
     let pBooleanLiteral: Parser<bool option, unit> =
         pKeyword "TRUE" >>% Some true
         <|> (pKeyword "FALSE" >>% Some false)
         <|> (pKeyword "UNKNOWN" >>% None)
 
+    let pDateValue =
+        pipe3 (pint32 .>> pchar '-') (pint32 .>> pchar '-') pint32 (fun y m d -> { Year = y; Month = m; Day = d })
+
+    let pDateLiteral = pKeyword "DATE" >>. between pQuote pQuote pDateValue .>> ws
+
+    let pTimeZoneOffset =
+        pchar '+' >>% 1 <|> (pchar '-' >>% -1) .>>. (pint32 .>> pchar ':' .>>. pint32)
+        |>> fun (sign, (h, m)) -> { Sign = sign; Hours = h; Minutes = m }
+
+    let pTimeValue =
+        pipe4
+            (pint32 .>> pchar ':')
+            (pint32 .>> pchar ':')
+            (many1Chars (digit <|> pchar '.') |>> decimal)
+            (opt (spaces >>. pTimeZoneOffset))
+            (fun h m s tz ->
+                { Hour = h
+                  Minute = m
+                  Second = s
+                  TzOffset = tz })
+
+    let pTimeLiteral = pKeyword "TIME" >>. between pQuote pQuote pTimeValue .>> ws
+
+    let pTimestampValue =
+        pDateValue .>> spaces1 .>>. pTimeValue |>> fun (d, t) -> { Date = d; Time = t }
+
+    let pTimestampLiteral =
+        pKeyword "TIMESTAMP" >>. between pQuote pQuote pTimestampValue .>> ws
+
     let pIntervalField =
         choice
-            [ attempt (pKeyword "YEAR")
-              attempt (pKeyword "MONTH")
-              attempt (pKeyword "DAY")
-              attempt (pKeyword "HOUR")
-              attempt (pKeyword "MINUTE")
-              attempt (pKeyword "SECOND") ]
+            [ attempt (pKeyword "YEAR") >>% Year
+              attempt (pKeyword "MONTH") >>% Month
+              attempt (pKeyword "DAY") >>% Day
+              attempt (pKeyword "HOUR") >>% Hour
+              attempt (pKeyword "MINUTE") >>% Minute
+              attempt (pKeyword "SECOND") >>% Second ]
 
     let pIntervalQualifier =
         pIntervalField .>>. opt (pKeyword "TO" >>. pIntervalField)
-        |>> fun (start, endField) ->
-            match endField with
-            | Some e -> sprintf "%s TO %s" start e
-            | None -> start
+        |>> fun (startF, endFOpt) ->
+            match endFOpt with
+            | Some e -> IntervalQualifier.Range(startF, e)
+            | None -> IntervalQualifier.SingleField startF
 
-    let pIntervalLiteral: Parser<string * string, unit> =
-        pKeyword "INTERVAL" >>. between pQuote pQuote (manyChars (noneOf "'")) .>> ws
+    let pIntervalLiteral =
+        pKeyword "INTERVAL" >>. opt (pchar '-' >>% true <|> (pchar '+' >>% false))
+        .>> ws
+        .>>. between pQuote pQuote (manyChars (noneOf "'"))
+        .>> ws
         .>>. pIntervalQualifier
         .>> ws
+        |>> fun ((isNegOpt, v), q) ->
+            let isNeg =
+                match isNegOpt with
+                | Some n -> n
+                | None -> false
+
+            { IsNegative = isNeg
+              ValueString = v
+              Qualifier = q }
 
     let pQuestionMark: Parser<char, unit> = pchar '?' .>> ws
 
