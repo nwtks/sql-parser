@@ -446,9 +446,24 @@ module Lexer =
     let pDelimitedIdentifier =
         between (pchar '\"') (pchar '\"') (manyChars (attempt (pstring "\"\"") >>% '\"' <|> noneOf "\""))
 
+    let pUnicodeBodyIdent esc =
+        many (
+            choice
+                [ attempt (pUnicode6DigitEscape esc)
+                  attempt (pCharacterEscape esc)
+                  attempt (pUnicode4DigitEscape esc)
+                  attempt (pCharacterEscape "\"")
+                  attempt (many1Chars (noneOf (esc + "\""))) ]
+        )
+        |>> String.concat ""
+
     let pUnicodeDelimitedIdentifier =
-        pchar 'U' >>. pchar '&' >>. pDelimitedIdentifier .>>. pUnicodeEscapeSpecifier
-        |>> fun (id, esc) -> id
+        pchar 'U'
+        >>. pchar '&'
+        >>. lookAhead (pDelimitedIdentifier .>>. pUnicodeEscapeSpecifier |>> snd)
+        >>= fun esc ->
+            between (pchar '"') (pchar '"') (pUnicodeBodyIdent esc)
+            .>> pUnicodeEscapeSpecifier
 
     let pIdentifier =
         choice
@@ -490,9 +505,28 @@ module Lexer =
         |>> fun (first, rest) -> first :: rest |> List.concat |> List.toArray
         .>> ws
 
+    let pUnicodeBodyStr esc =
+        many (
+            choice
+                [ attempt (pUnicode6DigitEscape esc)
+                  attempt (pCharacterEscape esc)
+                  attempt (pUnicode4DigitEscape esc)
+                  attempt (pCharacterEscape "'")
+                  attempt (many1Chars (noneOf (esc + "'"))) ]
+        )
+        |>> String.concat ""
+
     let pUnicodeCharacterStringLiteral: Parser<string, unit> =
-        pchar 'U' >>. pchar '&' >>. pCharacterStringLiteral .>>. pUnicodeEscapeSpecifier
-        |>> fun (s, esc) -> s
+        pchar 'U'
+        >>. pchar '&'
+        >>. lookAhead (pCharacterStringLiteral .>>. pUnicodeEscapeSpecifier |>> snd)
+        >>= fun esc ->
+            let pSegment = between pQuote pQuote (pUnicodeBodyStr esc)
+
+            pSegment .>>. many (attempt (pSeparator >>. pSegment))
+            |>> fun (f, rest) -> String.concat "" (f :: rest)
+            .>> ws
+            .>> pUnicodeEscapeSpecifier
 
     let pUnsignedInteger: Parser<uint64, unit> = many1Chars digit |>> uint64
 
@@ -533,6 +567,27 @@ module Lexer =
         pKeyword "TRUE" >>% Some true
         <|> (pKeyword "FALSE" >>% Some false)
         <|> (pKeyword "UNKNOWN" >>% None)
+
+    let pIntervalField =
+        choice
+            [ attempt (pKeyword "YEAR")
+              attempt (pKeyword "MONTH")
+              attempt (pKeyword "DAY")
+              attempt (pKeyword "HOUR")
+              attempt (pKeyword "MINUTE")
+              attempt (pKeyword "SECOND") ]
+
+    let pIntervalQualifier =
+        pIntervalField .>>. opt (pKeyword "TO" >>. pIntervalField)
+        |>> fun (start, endField) ->
+            match endField with
+            | Some e -> sprintf "%s TO %s" start e
+            | None -> start
+
+    let pIntervalLiteral: Parser<string * string, unit> =
+        pKeyword "INTERVAL" >>. between pQuote pQuote (manyChars (noneOf "'")) .>> ws
+        .>>. pIntervalQualifier
+        .>> ws
 
     let pQuestionMark: Parser<char, unit> = pchar '?' .>> ws
 

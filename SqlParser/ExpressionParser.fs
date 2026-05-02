@@ -25,6 +25,7 @@ module ExpressionParser =
               attempt (pDateLiteral |>> Date |>> Literal)
               attempt (pTimeLiteral |>> Time |>> Literal)
               attempt (pTimestampLiteral |>> Timestamp |>> Literal)
+              attempt (pIntervalLiteral |>> Interval |>> Literal)
               attempt (pHexStringLiteral |>> Literal.Binary |>> Literal) ]
         |> withExprPosition
 
