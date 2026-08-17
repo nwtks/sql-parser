@@ -500,3 +500,44 @@ let ``Subquery with WITH clause verification`` () =
                               _) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected Subquery with WithQuery, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
+let ``Explicit table verification`` () =
+    match parse "TABLE users" with
+    | Select(ExplicitTable { Kind = Identifier "USERS" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected ExplicitTable, got %A" res)
+
+[<Fact>]
+let ``Table value constructor as query verification`` () =
+    match parse "VALUES (1, 'a'), (2, 'b')" with
+    | Select(TableValueConstructor [ [ { Kind = Literal(Number 1m) }; { Kind = Literal(String "a") } ]
+                                     [ { Kind = Literal(Number 2m) }; { Kind = Literal(String "b") } ] ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected TableValueConstructor, got %A" res)
+
+[<Fact>]
+let ``NATURAL CROSS JOIN is rejected`` () =
+    parseFails "SELECT * FROM t1 NATURAL CROSS JOIN t2"
+
+[<Fact>]
+let ``TABLESAMPLE SYSTEM verification`` () =
+    match parse "SELECT * FROM users TABLESAMPLE SYSTEM (10)" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = TableSample({ Kind = Table({ Kind = Identifier "USERS" }, None) },
+                                 "SYSTEM",
+                                 { Kind = Literal(Number 10m) },
+                                 None) } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected TableSample SYSTEM, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
+let ``TABLESAMPLE non-standard method is rejected`` () =
+    parseFails "SELECT * FROM users TABLESAMPLE RANDOM (10)"
+
+[<Fact>]
+let ``Parenthesized query primary with ORDER BY verification`` () =
+    match parse "(SELECT 1 ORDER BY 1) UNION SELECT 2" with
+    | Select(SetOperation(SelectQuery { OrderBy = [ { Kind = Literal(Number 1m) }, true, None ] },
+                          { Kind = Union },
+                          SelectQuery _)) -> ()
+    | res -> Assert.Fail(sprintf "Expected parenthesized ORDER BY, got %A" res)

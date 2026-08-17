@@ -182,6 +182,7 @@ let ``GRANT verification`` () =
                                                                 PrivilegeAction.Update(Some [ { Kind = Identifier "NAME" } ]) ],
                                            { Kind = Identifier "USERS" },
                                            [ { Kind = Identifier "ALICE" }; { Kind = Identifier "BOB" } ],
+                                           false,
                                            true)) -> ()
     | res -> Assert.Fail(sprintf "Expected GrantPrivileges, got %A" res)
 
@@ -189,8 +190,17 @@ let ``GRANT verification`` () =
     | Grant(GrantStatement.GrantPrivileges(Privileges.AllPrivileges,
                                            { Kind = Identifier "USERS" },
                                            [ { Kind = Identifier "PUBLIC" } ],
+                                           false,
                                            false)) -> ()
     | res -> Assert.Fail(sprintf "Expected GrantPrivileges ALL, got %A" res)
+
+    match parse "GRANT SELECT ON users TO alice WITH HIERARCHY OPTION WITH GRANT OPTION GRANTED BY CURRENT_USER" with
+    | Grant(GrantStatement.GrantPrivileges(Privileges.Actions [ PrivilegeAction.Select None ],
+                                           { Kind = Identifier "USERS" },
+                                           [ { Kind = Identifier "ALICE" } ],
+                                           true,
+                                           true)) -> ()
+    | res -> Assert.Fail(sprintf "Expected GrantPrivileges WITH HIERARCHY OPTION, got %A" res)
 
     match parse "GRANT role_a, role_b TO alice WITH ADMIN OPTION" with
     | Grant(GrantStatement.GrantRoles([ { Kind = Identifier "ROLE_A" }; { Kind = Identifier "ROLE_B" } ],
@@ -200,15 +210,58 @@ let ``GRANT verification`` () =
 
 [<Fact>]
 let ``REVOKE verification`` () =
-    match parse "REVOKE SELECT, DELETE ON users FROM alice" with
+    match parse "REVOKE SELECT, DELETE ON users FROM alice CASCADE" with
     | Revoke(RevokeStatement.RevokePrivileges(Privileges.Actions [ PrivilegeAction.Select None; PrivilegeAction.Delete ],
                                               { Kind = Identifier "USERS" },
-                                              [ { Kind = Identifier "ALICE" } ])) -> ()
+                                              [ { Kind = Identifier "ALICE" } ],
+                                              NoOption,
+                                              true)) -> ()
     | res -> Assert.Fail(sprintf "Expected RevokePrivileges, got %A" res)
 
-    match parse "REVOKE role_a FROM alice" with
-    | Revoke(RevokeStatement.RevokeRoles([ { Kind = Identifier "ROLE_A" } ], [ { Kind = Identifier "ALICE" } ])) -> ()
+    match parse "REVOKE GRANT OPTION FOR SELECT ON users FROM alice RESTRICT" with
+    | Revoke(RevokeStatement.RevokePrivileges(Privileges.Actions [ PrivilegeAction.Select None ],
+                                              { Kind = Identifier "USERS" },
+                                              [ { Kind = Identifier "ALICE" } ],
+                                              GrantOptionFor,
+                                              false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected RevokePrivileges GRANT OPTION FOR, got %A" res)
+
+    match parse "REVOKE HIERARCHY OPTION FOR SELECT ON users FROM alice CASCADE" with
+    | Revoke(RevokeStatement.RevokePrivileges(Privileges.Actions [ PrivilegeAction.Select None ],
+                                              { Kind = Identifier "USERS" },
+                                              [ { Kind = Identifier "ALICE" } ],
+                                              HierarchyOptionFor,
+                                              true)) -> ()
+    | res -> Assert.Fail(sprintf "Expected RevokePrivileges HIERARCHY OPTION FOR, got %A" res)
+
+    match parse "REVOKE role_a FROM alice CASCADE" with
+    | Revoke(RevokeStatement.RevokeRoles([ { Kind = Identifier "ROLE_A" } ],
+                                         [ { Kind = Identifier "ALICE" } ],
+                                         false,
+                                         true)) -> ()
     | res -> Assert.Fail(sprintf "Expected RevokeRoles, got %A" res)
+
+    match parse "REVOKE ADMIN OPTION FOR role_a FROM alice CASCADE" with
+    | Revoke(RevokeStatement.RevokeRoles([ { Kind = Identifier "ROLE_A" } ],
+                                         [ { Kind = Identifier "ALICE" } ],
+                                         true,
+                                         true)) -> ()
+    | res -> Assert.Fail(sprintf "Expected RevokeRoles ADMIN OPTION FOR, got %A" res)
+
+[<Fact>]
+let ``REVOKE requires drop behavior`` () =
+    parseFails "REVOKE SELECT ON users FROM alice"
+    parseFails "REVOKE role_a FROM alice"
+
+[<Fact>]
+let ``GRANT UNDER privilege verification`` () =
+    match parse "GRANT UNDER ON TABLE users TO alice" with
+    | Grant(GrantStatement.GrantPrivileges(Privileges.Actions [ PrivilegeAction.Under ],
+                                           { Kind = Identifier "USERS" },
+                                           [ { Kind = Identifier "ALICE" } ],
+                                           false,
+                                           false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected GrantPrivileges UNDER, got %A" res)
 
 [<Fact>]
 let ``ALTER TABLE verification`` () =

@@ -192,3 +192,12 @@ let ``COLLATE verification`` () =
     match parse "SELECT name COLLATE \"C\"" with
     | Collate({ Kind = Identifier "NAME" }, { Kind = Identifier "C" }) -> ()
     | res -> Assert.Fail(sprintf "Expected Collate, got %A" res)
+
+[<Fact>]
+let ``GROUPS window frame verification`` () =
+    match parse "SELECT SUM(x) OVER (ORDER BY y GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING)" with
+    | WindowFunction { Window = { Frame = Some { Unit = Groups
+                                                 Start = Preceding { Kind = Literal(Number 1m) }
+                                                 End = Some(Following { Kind = Literal(Number 1m) })
+                                                 Exclusion = None } } } -> ()
+    | res -> Assert.Fail(sprintf "Expected GROUPS frame, got %A" res)

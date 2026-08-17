@@ -51,7 +51,7 @@ Both `Expression` and `Statement` have `Kind` + `Pos` fields. When a record lite
 
 ## `sepBy1` does not backtrack a consumed separator
 
-`sepBy1 p sep` fails if `sep` succeeds but the following `p` fails — the consumed separator is not rolled back. For `t.*` (identifier chain ending in `*`), `sepBy1 pIdentifier (token ".")` consumes `t.` then fails on `*`. Use `p .>>. many (attempt (sep >>. p))` instead so a trailing separator is optional (see the qualified-star branch of `pColumnSource` in `QueryParser.fs`).
+`sepBy1 p sep` fails if `sep` succeeds but the following `p` fails — the consumed separator is not rolled back. For `t.*` (identifier chain ending in `*`), `sepBy1 pIdentifier (token ".")` consumes `t.` then fails on `*`. Use `p .>>. many (attempt (sep >>. p))` instead so a trailing separator is optional (see the qualified-star branch of `pDerivedColumn` in `QueryParser.fs`).
 
 ## `override` is a reserved F# keyword
 
@@ -80,3 +80,15 @@ Like `Expression`, `TableSource` has `Kind` + `Pos` fields, so an unannotated `{
 ## Value restriction on parsers built with `withExprPosition`
 
 A `let`-bound parser whose type isn't pinned to `Parser<_, unit>` can hit F#'s value restriction ("The value 'p' has an inferred generic function type"). `withExprPosition` is generic over the user-state type, so `let pDefaultValue = pKeyword "DEFAULT" >>% Default |> withExprPosition` fails. Fix: annotate explicitly, e.g. `let pDefaultValue: Parser<Expression, unit> = ...` (see `ExpressionParser.fs`).
+
+## FParsec `opt` does not backtrack on partial consumption
+
+`opt p` is `(p |>> Some) <|> preturn None`. If `p` consumes input and then fails, the `<|>` cannot recover because input was consumed — the whole `opt` fails. This bites with multi-keyword optional clauses: `opt (pKeyword "WITH" >>. pKeyword "HIERARCHY" >>. pKeyword "OPTION")` consumes `WITH` then fails on `GRANT` (for `WITH GRANT OPTION`), failing the entire statement. Fix: wrap the optional body in `attempt`, e.g. `opt (attempt (pKeyword "WITH" >>. pKeyword "HIERARCHY" >>. pKeyword "OPTION"))` (see `pGrantStatement`/`pRevokeStatement` in `DdlParser.fs`).
+
+## Adding a `<simple table>` case makes `pQuery` greedily match `(VALUES ...)` in FROM
+
+Once `TableValueConstructor` was added to `pSimpleTable`, `pQuery` (a full query expression) could parse a bare `VALUES ...`. In `FROM (VALUES ...) AS t(...)`, the `pTablePrimary` subquery branch (`( <pQuery> )`) then matched first and produced `Subquery(TableValueConstructor ...)` instead of the dedicated `ValuesTable` node. Fix: in `pTablePrimary`, try the parenthesized `<table value constructor>` branch *before* the subquery branch so `FROM (VALUES ...)` keeps yielding `ValuesTable` (see `pTablePrimary` in `QueryParser.fs`).
+
+## FParsec has no `pipe6`
+
+FParsec's `pipe` combinator only goes up to `pipe5`. A 6-way `pipe6` fails to compile with "The value or constructor 'pipe6' is not defined". Fix: split into two stages — `pipe5` for the first five parsers returning an intermediate tuple, then `pipe2` with the sixth (see `pSelectBase` + `pQuerySpecification` in `QueryParser.fs`).

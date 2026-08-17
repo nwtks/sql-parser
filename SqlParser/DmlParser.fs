@@ -6,6 +6,19 @@ open SqlParser.ExpressionParser
 open SqlParser.QueryParser
 
 module DmlParser =
+    // This module implements the data-manipulation statements (section 14 of
+    // sql-2016-grammar.txt):
+    //
+    //   14.8/14.9  <delete statement>       ::= DELETE FROM <target table> [ [ AS ] <correlation name> ]
+    //                                             [ WHERE <search condition> ]
+    //   14.10      <truncate table statement> ::= TRUNCATE TABLE <target table> [ <identity column restart> ]
+    //                                             [ <drop behavior> ]
+    //   14.11      <insert statement>       ::= INSERT INTO <insertion target> ... (VALUES | query | DEFAULT VALUES)
+    //   14.12      <merge statement>        ::= MERGE INTO <target> [ [ AS ] <correlation name> ]
+    //                                             USING <table reference> ON <search condition> ...
+    //   14.13/14.14 <update statement>      ::= UPDATE <target table> ... SET <set clause list>
+    //                                             [ WHERE <search condition> ]
+    //   14.15      <set clause list>
     let pInsertStatement =
         let pOverride =
             opt (
@@ -14,7 +27,9 @@ module DmlParser =
                 .>> pKeyword "VALUE"
             )
 
-        let pValues =
+        // 7.3 <contextually typed table value constructor> — the VALUES clause
+        // of an INSERT statement.
+        let pContextuallyTypedTableValueConstructor =
             pKeyword "VALUES"
             >>. sepBy1
                     (between
@@ -27,7 +42,7 @@ module DmlParser =
         pKeyword "INSERT" >>. pKeyword "INTO" >>. pQualifiedName
         .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ","))))
         .>>. pOverride
-        .>>. (pValues
+        .>>. (pContextuallyTypedTableValueConstructor
               <|> (pQuery |>> Query)
               <|> (pKeyword "DEFAULT" >>. pKeyword "VALUES" >>% DefaultValues))
         |>> fun (((table, cols), ovr), source) ->
@@ -101,7 +116,7 @@ module DmlParser =
         pKeyword "MERGE" >>. pKeyword "INTO" >>. pQualifiedName
         .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
         .>> pKeyword "USING"
-        .>>. pTableSource
+        .>>. pTableReference
         .>> pKeyword "ON"
         .>>. pExpression
         .>>. many1 pWhenMatch

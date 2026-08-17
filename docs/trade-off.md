@@ -37,7 +37,7 @@ The type grammar is mutually recursive (`<data type>` can be a collection of `<d
 
 `CURRENT_DATE`/`CURRENT_TIME`/`CURRENT_TIMESTAMP`/`LOCALTIME`/`LOCALTIMESTAMP` are reserved words, so they cannot be parsed as identifiers or generic function calls. They get dedicated `ExpressionKind` cases (`CurrentDate`, `CurrentTime of int option`, ...) with optional precision. Likewise `SUBSTRING(x FROM a FOR b)` and `OVERLAY(x PLACING y FROM n)` get dedicated cases, while the comma form (`SUBSTRING(x, a, b)`) still parses as a generic `FunctionCall`.
 
-- **Trade-off:** More AST cases vs. forcing these into `FunctionCall` (which would lose the FROM/FOR structure and require reserved-word identifiers). The dedicated parsers are tried before `pFunctionCallExpr` and `attempt`-backtrack to it for the comma form.
+- **Trade-off:** More AST cases vs. forcing these into `FunctionCall` (which would lose the FROM/FOR structure and require reserved-word identifiers). The dedicated parsers are tried before `pRoutineInvocation` and `attempt`-backtrack to it for the comma form.
 
 ## `FETCH` quantity optional, `OFFSET` ROW/ROWS required
 
@@ -107,7 +107,7 @@ Column-level `UNIQUE`, `REFERENCES`, and `CHECK` were previously rejected. `Colu
 
 ## `COLLATE` as a predicate-suffix
 
-`x COLLATE "C"` parses via a new `Collate of Expression * Expression` case handled in `pPredicateSuffix` (postfix on an expression).
+`x COLLATE "C"` parses via a new `Collate of Expression * Expression` case handled in `pPredicate` (postfix on an expression).
 
 - **Trade-off:** COLLATE is not a predicate, but it is a postfix on a value expression, so reusing the suffix mechanism is structurally correct and cheap. The collation name is parsed as an identifier expression.
 
@@ -144,3 +144,45 @@ Column-level `UNIQUE`, `REFERENCES`, and `CHECK` were previously rejected. `Colu
 - `ForShare` removed from `LockingClause` (only `ForUpdate` remains).
 
 - **Trade-off:** Removing these closes the "invalid SQL silently accepted" gap for vendor extensions. `FOR UPDATE` is kept because it *is* in the spec's `<updatability clause>`. Indexes are implementation-defined in the standard, so a consumer needing them must add their own extension layer.
+
+## GRANT / REVOKE aligned with grammar 12.2 / 12.5 / 12.7
+
+`GRANT` now accepts `[ WITH HIERARCHY OPTION ] [ WITH GRANT OPTION ] [ GRANTED BY <grantor> ]` (privileges) and `[ WITH ADMIN OPTION ] [ GRANTED BY <grantor> ]` (roles). `GrantPrivileges` gained a `withHierarchyOption: bool` field; `GRANTED BY <grantor>` is parsed and discarded (like `CREATE ROLE ... WITH ADMIN`). `REVOKE` gained the `<revoke option extension>` (`GRANT OPTION FOR` / `HIERARCHY OPTION FOR` for privileges, `ADMIN OPTION FOR` for roles) and now **requires** the `<drop behavior>` (`CASCADE` / `RESTRICT`), so `REVOKE ... FROM u` without a behavior is rejected. `RevokePrivileges`/`RevokeRoles` carry the option and a `cascade: bool`. `PrivilegeAction` gained `Under` (12.3 `<action>`).
+
+- **Trade-off:** `REVOKE SELECT ON t FROM u` (the common form without a drop behavior) is now rejected to match the grammar, mirroring the earlier `DROP TABLE` decision. `GRANTED BY` is accepted but not surfaced in the AST — it is authorization metadata with no consumer yet, so discarding it keeps the AST minimal. `pGrantor`/`pDropBehavior` were hoisted to module level so `CREATE ROLE`, `GRANT`, `REVOKE`, and `DROP` share them.
+
+## `GROUPS` window frame unit
+
+`<window frame units> ::= ROWS | RANGE | GROUPS` — `WindowFrameUnit` gained `Groups` and the frame parser accepts `GROUPS` alongside `ROWS`/`RANGE`.
+
+- **Trade-off:** A third union case is required for exhaustiveness; no behavior change beyond accepting the keyword.
+
+## `ExplicitTable` and `TableValueConstructor` as `Query` cases
+
+Per 7.17 `<simple table> ::= <query specification> | <table value constructor> | <explicit table>`, `Query` gained `ExplicitTable of Expression` (`TABLE t`) and `TableValueConstructor of Expression list list` (`VALUES (1, 'a'), (2, 'b')`). Both are valid `<query primary>`s, so they can appear as set-operation operands (`TABLE a UNION TABLE b`) and at the top level.
+
+- **Trade-off:** Two new `Query` cases (consumers must handle them). `applyOrderByOffsetFetch` wraps them in `QueryExpression` when trailing `ORDER BY`/`OFFSET`/`FETCH` are present, since they are not plain `SELECT`s. In `FROM`, a parenthesized `(VALUES ...)` still yields the dedicated `ValuesTable` table source — the `pTablePrimary` VALUES branch is tried *before* the subquery branch so the existing `ValuesTable` shape is preserved (see gotchas).
+
+## `NATURAL CROSS JOIN` rejected
+
+7.10 `<natural join>` uses `<join type>` (which has no `CROSS`), so `NATURAL CROSS JOIN` is invalid. `pJoinedTableSuffix` now selects the join-type parser based on whether a `NATURAL` prefix was consumed.
+
+- **Trade-off:** A small conditional in the suffix parser (`if Option.isSome nat then pJoinTypeWithoutCross else pJoinType`) instead of a single permissive parser, closing the silent-acceptance gap.
+
+## `TABLESAMPLE` method restricted to `BERNOULLI | SYSTEM`
+
+7.6 `<sample method> ::= BERNOULLI | SYSTEM`. `pSampleMethod` now accepts only those two keywords (previously any identifier was accepted).
+
+- **Trade-off:** Vendor methods (e.g. `RANDOM`) are rejected per the spec; consumers needing them must extend `pSampleMethod`.
+
+## Parenthesized `<query primary>` allows trailing clauses
+
+7.17 `<query primary> ::= <simple table> | ( <query expression body> [ <order by clause> ] [ <result offset clause> ] [ <fetch first clause> ] )`. The parenthesized branch now parses optional `ORDER BY`/`OFFSET`/`FETCH`/`LOCKING` inside the parens and folds them via `applyOrderByOffsetFetch`, so `(SELECT 1 ORDER BY 1) UNION SELECT 2` is valid.
+
+- **Trade-off:** The parenthesized branch is now a 4-tuple pipeline; the trailing clauses are folded into the inner query (or wrapped in `QueryExpression` for set operations), keeping scope correct.
+
+## Parser names mirror grammar non-terminals
+
+As a readability refactor, parser functions were renamed to match the SQL-2016 non-terminals they implement, and each module gained a banner listing the grammar sections it covers. Examples: `pTableSource`→`pTableReference`, `pColumnExpr`→`pDerivedColumn`, `pSelectCore`→`pQuerySpecification`, `pTerm`→`pValueExpressionPrimary`, `pPredicateSuffix`→`pPredicate`, `pCastExpr`→`pCastSpecification`, `pSubstringExpr`→`pCharacterSubstringFunction`, `pFunctionCallExpr`→`pRoutineInvocation`, `pParameterExpr`→`pGeneralValueSpecification`.
+
+- **Trade-off:** Renames touch every reference (cross-file references like `DmlParser`'s use of `pTableReference` must be updated in lockstep), but the payoff is that a reader can map each parser to the grammar rule it implements. FParsec's define-before-use constraint means files are still ordered leaf-first rather than grammar-top-down; the banners and names bridge that gap.

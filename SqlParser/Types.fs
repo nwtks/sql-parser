@@ -5,6 +5,14 @@ open SqlParser.Lexer
 open SqlParser.ExpressionParser
 
 module Types =
+    // This module implements <data type> (section 6.1 of sql-2016-grammar.txt):
+    //
+    //   <data type> ::= <predefined type> | <row type>
+    //                 | <path-resolved user-defined type name> | <reference type>
+    //                 | <collection type>
+    //   <predefined type> ::= <character string type> [ CHARACTER SET ... ]
+    //                       | <national character string type> | <binary large object string type>
+    //                       | <numeric type> | <boolean type> | <datetime type> | <interval type>
     let pDataType = ExpressionParser.pDataType
 
     let pUnsignedInteger = pUnsignedInteger

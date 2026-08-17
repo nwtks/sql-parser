@@ -4,6 +4,23 @@ open FParsec
 open SqlParser.Lexer
 
 module ExpressionParser =
+    // This module implements the <value expression> family of the SQL-2016 grammar.
+    // Non-terminal references (section numbers from sql-2016-grammar.txt):
+    //
+    //   6.3  <value expression primary> / <general value specification> / <literal>
+    //   6.12 <case expression>
+    //   6.13 <cast specification> / <case abbreviation> (NULLIF, COALESCE)
+    //   6.17 <character substring function> / <character overlay function>
+    //   6.18 <trim function>
+    //   6.21 <datetime value function>
+    //   6.25 <position expression>
+    //   6.27 <extract expression>
+    //   7.15 <window name or specification> (the OVER clause)
+    //   8    <predicate> / <boolean value expression> / <boolean term> / <boolean factor>
+    //   8.7  <quantified comparison predicate>
+    //   8.10 <exists predicate> / 8.11 <unique predicate>
+    //   10.9 <routine invocation>
+    //   ...plus <scalar subquery> and <quantified subquery> as primary alternatives.
     let pExpression, pExpressionRef = createParserForwardedToRef<Expression, unit> ()
     let pDataType, pDataTypeRef = createParserForwardedToRef<DataType, unit> ()
     let pQuery, pQueryRef = createParserForwardedToRef<Query, unit> ()
@@ -14,6 +31,8 @@ module ExpressionParser =
             { Expression.Kind = kind
               Pos = { Line = pos.Line; Column = pos.Column } }
 
+    // 6.3 <literal> ::= NULL | <character string literal> | <numeric literal>
+    //     | <boolean literal> | <datetime literal> | <interval literal> | <hex string literal>
     let pLiteralExpr =
         choice
             [ attempt (pKeyword "NULL" >>% Null |>> Literal)
@@ -49,14 +68,19 @@ module ExpressionParser =
             | _ -> ColumnReference parts
         |> withExprPosition
 
-    let pCastExpr =
+    // 6.13 <cast specification> ::= CAST ( <value expression> AS <data type> )
+    let pCastSpecification =
         pKeyword "CAST"
         >>. between (token (pstring "(")) (token (pstring ")")) (pExpression .>> pKeyword "AS" .>>. pDataType)
         |>> Cast
         |> withExprPosition
 
     let pWindowFrame =
-        let pUnit = pKeyword "ROWS" >>% Rows <|> (pKeyword "RANGE" >>% Range)
+        // <window frame units> ::= ROWS | RANGE | GROUPS
+        let pUnit =
+            pKeyword "ROWS" >>% Rows
+            <|> (pKeyword "RANGE" >>% Range)
+            <|> (pKeyword "GROUPS" >>% Groups)
 
         let pBound =
             choice
@@ -88,6 +112,7 @@ module ExpressionParser =
               End = endBound
               Exclusion = exclusion }
 
+    // 6.13 <case abbreviation> ::= NULLIF ( <value expression> , <value expression> )
     let pNullifExpr =
         pKeyword "NULLIF"
         >>. between (token (pstring "(")) (token (pstring ")")) (pExpression .>> token (pstring ",") .>>. pExpression)
@@ -101,13 +126,16 @@ module ExpressionParser =
             )
         |> withExprPosition
 
+    // 6.13 <case abbreviation> ::= COALESCE ( <value expression> [ { , <value expression> }... ] )
     let pCoalesceExpr =
         pKeyword "COALESCE"
         >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ",")))
         |>> fun exprs -> Case(None, exprs |> List.map (fun e -> { Kind = IsNull(e, true); Pos = e.Pos }, e), None)
         |> withExprPosition
 
-    let pCaseExpr =
+    // 6.12 <case expression> ::= CASE <case operand> <simple when clause>...
+    //     | CASE <searched when clause>... [ ELSE <result> ] END
+    let pCaseExpression =
         getPosition
         >>= fun pos ->
             let pResultExpr =
@@ -150,7 +178,9 @@ module ExpressionParser =
         .>>. opt (attempt pNullsOrder)
         |>> fun ((expr, asc), nulls) -> expr, Option.defaultValue true asc, nulls
 
-    let pWindowDefinition =
+    // 7.15 <window name or specification> — the OVER (...) clause attached to a
+    // window function (also parsed at the query level for the WINDOW clause).
+    let pWindowNameOrSpecification =
         let pPartitionBy =
             pKeyword "PARTITION"
             >>. pKeyword "BY"
@@ -179,10 +209,14 @@ module ExpressionParser =
                         OrderBy = []
                         Frame = None }))
 
-    let pParameterExpr =
+    // 6.3 <general value specification> (parameter forms): `?` is a
+    // <dynamic parameter specification>, `:name` a <host parameter>.
+    // Literals are handled separately by pLiteralExpr above.
+    let pGeneralValueSpecification =
         pQuestionMark >>% "?" <|> pHostParameter |>> Parameter |> withExprPosition
 
-    let pExtractExpr =
+    // 6.27 <extract expression> ::= EXTRACT ( <extract field> FROM <extract source> )
+    let pExtractExpression =
         pKeyword "EXTRACT"
         >>. between
                 (token (pstring "("))
@@ -206,7 +240,9 @@ module ExpressionParser =
             )
         |> withExprPosition
 
-    let pPositionExpr =
+    // 6.25 <position expression> ::= POSITION ( <character value expression> IN
+    //     <character value expression> [ USING <char length units> ] )
+    let pPositionExpression =
         pKeyword "POSITION"
         >>. between
                 (token (pstring "("))
@@ -217,7 +253,9 @@ module ExpressionParser =
         |>> (fun ((target, source), unit) -> ExpressionKind.Position(target, source, unit))
         |> withExprPosition
 
-    let pTrimExpr =
+    // 6.18 <trim function> ::= TRIM ( [ <trim specification> ] [ <trim character> ]
+    //     FROM <trim source> )
+    let pTrimFunction =
         let pSpec =
             opt (
                 pKeyword "LEADING" >>% Leading
@@ -233,7 +271,9 @@ module ExpressionParser =
         |>> (fun ((spec, char), source) -> Trim(spec, char, source))
         |> withExprPosition
 
-    let pSubstringExpr =
+    // 6.17 <character substring function> ::= SUBSTRING ( <character value expression>
+    //     FROM <start position> [ FOR <string length> ] [ USING <char length units> ] )
+    let pCharacterSubstringFunction =
         pKeyword "SUBSTRING"
         >>. between
                 (token (pstring "("))
@@ -245,7 +285,9 @@ module ExpressionParser =
         |>> fun (((src, start), len), units) -> Substring(src, start, len, units)
         |> withExprPosition
 
-    let pOverlayExpr =
+    // 6.17 <character overlay function> ::= OVERLAY ( <character value expression>
+    //     PLACING <character value expression> FROM <start position> [ FOR <string length> ] )
+    let pOverlayFunction =
         pKeyword "OVERLAY"
         >>. between
                 (token (pstring "("))
@@ -256,6 +298,8 @@ module ExpressionParser =
         |>> fun (((src, placing), start), len) -> Overlay(src, placing, start, len)
         |> withExprPosition
 
+    // 6.21 <datetime value function> ::= CURRENT_DATE | CURRENT_TIMESTAMP [ <left paren>
+    //     <time precision> <right paren> ] | CURRENT_TIME ... | LOCALTIMESTAMP ... | LOCALTIME ...
     let pDateTimeValueFunction =
         let pPrecision =
             opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
@@ -268,7 +312,9 @@ module ExpressionParser =
               pKeyword "LOCALTIME" >>. pPrecision |>> LocalTime ]
         |> withExprPosition
 
-    let pFunctionCallExpr =
+    // 10.9 <routine invocation> ::= <routine name> <SQL argument list>
+    //   plus optional OVER (window), FILTER (WHERE), WITHIN GROUP (ORDER BY) clauses.
+    let pRoutineInvocation =
         let pArgs =
             between
                 (token (pstring "("))
@@ -290,7 +336,7 @@ module ExpressionParser =
 
         pIdentifierRaw |>> Identifier |> withExprPosition
         .>>. pArgs
-        .>>. opt pWindowDefinition
+        .>>. opt pWindowNameOrSpecification
         .>>. opt pFilter
         .>>. opt pWithinGroup
         |>> fun ((((name, (dist, args)), window), filter), withinGroup) ->
@@ -304,7 +350,8 @@ module ExpressionParser =
             | None -> FunctionCall(name, Option.defaultValue false dist, args, None, filter, withinGroup)
         |> withExprPosition
 
-    let pSubqueryExpr =
+    // 6.3 <scalar subquery> ::= ( <subquery> )
+    let pScalarSubquery =
         between (token (pstring "(")) (token (pstring ")")) pQuery
         |>> SubqueryExpression
         |> withExprPosition
@@ -330,12 +377,17 @@ module ExpressionParser =
               pKeyword "SOME" >>% Quantifier.SomeQuantifier
               pKeyword "ALL" >>% Quantifier.All ]
 
+    // 8.7 <quantified comparison predicate> — the ANY | SOME | ALL subquery term.
+    // Only valid as the right operand of a comparison operator (see comparisonOp).
     let pQuantifiedSubqueryTerm =
         pQuantifier .>>. between (token (pstring "(")) (token (pstring ")")) pQuery
         |>> fun (quant, q) -> QuantifiedSubquery(quant, q)
         |> withExprPosition
 
-    let pPredicateSuffix pExpr =
+    // 8 <predicate> — a postfix predicate applied to a <value expression primary>:
+    //   <between predicate>, <in predicate>, <null predicate>, <distinct predicate>,
+    //   <overlaps predicate>, <like predicate>, <similar predicate>, plus <collate clause>.
+    let pPredicate pExpr =
         choice
             [ attempt (
                   opt (pKeyword "NOT") .>> pKeyword "BETWEEN"
@@ -419,34 +471,38 @@ module ExpressionParser =
                             Pos = e.Pos }
               ) ]
 
-    let pExistsExpr =
+    // 8.10 <exists predicate> ::= EXISTS ( <subquery> )
+    let pExistsPredicate =
         pKeyword "EXISTS" >>. between (token (pstring "(")) (token (pstring ")")) pQuery
         |>> Exists
         |> withExprPosition
 
-    let pUniqueExpr =
+    // 8.11 <unique predicate> ::= UNIQUE ( <subquery> )
+    let pUniquePredicate =
         pKeyword "UNIQUE" >>. between (token (pstring "(")) (token (pstring ")")) pQuery
         |>> ExpressionKind.Unique
         |> withExprPosition
 
-    let pTerm =
+    // 6.3 <value expression primary> — the atomic building block of every <value
+    // expression>, used as the term parser of the operator-precedence parser below.
+    let pValueExpressionPrimary =
         choice
-            [ attempt pCastExpr
-              attempt pCaseExpr
+            [ attempt pCastSpecification
+              attempt pCaseExpression
               attempt pNullifExpr
               attempt pCoalesceExpr
-              attempt pExtractExpr
-              attempt pPositionExpr
-              attempt pTrimExpr
-              attempt pSubstringExpr
-              attempt pOverlayExpr
+              attempt pExtractExpression
+              attempt pPositionExpression
+              attempt pTrimFunction
+              attempt pCharacterSubstringFunction
+              attempt pOverlayFunction
               attempt pDateTimeValueFunction
-              attempt pFunctionCallExpr
-              attempt pSubqueryExpr
-              attempt pExistsExpr
-              attempt pUniqueExpr
+              attempt pRoutineInvocation
+              attempt pScalarSubquery
+              attempt pExistsPredicate
+              attempt pUniquePredicate
               attempt pLiteralExpr
-              attempt pParameterExpr
+              attempt pGeneralValueSpecification
               attempt pStarExpr
               attempt pQuantifiedSubqueryTerm
               pColumnReferenceExpr
@@ -458,7 +514,7 @@ module ExpressionParser =
         pKeyword "DEFAULT" >>% Default |> withExprPosition
 
     let opp = new OperatorPrecedenceParser<Expression, unit, unit>()
-    opp.TermParser <- pTerm
+    opp.TermParser <- pValueExpressionPrimary
 
     let addInfix op precedence assoc mapping =
         opp.AddOperator(InfixOperator(op, ws, precedence, assoc, fun x y -> { Kind = mapping x y; Pos = x.Pos }))
@@ -488,10 +544,12 @@ module ExpressionParser =
     addInfix ">" 5 Associativity.Left (comparisonOp GreaterThan)
     addInfix ">=" 5 Associativity.Left (comparisonOp GreaterThanOrEqual)
 
-    let pPredicateExpr =
-        opp.ExpressionParser .>>. many (pPredicateSuffix opp.ExpressionParser)
+    // <boolean test>: a <value expression> plus an optional postfix <predicate>.
+    let pBooleanTest =
+        opp.ExpressionParser .>>. many (pPredicate opp.ExpressionParser)
         |>> fun (e, suffixes) -> List.fold (fun acc f -> f acc) e suffixes
 
+    // <boolean factor> ::= [ NOT ] <boolean test>
     let pNotExpr, pNotExprRef = createParserForwardedToRef<Expression, unit> ()
 
     pNotExprRef.Value <-
@@ -499,8 +557,9 @@ module ExpressionParser =
          |>> fun e ->
              { Expression.Kind = UnaryOp(Not, e)
                Pos = e.Pos })
-        <|> pPredicateExpr
+        <|> pBooleanTest
 
+    // <boolean term> ::= <boolean factor> | <boolean term> AND <boolean factor>
     let pAndExpr =
         chainl1
             pNotExpr
@@ -509,6 +568,7 @@ module ExpressionParser =
                  { Expression.Kind = BinaryOp(And, l, r)
                    Pos = l.Pos })
 
+    // <boolean value expression> ::= <boolean term> | <boolean value expression> OR <boolean term>
     let pOrExpr =
         chainl1
             pAndExpr

@@ -5,6 +5,18 @@ open SqlParser.Lexer
 open SqlParser.ExpressionParser
 
 module TransactionParser =
+    // This module implements the SQL-transaction statements (section 17 of
+    // sql-2016-grammar.txt):
+    //
+    //   17.1 <start transaction statement>   ::= START TRANSACTION [ <transaction characteristics> ]
+    //   17.2 <set transaction statement>     ::= SET [ LOCAL ] TRANSACTION <transaction characteristics>
+    //   17.3 <transaction characteristics>   ::= <transaction mode> [ { , <transaction mode> }... ]
+    //   17.4 <set constraints mode statement>::= SET CONSTRAINTS ... DEFERRED | IMMEDIATE
+    //   17.5 <savepoint statement>           ::= SAVEPOINT <savepoint specifier>
+    //   17.6 <release savepoint statement>   ::= RELEASE SAVEPOINT <savepoint specifier>
+    //   17.7 <commit statement>              ::= COMMIT [ WORK ] [ AND [ NO ] CHAIN ]
+    //   17.8 <rollback statement>            ::= ROLLBACK [ WORK ] [ AND [ NO ] CHAIN ]
+    //        [ TO SAVEPOINT <savepoint specifier> ]
     let pIsolationLevel =
         choice
             [ attempt (pKeyword "READ" >>. pKeyword "UNCOMMITTED" >>% ReadUncommitted)

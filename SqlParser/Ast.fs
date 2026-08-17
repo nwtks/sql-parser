@@ -91,6 +91,7 @@ type LockingClause = | ForUpdate
 type WindowFrameUnit =
     | Rows
     | Range
+    | Groups
 
 type TrimSpecification =
     | Both
@@ -215,6 +216,8 @@ and Query =
     | SelectQuery of SelectStatement
     | SetOperation of Query * SetOperator * Query
     | WithQuery of bool * Cte list * Query
+    | ExplicitTable of Expression
+    | TableValueConstructor of Expression list list
     | QueryExpression of
         Query *
         (Expression * bool * NullsOrder option) list *
@@ -399,19 +402,31 @@ type PrivilegeAction =
     | References of Expression list option
     | Usage
     | Trigger
+    | Under
     | Execute
 
 type Privileges =
     | AllPrivileges
     | Actions of PrivilegeAction list
 
+// 12.7 <revoke option extension> ::= GRANT OPTION FOR | HIERARCHY OPTION FOR
+// (None covers the absent case)
+type RevokeOptionExtension =
+    | NoOption
+    | GrantOptionFor
+    | HierarchyOptionFor
+
 type GrantStatement =
-    | GrantPrivileges of Privileges * Expression * Expression list * bool
+    // 12.2: (privileges, object name, grantees, withHierarchyOption, withGrantOption)
+    | GrantPrivileges of Privileges * Expression * Expression list * bool * bool
+    // 12.5: (roles, grantees, withAdminOption)
     | GrantRoles of Expression list * Expression list * bool
 
 type RevokeStatement =
-    | RevokePrivileges of Privileges * Expression * Expression list
-    | RevokeRoles of Expression list * Expression list
+    // 12.7: (privileges, object name, grantees, option, cascade)
+    | RevokePrivileges of Privileges * Expression * Expression list * RevokeOptionExtension * bool
+    // 12.7: (roles, grantees, adminOptionFor, cascade)
+    | RevokeRoles of Expression list * Expression list * bool * bool
 
 type IsolationLevel =
     | ReadUncommitted

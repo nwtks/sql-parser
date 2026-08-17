@@ -6,6 +6,19 @@ open SqlParser.ExpressionParser
 open SqlParser.Types
 
 module DdlParser =
+    // This module implements the data-definition and authorization statements of the
+    // SQL-2016 grammar:
+    //
+    //   11.1  <table definition> (CREATE TABLE)
+    //   11.2  <column definition> / <column constraint definition>
+    //   11.6  <table constraint definition>
+    //   11.10 <alter table statement>
+    //   11.31 <drop table statement>
+    //   11.32 <view definition> (CREATE VIEW)
+    //   12.2  <grant privilege statement> / 12.5 <grant role statement>
+    //   12.4  <role definition> / 12.6 <drop role statement>
+    //   12.7  <revoke statement>
+    //   14.10 <truncate table statement>
     type ColumnConstraintKind =
         | NotNull
         | Null
@@ -196,12 +209,14 @@ module DdlParser =
               Query = query }
             |> CreateView
 
-    let pCreateRoleStatement =
-        let pGrantor =
-            (pIdentifierExpr |>> ignore)
-            <|> (pKeyword "CURRENT_USER" |>> ignore)
-            <|> (pKeyword "CURRENT_ROLE" |>> ignore)
+    // <grantor> ::= CURRENT_USER | CURRENT_ROLE
+    let pGrantor =
+        (pIdentifierExpr |>> ignore)
+        <|> (pKeyword "CURRENT_USER" |>> ignore)
+        <|> (pKeyword "CURRENT_ROLE" |>> ignore)
 
+    // 12.4 <role definition> ::= CREATE ROLE <role name> [ WITH ADMIN <grantor> ]
+    let pCreateRoleStatement =
         pKeyword "CREATE" >>. pKeyword "ROLE" >>. pIdentifierExpr
         .>>. opt (pKeyword "WITH" >>. pKeyword "ADMIN" >>. pGrantor)
         |>> fun (name, _) -> CreateRole name
@@ -209,6 +224,9 @@ module DdlParser =
     let pPrivilegeColumnList =
         between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
 
+    // <action> ::= SELECT [ <privilege column list> ] | INSERT [ <privilege column list> ]
+    //             | UPDATE [ <privilege column list> ] | DELETE | REFERENCES [ <privilege column list> ]
+    //             | USAGE | TRIGGER | UNDER | EXECUTE
     let pPrivilegeAction =
         choice
             [ attempt (pKeyword "SELECT" >>. opt pPrivilegeColumnList |>> PrivilegeAction.Select)
@@ -221,6 +239,7 @@ module DdlParser =
               )
               attempt (pKeyword "USAGE" >>% PrivilegeAction.Usage)
               attempt (pKeyword "TRIGGER" >>% PrivilegeAction.Trigger)
+              attempt (pKeyword "UNDER" >>% PrivilegeAction.Under)
               attempt (pKeyword "EXECUTE" >>% PrivilegeAction.Execute) ]
 
     let pPrivileges =
@@ -241,43 +260,89 @@ module DdlParser =
 
         opt pKind >>. pQualifiedName
 
+    // <drop behavior> ::= CASCADE | RESTRICT   (true = CASCADE, false = RESTRICT)
+    let pDropBehavior = pKeyword "CASCADE" >>% true <|> (pKeyword "RESTRICT" >>% false)
+
+    // 12.2 <grant privilege statement> ::= GRANT <privileges> TO <grantee> [ { , <grantee> }... ]
+    //     [ WITH HIERARCHY OPTION ] [ WITH GRANT OPTION ] [ GRANTED BY <grantor> ]
     let pGrantStatement =
         pKeyword "GRANT"
         >>. choice
                 [ attempt (
                       pPrivileges .>> pKeyword "ON" .>>. pObjectName .>> pKeyword "TO"
                       .>>. sepBy1 pIdentifierExpr (token (pstring ","))
-                      .>>. opt (pKeyword "WITH" >>. pKeyword "GRANT" >>. pKeyword "OPTION")
-                      |>> fun (((privs, obj), grantees), withOpt) ->
-                          GrantStatement.GrantPrivileges(privs, obj, grantees, Option.isSome withOpt)
+                      .>>. opt (attempt (pKeyword "WITH" >>. pKeyword "HIERARCHY" >>. pKeyword "OPTION"))
+                      .>>. opt (attempt (pKeyword "WITH" >>. pKeyword "GRANT" >>. pKeyword "OPTION"))
+                      .>>. opt (attempt (pKeyword "GRANTED" >>. pKeyword "BY" >>. pGrantor))
+                      |>> fun (((((privs, obj), grantees), withHier), withOpt), _) ->
+                          GrantStatement.GrantPrivileges(
+                              privs,
+                              obj,
+                              grantees,
+                              Option.isSome withHier,
+                              Option.isSome withOpt
+                          )
                   )
+                  // 12.5 <grant role statement> ::= GRANT <role granted> [ { , <role granted> }... ]
+                  //     TO <grantee> [ { , <grantee> }... ] [ WITH ADMIN OPTION ] [ GRANTED BY <grantor> ]
                   attempt (
                       sepBy1 pIdentifierExpr (token (pstring ",")) .>> pKeyword "TO"
                       .>>. sepBy1 pIdentifierExpr (token (pstring ","))
-                      .>>. opt (pKeyword "WITH" >>. pKeyword "ADMIN" >>. pKeyword "OPTION")
-                      |>> fun ((roles, grantees), withAdm) ->
+                      .>>. opt (attempt (pKeyword "WITH" >>. pKeyword "ADMIN" >>. pKeyword "OPTION"))
+                      .>>. opt (attempt (pKeyword "GRANTED" >>. pKeyword "BY" >>. pGrantor))
+                      |>> fun (((roles, grantees), withAdm), _) ->
                           GrantStatement.GrantRoles(roles, grantees, Option.isSome withAdm)
                   ) ]
         |>> Grant
 
+    // 12.7 <revoke statement> ::= <revoke privilege statement> | <revoke role statement>
+    // <revoke option extension> ::= GRANT OPTION FOR | HIERARCHY OPTION FOR
+    let pRevokeOptionExtension =
+        choice
+            [ attempt (pKeyword "GRANT" >>. pKeyword "OPTION" >>. pKeyword "FOR" >>% GrantOptionFor)
+              attempt (
+                  pKeyword "HIERARCHY" >>. pKeyword "OPTION" >>. pKeyword "FOR"
+                  >>% HierarchyOptionFor
+              ) ]
+
+    // <revoke privilege statement> ::= REVOKE [ <revoke option extension> ] <privileges>
+    //     FROM <grantee> [ { , <grantee> }... ] [ GRANTED BY <grantor> ] <drop behavior>
     let pRevokeStatement =
         pKeyword "REVOKE"
         >>. choice
                 [ attempt (
-                      pPrivileges .>> pKeyword "ON" .>>. pObjectName .>> pKeyword "FROM"
+                      opt (attempt pRevokeOptionExtension) .>>. pPrivileges .>> pKeyword "ON"
+                      .>>. pObjectName
+                      .>> pKeyword "FROM"
                       .>>. sepBy1 pIdentifierExpr (token (pstring ","))
-                      |>> fun ((privs, obj), grantees) -> RevokeStatement.RevokePrivileges(privs, obj, grantees)
+                      .>>. opt (attempt (pKeyword "GRANTED" >>. pKeyword "BY" >>. pGrantor))
+                      .>>. pDropBehavior
+                      |>> fun (((((optOpt, privs), obj), grantees), _), cascade) ->
+                          RevokeStatement.RevokePrivileges(
+                              privs,
+                              obj,
+                              grantees,
+                              Option.defaultValue NoOption optOpt,
+                              cascade
+                          )
                   )
+                  // <revoke role statement> ::= REVOKE [ ADMIN OPTION FOR ] <role revoked>
+                  //     [ { , <role revoked> }... ] FROM <grantee> [ { , <grantee> }... ]
+                  //     [ GRANTED BY <grantor> ] <drop behavior>
                   attempt (
-                      sepBy1 pIdentifierExpr (token (pstring ",")) .>> pKeyword "FROM"
+                      opt (attempt (pKeyword "ADMIN" >>. pKeyword "OPTION" >>. pKeyword "FOR" >>% true))
                       .>>. sepBy1 pIdentifierExpr (token (pstring ","))
-                      |>> RevokeStatement.RevokeRoles
+                      .>> pKeyword "FROM"
+                      .>>. sepBy1 pIdentifierExpr (token (pstring ","))
+                      .>>. opt (attempt (pKeyword "GRANTED" >>. pKeyword "BY" >>. pGrantor))
+                      .>>. pDropBehavior
+                      |>> fun ((((adminFor, roles), grantees), _), cascade) ->
+                          RevokeStatement.RevokeRoles(roles, grantees, Option.defaultValue false adminFor, cascade)
                   ) ]
         |>> Revoke
 
+    // 11.31 <drop table statement> ::= DROP TABLE <table name> <drop behavior>
     let pDropStatement =
-        let pDropBehavior = pKeyword "CASCADE" >>% true <|> (pKeyword "RESTRICT" >>% false)
-
         pKeyword "DROP"
         >>. choice
                 [ attempt (pKeyword "TABLE" >>. pQualifiedName .>>. pDropBehavior) |>> DropTable

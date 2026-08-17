@@ -3,6 +3,10 @@ namespace SqlParser
 open FParsec
 
 module Lexer =
+    // This module implements the lexical elements of SQL-2016 (section 5 of
+    // sql-2016-grammar.txt): <token> and its parts — <key word>, <reserved word>,
+    // <identifier>, <character string literal>, <numeric literal>, <host parameter>,
+    // <comment>, and the <separator> whitespace handling.
     let reservedWords =
         Set.ofList
             [ "ABS"
