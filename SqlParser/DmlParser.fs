@@ -7,34 +7,68 @@ open SqlParser.QueryParser
 
 module DmlParser =
     let pInsertStatement =
-        pKeyword "INSERT" >>. pKeyword "INTO" >>. pIdentifierExpr
+        let pOverride =
+            opt (
+                pKeyword "OVERRIDING"
+                >>. (pKeyword "USER" >>% true <|> (pKeyword "SYSTEM" >>% false))
+                .>> pKeyword "VALUE"
+            )
+
+        let pValues =
+            pKeyword "VALUES"
+            >>. sepBy1
+                    (between
+                        (token (pstring "("))
+                        (token (pstring ")"))
+                        (sepBy1 (pDefaultValue <|> pExpression) (token (pstring ","))))
+                    (token (pstring ","))
+            |>> Values
+
+        pKeyword "INSERT" >>. pKeyword "INTO" >>. pQualifiedName
         .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ","))))
-        .>>. (pKeyword "VALUES"
-              >>. sepBy1
-                      (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ","))))
-                      (token (pstring ","))
-              |>> Values
-              <|> (pQuery |>> Query))
-        |>> fun ((table, cols), source) ->
+        .>>. pOverride
+        .>>. (pValues
+              <|> (pQuery |>> Query)
+              <|> (pKeyword "DEFAULT" >>. pKeyword "VALUES" >>% DefaultValues))
+        |>> fun (((table, cols), ovr), source) ->
             { Table = table
               Columns = cols
-              Source = source }
+              Source = source
+              Override = ovr }
             |> Insert
 
     let pUpdateStatement =
-        pKeyword "UPDATE" >>. pIdentifierExpr .>> pKeyword "SET"
-        .>>. sepBy1 (pIdentifierExpr .>> token (pstring "=") .>>. pExpression) (token (pstring ","))
+        let pSetClause =
+            attempt (
+                between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
+                .>> token (pstring "=")
+                .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ",")))
+                |>> MultipleSet
+            )
+            <|> (pIdentifierExpr .>> token (pstring "=") .>>. (pDefaultValue <|> pExpression)
+                 |>> SingleSet)
+
+        pKeyword "UPDATE" >>. pQualifiedName
+        .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
+        .>> pKeyword "SET"
+        .>>. sepBy1 pSetClause (token (pstring ","))
         .>>. opt (pKeyword "WHERE" >>. pExpression)
-        |>> fun ((table, sets), whr) ->
+        |>> fun (((table, alias), sets), whr) ->
             { Table = table
+              TableAlias = alias
               Set = sets
               Where = whr }
             |> Update
 
     let pDeleteStatement =
-        pKeyword "DELETE" >>. pKeyword "FROM" >>. pIdentifierExpr
+        pKeyword "DELETE" >>. pKeyword "FROM" >>. pQualifiedName
+        .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
         .>>. opt (pKeyword "WHERE" >>. pExpression)
-        |>> fun (table, whr) -> { Table = table; Where = whr } |> Delete
+        |>> fun ((table, alias), whr) ->
+            { Table = table
+              TableAlias = alias
+              Where = whr }
+            |> Delete
 
     let pMergeStatement =
         let pAction =
@@ -64,7 +98,7 @@ module DmlParser =
                   Condition = filter
                   Action = action }
 
-        pKeyword "MERGE" >>. pKeyword "INTO" >>. pIdentifierExpr
+        pKeyword "MERGE" >>. pKeyword "INTO" >>. pQualifiedName
         .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
         .>> pKeyword "USING"
         .>>. pTableSource

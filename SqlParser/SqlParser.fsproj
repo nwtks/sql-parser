@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
 
   <ItemGroup>
@@ -12,7 +12,8 @@
     <Compile Include="QueryParser.fs" />
     <Compile Include="DmlParser.fs" />
     <Compile Include="DdlParser.fs" />
-    <Compile Include="SqlParser.fs" />    
+    <Compile Include="TransactionParser.fs" />
+    <Compile Include="SqlParser.fs" />
   </ItemGroup>
 
   <ItemGroup>

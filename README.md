@@ -19,11 +19,20 @@ A SQL parser implemented in F# using [FParsec](https://www.quanttec.com/fparsec/
 - `TRUNCATE TABLE`
 
 ### 🏗️ Data Definition (DDL)
-- `CREATE TABLE` (including column constraints like `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, `CHECK`, `REFERENCES`).
+- `CREATE TABLE` (column constraints like `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, `CHECK`, `REFERENCES`, and table-level constraints: `PRIMARY KEY (...)`, `UNIQUE (...)`, `FOREIGN KEY (...) REFERENCES ... [ON UPDATE/DELETE ...]`, `CHECK (...)`).
 - `CREATE INDEX` (including `UNIQUE`).
 - `CREATE VIEW`.
-- `DROP` (Table, View, Index).
-- `ALTER TABLE` (Add/Drop column/constraint, Alter column).
+- `CREATE ROLE` / `DROP ROLE`.
+- `DROP` (Table, Index, View, Role).
+- `ALTER TABLE` (`ADD COLUMN`, `DROP COLUMN`, `ALTER COLUMN ... SET/DROP DEFAULT`, `SET/DROP NOT NULL`, `SET DATA TYPE`, `ADD/DROP CONSTRAINT`, `RENAME TO`, `RENAME COLUMN`).
+- `GRANT` / `REVOKE` (privileges and roles, including `ALL PRIVILEGES`, `WITH GRANT OPTION`, `WITH ADMIN OPTION`).
+
+### 🔐 Transactions
+- `START TRANSACTION` (with transaction modes like `ISOLATION LEVEL`, `READ ONLY`/`READ WRITE`).
+- `COMMIT` / `ROLLBACK` (with `WORK`, `AND [NO] CHAIN`, and `TO SAVEPOINT`).
+- `SAVEPOINT` / `RELEASE SAVEPOINT`.
+- `SET [LOCAL] TRANSACTION` (isolation levels, `READ ONLY`/`READ WRITE`).
+- `SET CONSTRAINTS ... { DEFERRED | IMMEDIATE }`.
 
 ### 🔢 Expressions & Types
 - **Operators**: Arithmetic (`+`, `-`, `*`, `/`), Comparison (`=`, `<>`, `<`, `<=`, `>`, `>=`), Logical (`AND`, `OR`, `NOT`), Concatenation (`||`).
@@ -56,7 +65,8 @@ match SqlParser.parse sql with
 - `ExpressionParser.fs`: Handles operator precedence and expression parsing.
 - `QueryParser.fs`: Main logic for `SELECT` queries and set operations.
 - `DmlParser.fs`: Parsers for `INSERT`, `UPDATE`, `DELETE`, `MERGE`.
-- `DdlParser.fs`: Parsers for schema modification statements.
+- `DdlParser.fs`: Parsers for schema modification statements (including `GRANT`/`REVOKE`/role).
+- `TransactionParser.fs`: Parsers for transaction statements.
 - `SqlParser.fs`: Main entry point and `WITH` clause handling.
 
 ## Running Tests

@@ -23,6 +23,11 @@ type UnaryOperator =
     | Plus
     | Minus
 
+type Quantifier =
+    | Any
+    | SomeQuantifier
+    | All
+
 type DateValue = { Year: int; Month: int; Day: int }
 
 type TimeZoneOffset = { Sign: int; Hours: int; Minutes: int }
@@ -81,9 +86,7 @@ type NullsOrder =
     | NullsFirst
     | NullsLast
 
-type LockingClause =
-    | ForUpdate
-    | ForShare
+type LockingClause = | ForUpdate
 
 type WindowFrameUnit =
     | Rows
@@ -128,11 +131,18 @@ and ExpressionKind =
     | Identifier of string
     | BinaryOp of BinaryOperator * Expression * Expression
     | UnaryOp of UnaryOperator * Expression
-    | FunctionCall of Expression * bool * Expression list * WindowDefinition option
+    | FunctionCall of
+        Expression *
+        bool *
+        Expression list *
+        WindowDefinition option *
+        Expression option *
+        (Expression * bool * NullsOrder option) list option
     | Cast of Expression * DataType
     | Case of Expression option * (Expression * Expression) list * Expression option
     | SubqueryExpression of Query
     | Star
+    | QualifiedStar of string list
     | Parameter of string
     | WindowFunction of WindowFunction
     | ColumnReference of string list
@@ -145,11 +155,22 @@ and ExpressionKind =
     | Unique of Query
     | IsDistinctFrom of Expression * bool * Expression
     | Overlaps of Expression * Expression
+    | QuantifiedComparison of BinaryOperator * Quantifier * Expression * Query
+    | QuantifiedSubquery of Quantifier * Query
+    | Collate of Expression * Expression
     | Like of Expression * bool * Expression * Expression option
     | SimilarTo of Expression * bool * Expression * Expression option
     | Extract of Expression * Expression
     | Position of Expression * Expression * Expression option
     | Trim of TrimSpecification option * Expression option * Expression
+    | CurrentDate
+    | CurrentTime of int option
+    | CurrentTimestamp of int option
+    | LocalTime of int option
+    | LocalTimestamp of int option
+    | Substring of Expression * Expression * Expression option * string option
+    | Overlay of Expression * Expression * Expression * Expression option
+    | Default
 
 and Expression = { Kind: ExpressionKind; Pos: Position }
 
@@ -194,6 +215,11 @@ and Query =
     | SelectQuery of SelectStatement
     | SetOperation of Query * SetOperator * Query
     | WithQuery of bool * Cte list * Query
+    | QueryExpression of
+        Query *
+        (Expression * bool * NullsOrder option) list *
+        (Expression option * FetchClause option) option *
+        LockingClause option
 
 and Cte =
     { Name: Expression
@@ -205,6 +231,9 @@ and TableSourceKind =
     | Subquery of Query * Expression * Expression list option
     | ValuesTable of Expression list list * Expression * Expression list option
     | JoinedTable of JoinSource
+    | Lateral of Query * Expression * Expression list option
+    | Unnest of Expression * bool * Expression * Expression list option
+    | TableSample of TableSource * string * Expression * Expression option
 
 and TableSource =
     { Kind: TableSourceKind; Pos: Position }
@@ -222,6 +251,13 @@ and JoinSource =
 
 and ColumnSource = Column of Expression * Expression option
 
+and GroupingElement =
+    | GroupingSet of Expression list
+    | Rollup of GroupingElement list
+    | Cube of GroupingElement list
+    | GroupingSets of GroupingElement list
+    | EmptyGroupingSet
+
 and FetchClause =
     { Count: Expression
       IsPercent: bool
@@ -230,9 +266,10 @@ and FetchClause =
 and SelectStatement =
     { IsDistinct: bool
       Columns: ColumnSource list
-      From: TableSource option
+      From: TableSource list
       Where: Expression option
-      GroupBy: Expression list
+      GroupBy: GroupingElement list
+      GroupByDistinct: bool
       Having: Expression option
       Window: (Expression * WindowDefinition) list
       OrderBy: (Expression * bool * NullsOrder option) list
@@ -243,19 +280,27 @@ and SelectStatement =
 type InsertSource =
     | Values of Expression list list
     | Query of Query
+    | DefaultValues
 
 type InsertStatement =
     { Table: Expression
       Columns: Expression list option
-      Source: InsertSource }
+      Source: InsertSource
+      Override: bool option }
+
+type SetClause =
+    | SingleSet of Expression * Expression
+    | MultipleSet of Expression list * Expression list
 
 type UpdateStatement =
     { Table: Expression
-      Set: (Expression * Expression) list
+      TableAlias: Expression option
+      Set: SetClause list
       Where: Expression option }
 
 type DeleteStatement =
     { Table: Expression
+      TableAlias: Expression option
       Where: Expression option }
 
 type MergeMatchCondition =
@@ -279,37 +324,108 @@ type MergeStatement =
       On: Expression
       WhenClauses: MergeWhenClause list }
 
+type ReferentialAction =
+    | Cascade
+    | SetNull
+    | SetDefault
+    | Restrict
+    | NoAction
+
+type ForeignKeyConstraint =
+    { Name: Expression option
+      Columns: Expression list
+      Table: Expression
+      RefColumns: Expression list option
+      OnUpdate: ReferentialAction option
+      OnDelete: ReferentialAction option }
+
 type ColumnDefinition =
     { Name: Expression
       DataType: DataType
       IsNullable: bool option
       IsPrimaryKey: bool
-      DefaultValue: Expression option }
+      DefaultValue: Expression option
+      IsUnique: bool
+      References: ForeignKeyConstraint option
+      Check: Expression option }
+
+type TableConstraint =
+    | PrimaryKey of Expression option * Expression list
+    | Unique of Expression option * Expression list
+    | ForeignKey of ForeignKeyConstraint
+    | Check of Expression option * Expression
 
 type CreateTableStatement =
     { Table: Expression
-      Columns: ColumnDefinition list }
+      Columns: ColumnDefinition list
+      Constraints: TableConstraint list
+      AsQuery: Query option
+      AsColumns: Expression list option
+      WithData: bool option }
 
-type CreateIndexStatement =
+type CreateViewStatement =
     { Name: Expression
-      Table: Expression
-      Columns: Expression list
-      Unique: bool }
-
-type CreateViewStatement = { Name: Expression; Query: Query }
+      Columns: Expression list option
+      Query: Query }
 
 type DropStatement =
-    | DropTable of Expression
-    | DropIndex of Expression
+    | DropTable of Expression * bool
     | DropView of Expression
+    | DropRole of Expression
+
+type ColumnAlteration =
+    | SetDefault of Expression
+    | DropDefault
+    | SetNotNull
+    | DropNotNull
+    | SetDataType of DataType
 
 type AlterTableAction =
     | AddColumn of ColumnDefinition
     | DropColumn of Expression
+    | AlterColumn of Expression * ColumnAlteration
+    | AddConstraint of TableConstraint
+    | DropConstraint of Expression
 
 type AlterTableStatement =
     { Table: Expression
       Action: AlterTableAction }
+
+type PrivilegeAction =
+    | Select of Expression list option
+    | Insert of Expression list option
+    | Update of Expression list option
+    | Delete
+    | References of Expression list option
+    | Usage
+    | Trigger
+    | Execute
+
+type Privileges =
+    | AllPrivileges
+    | Actions of PrivilegeAction list
+
+type GrantStatement =
+    | GrantPrivileges of Privileges * Expression * Expression list * bool
+    | GrantRoles of Expression list * Expression list * bool
+
+type RevokeStatement =
+    | RevokePrivileges of Privileges * Expression * Expression list
+    | RevokeRoles of Expression list * Expression list
+
+type IsolationLevel =
+    | ReadUncommitted
+    | ReadCommitted
+    | RepeatableRead
+    | Serializable
+
+type TransactionAccessMode =
+    | ReadOnly
+    | ReadWrite
+
+type TransactionMode =
+    | Isolation of IsolationLevel
+    | AccessMode of TransactionAccessMode
 
 type StatementKind =
     | Select of Query
@@ -318,11 +434,21 @@ type StatementKind =
     | Delete of DeleteStatement
     | Merge of MergeStatement
     | CreateTable of CreateTableStatement
-    | CreateIndex of CreateIndexStatement
     | CreateView of CreateViewStatement
     | Drop of DropStatement
     | AlterTable of AlterTableStatement
-    | Truncate of Expression
+    | Truncate of Expression * bool option
+    | Grant of GrantStatement
+    | Revoke of RevokeStatement
+    | CreateRole of Expression
+    | DropRole of Expression
+    | StartTransaction of TransactionMode list
+    | Commit of bool option
+    | Rollback of bool option * Expression option
+    | Savepoint of Expression
+    | ReleaseSavepoint of Expression
+    | SetTransaction of bool * TransactionMode list
+    | SetConstraints of Expression list option * bool
     | WithStatement of bool * Cte list * StatementKind
 
 type Statement = { Kind: StatementKind; Pos: Position }

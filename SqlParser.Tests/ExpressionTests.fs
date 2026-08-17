@@ -11,6 +11,11 @@ let parseExpr sql =
 
 let parse sql = (parseExpr sql).Kind
 
+let parseFails sql =
+    match SqlParser.parse sql with
+    | Ok _ -> failwithf "Expected parse failure for %s" sql
+    | Error _ -> ()
+
 [<Fact>]
 let ``Literal expressions verification`` () =
     Assert.Equal(Literal(Number 123m), parse "SELECT 123")
@@ -42,7 +47,7 @@ let ``Case expression verification`` () =
 [<Fact>]
 let ``Function call verification`` () =
     match parse "SELECT COUNT(*)" with
-    | FunctionCall({ Kind = Identifier "COUNT" }, false, [ { Kind = Star } ], None) -> ()
+    | FunctionCall({ Kind = Identifier "COUNT" }, false, [ { Kind = Star } ], None, None, None) -> ()
     | res -> Assert.Fail(sprintf "Expected COUNT(*), got %A" res)
 
 [<Fact>]
@@ -56,7 +61,7 @@ let ``Expression precedence verification`` () =
 [<Fact>]
 let ``Aggregate functions verification`` () =
     match parse "SELECT COUNT(DISTINCT id)" with
-    | FunctionCall({ Kind = Identifier "COUNT" }, true, [ { Kind = Identifier "ID" } ], None) -> ()
+    | FunctionCall({ Kind = Identifier "COUNT" }, true, [ { Kind = Identifier "ID" } ], None, None, None) -> ()
     | res -> Assert.Fail(sprintf "Expected COUNT(DISTINCT id), got %A" res)
 
 [<Fact>]
@@ -101,3 +106,89 @@ let ``TRIM verification`` () =
     match parse "SELECT TRIM(BOTH ' ' FROM ' abc ')" with
     | Trim(Some Both, Some { Kind = Literal(String " ") }, { Kind = Literal(String " abc ") }) -> ()
     | res -> Assert.Fail(sprintf "Expected Trim, got %A" res)
+
+[<Fact>]
+let ``EXTRACT verification`` () =
+    match parse "SELECT EXTRACT(YEAR FROM hire_date)" with
+    | Extract({ Kind = Identifier "YEAR" }, { Kind = Identifier "HIRE_DATE" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected Extract, got %A" res)
+
+[<Fact>]
+let ``SUBSTRING FROM FOR verification`` () =
+    match parse "SELECT SUBSTRING(name FROM 2 FOR 3)" with
+    | Substring({ Kind = Identifier "NAME" }, { Kind = Literal(Number 2m) }, Some { Kind = Literal(Number 3m) }, None) ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected Substring, got %A" res)
+
+[<Fact>]
+let ``OVERLAY PLACING verification`` () =
+    match parse "SELECT OVERLAY(name PLACING 'x' FROM 2)" with
+    | Overlay({ Kind = Identifier "NAME" }, { Kind = Literal(String "x") }, { Kind = Literal(Number 2m) }, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected Overlay, got %A" res)
+
+[<Fact>]
+let ``Datetime value functions verification`` () =
+    match parse "SELECT CURRENT_DATE" with
+    | CurrentDate -> ()
+    | res -> Assert.Fail(sprintf "Expected CurrentDate, got %A" res)
+
+    match parse "SELECT CURRENT_TIMESTAMP(3)" with
+    | CurrentTimestamp(Some 3) -> ()
+    | res -> Assert.Fail(sprintf "Expected CurrentTimestamp(3), got %A" res)
+
+    match parse "SELECT LOCALTIME" with
+    | LocalTime None -> ()
+    | res -> Assert.Fail(sprintf "Expected LocalTime, got %A" res)
+
+[<Fact>]
+let ``Quantified comparison verification`` () =
+    match parse "SELECT id = ANY (SELECT id FROM users)" with
+    | QuantifiedComparison(Equal, Any, { Kind = Identifier "ID" }, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected quantified comparison ANY, got %A" res)
+
+    match parse "SELECT id > ALL (SELECT id FROM users)" with
+    | QuantifiedComparison(GreaterThan, All, { Kind = Identifier "ID" }, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected quantified comparison ALL, got %A" res)
+
+    match parse "SELECT id = SOME (SELECT id FROM users)" with
+    | QuantifiedComparison(Equal, SomeQuantifier, { Kind = Identifier "ID" }, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected quantified comparison SOME, got %A" res)
+
+[<Fact>]
+let ``Standalone quantified subquery is rejected`` () =
+    parseFails "SELECT ANY (SELECT id FROM users)"
+    parseFails "SELECT SOME (SELECT id FROM users)"
+    parseFails "SELECT x FROM t WHERE ALL (SELECT id FROM users)"
+
+[<Fact>]
+let ``DEFAULT as a general expression is rejected`` () =
+    parseFails "SELECT DEFAULT"
+    parseFails "SELECT 1 + DEFAULT"
+
+[<Fact>]
+let ``FILTER clause verification`` () =
+    match parse "SELECT COUNT(*) FILTER (WHERE x > 0)" with
+    | FunctionCall({ Kind = Identifier "COUNT" },
+                   false,
+                   [ { Kind = Star } ],
+                   None,
+                   Some { Kind = BinaryOp(GreaterThan, { Kind = Identifier "X" }, { Kind = Literal(Number 0m) }) },
+                   None) -> ()
+    | res -> Assert.Fail(sprintf "Expected FILTER clause, got %A" res)
+
+[<Fact>]
+let ``WITHIN GROUP verification`` () =
+    match parse "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x)" with
+    | FunctionCall({ Kind = Identifier "PERCENTILE_CONT" },
+                   false,
+                   [ { Kind = Literal(Number 0.5m) } ],
+                   None,
+                   None,
+                   Some [ { Kind = Identifier "X" }, true, None ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected WITHIN GROUP, got %A" res)
+
+[<Fact>]
+let ``COLLATE verification`` () =
+    match parse "SELECT name COLLATE \"C\"" with
+    | Collate({ Kind = Identifier "NAME" }, { Kind = Identifier "C" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected Collate, got %A" res)

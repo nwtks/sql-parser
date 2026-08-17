@@ -30,7 +30,7 @@ module Types =
               >>% NationalVarchar
               attempt (pKeyword "NATIONAL" .>> pKeyword "CHAR" .>> pKeyword "VARYING")
               >>% NationalVarchar
-              pKeyword "NCHAR" .>> pKeyword "VARYING" >>% NationalVarchar
+              attempt (pKeyword "NCHAR" .>> pKeyword "VARYING") >>% NationalVarchar
               attempt (
                   pKeyword "NATIONAL"
                   .>> pKeyword "CHARACTER"
@@ -41,8 +41,8 @@ module Types =
               attempt (pKeyword "NCHAR" .>> pKeyword "LARGE" .>> pKeyword "OBJECT")
               >>% NationalCharacterLargeObject
               pKeyword "NCLOB" >>% NationalCharacterLargeObject
-              pKeyword "NATIONAL" .>> pKeyword "CHARACTER" >>% NationalCharacter
-              pKeyword "NATIONAL" .>> pKeyword "CHAR" >>% NationalCharacter
+              attempt (pKeyword "NATIONAL" .>> pKeyword "CHARACTER") >>% NationalCharacter
+              attempt (pKeyword "NATIONAL" .>> pKeyword "CHAR") >>% NationalCharacter
               pKeyword "NCHAR" >>% NationalCharacter ]
         .>>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
         |>> fun (typ, len) -> typ len
@@ -133,8 +133,12 @@ module Types =
                 (sepBy1 (pIdentifierExpr .>>. pDataType) (token (pstring ",")))
         |>> RowType
 
+    // Element type parser: all types EXCEPT collection types (to avoid left recursion)
+    let pDataTypeElement, pDataTypeElementRef =
+        createParserForwardedToRef<DataType, unit> ()
+
     let pCollectionType =
-        pDataType
+        pDataTypeElement
         .>>. choice
             [ pKeyword "ARRAY"
               .>>. opt (between (token (pstring "[")) (token (pstring "]")) pUnsignedInteger)
@@ -142,7 +146,7 @@ module Types =
               pKeyword "MULTISET" >>% MultisetType ]
         |>> fun (t, f) -> f t
 
-    pDataTypeRef.Value <-
+    pDataTypeElementRef.Value <-
         choice
             [ attempt pCharacterType
               attempt pNationalCharacterType
@@ -153,5 +157,6 @@ module Types =
               attempt pDateTimeType
               attempt pIntervalType
               attempt pRowType
-              attempt pCollectionType
               pIdentifierExpr |>> UserDefinedType ]
+
+    pDataTypeRef.Value <- choice [ attempt pCollectionType; pDataTypeElement ]

@@ -10,6 +10,11 @@ let test p s =
     | Success(result, _, _) -> result
     | Failure(errorMsg, _, _) -> failwith errorMsg
 
+let testFails p s =
+    match run (p .>> eof) s with
+    | Success _ -> failwith (sprintf "Expected parse failure for %s" s)
+    | Failure _ -> ()
+
 [<Fact>]
 let ``Regular identifiers are parsed correctly`` () =
     Assert.Equal("ID", test pIdentifier "id")
@@ -46,6 +51,35 @@ let ``Binary literals are parsed correctly`` () =
     Assert.Equal<byte array>([| 0x01uy; 0xAFuy |], test pHexStringLiteral "X'01AF'")
 
 [<Fact>]
+let ``Hex literal with spaces between hexit pairs is parsed`` () =
+    Assert.Equal<byte array>([| 0x01uy; 0xAFuy; 0x02uy |], test pHexStringLiteral "X'01 AF 02'")
+
+[<Fact>]
+let ``Invalid date values are rejected`` () =
+    testFails pDateLiteral "DATE '2023-13-01'"
+    testFails pDateLiteral "DATE '2023-01-40'"
+    testFails pDateLiteral "DATE '2023--1-01'"
+
+[<Fact>]
+let ``Invalid interval values are rejected`` () =
+    testFails pIntervalLiteral "INTERVAL 'abc' YEAR"
+    testFails pIntervalLiteral "INTERVAL '1-2' YEAR"
+
+    Assert.Equal(
+        { IsNegative = false
+          ValueString = "1"
+          Qualifier = IntervalQualifier.SingleField Year },
+        test pIntervalLiteral "INTERVAL '1' YEAR"
+    )
+
+    Assert.Equal(
+        { IsNegative = false
+          ValueString = "1:30"
+          Qualifier = IntervalQualifier.Range(Hour, Minute) },
+        test pIntervalLiteral "INTERVAL '1:30' HOUR TO MINUTE"
+    )
+
+[<Fact>]
 let ``Date, Time, Timestamp literals are parsed correctly`` () =
     Assert.Equal({ Year = 2023; Month = 1; Day = 1 }, test pDateLiteral "DATE '2023-01-01'")
 
@@ -75,6 +109,32 @@ let ``Interval literals are parsed correctly`` () =
           Qualifier = IntervalQualifier.Range(Year, Month) },
         test pIntervalLiteral "INTERVAL '1-2' YEAR TO MONTH"
     )
+
+[<Fact>]
+let ``Interval sign inside quotes is parsed`` () =
+    Assert.Equal(
+        { IsNegative = true
+          ValueString = "1-2"
+          Qualifier = IntervalQualifier.Range(Year, Month) },
+        test pIntervalLiteral "INTERVAL '-1-2' YEAR TO MONTH"
+    )
+
+[<Fact>]
+let ``Unicode escape sequences are decoded correctly`` () =
+    Assert.Equal("A", test pUnicodeCharacterStringLiteral "U&'\\0041'")
+    Assert.Equal("AB", test pUnicodeCharacterStringLiteral "U&'\\0041\\0042'")
+    Assert.Equal("A", test pUnicodeDelimitedIdentifier "U&\"\\0041\"")
+
+[<Fact>]
+let ``Large exponent literals do not overflow`` () =
+    let result = test pNumericLiteral "1E400"
+    Assert.True(result > 0m)
+
+[<Fact>]
+let ``Invalid time seconds fail cleanly`` () =
+    match run (pTimeLiteral .>> eof) "TIME '12:00:00.5.5'" with
+    | Failure _ -> ()
+    | Success _ -> Assert.Fail("Expected TIME literal with invalid seconds to fail")
 
 [<Fact>]
 let ``Boolean literals are parsed correctly`` () =

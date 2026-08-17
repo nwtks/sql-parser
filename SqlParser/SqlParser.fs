@@ -6,6 +6,7 @@ open SqlParser.DmlParser
 open SqlParser.DdlParser
 open SqlParser.ExpressionParser
 open SqlParser.QueryParser
+open SqlParser.TransactionParser
 
 module SqlParser =
     let pStatement, pStatementRef = createParserForwardedToRef<Statement, unit> ()
@@ -27,8 +28,10 @@ module SqlParser =
     let pDdl =
         choice
             [ attempt pCreateTableStatement
-              attempt pCreateIndexStatement
               attempt pCreateViewStatement
+              attempt pCreateRoleStatement
+              attempt pGrantStatement
+              attempt pRevokeStatement
               pDropStatement
               pAlterTableStatement
               pTruncateStatement ]
@@ -43,7 +46,8 @@ module SqlParser =
         choice
             [ attempt pWithStatement
               attempt (pDml |> withStmtPosition)
-              attempt (pDdl |> withStmtPosition) ]
+              attempt (pDdl |> withStmtPosition)
+              attempt (pTransactionStatement |> withStmtPosition) ]
 
     let parse sql =
         match run (ws >>. pStatement .>> eof) sql with

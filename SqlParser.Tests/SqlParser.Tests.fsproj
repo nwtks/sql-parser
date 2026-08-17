@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <IsPackable>false</IsPackable>
     <CollectCoverage>true</CollectCoverage>
     <CoverletOutputFormat>cobertura</CoverletOutputFormat>
@@ -13,6 +13,7 @@
     <Compile Include="QueryTests.fs" />
     <Compile Include="DmlTests.fs" />
     <Compile Include="DdlTests.fs" />
+    <Compile Include="TransactionTests.fs" />
     <Compile Include="SqlParserTests.fs" />
   </ItemGroup>
 

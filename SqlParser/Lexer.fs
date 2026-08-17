@@ -407,8 +407,8 @@ module Lexer =
 
     let parseHead p n = loopParseHead p n []
 
-    let hexToInt32 chars =
-        System.Convert.ToInt32(chars |> List.toArray |> string, 16)
+    let hexToInt32 (chars: char list) =
+        System.Convert.ToInt32(System.String.Concat(chars), 16)
 
     let pUnicode4DigitEscape esc =
         pstring esc >>. parseHead pHexit 4
@@ -496,9 +496,12 @@ module Lexer =
                 pQuote
                 pQuote
                 (many (
-                    pHexit .>>. pHexit
-                    |>> fun (h1, h2) -> System.Convert.ToByte(sprintf "%c%c" h1 h2, 16)
-                ))
+                    attempt (
+                        spaces >>. pHexit .>>. pHexit
+                        |>> fun (h1, h2) -> System.Convert.ToByte(sprintf "%c%c" h1 h2, 16)
+                    )
+                 )
+                 .>> spaces)
 
         pchar 'X' >>. pSegment .>>. many (attempt (pSeparator >>. pSegment))
         |>> fun (first, rest) -> first :: rest |> List.concat |> List.toArray
@@ -545,7 +548,14 @@ module Lexer =
             (pchar 'E' <|> pchar 'e')
             (pipe2 (opt (pchar '+' <|> pchar '-')) (many1Chars digit) (fun s d ->
                 (Option.defaultValue '+' s |> string) + d))
-            (fun m _ e -> m * decimal (10.0 ** float e))
+            (fun m _ e ->
+                let exp = int e
+
+                if exp > 28 then
+                    // Decimal max exponent is ~28; clamp to avoid OverflowException
+                    m * decimal (10.0 ** float (min exp 28))
+                else
+                    m * decimal (10.0 ** float exp))
         .>> ws
 
     let pNumericLiteral: Parser<decimal, unit> =
@@ -557,7 +567,15 @@ module Lexer =
         <|> (pKeyword "UNKNOWN" >>% None)
 
     let pDateValue =
-        pipe3 (pint32 .>> pchar '-') (pint32 .>> pchar '-') pint32 (fun y m d -> { Year = y; Month = m; Day = d })
+        pUnsignedInteger .>> pchar '-' .>>. pUnsignedInteger .>> pchar '-'
+        .>>. pUnsignedInteger
+        >>= fun ((y, m), d) ->
+            let yi, mi, di = int y, int m, int d
+
+            if mi < 1 || mi > 12 || di < 1 || di > 31 then
+                fail "invalid date"
+            else
+                preturn { Year = yi; Month = mi; Day = di }
 
     let pDateLiteral = pKeyword "DATE" >>. between pQuote pQuote pDateValue .>> ws
 
@@ -569,7 +587,10 @@ module Lexer =
         pipe4
             (pint32 .>> pchar ':')
             (pint32 .>> pchar ':')
-            (many1Chars (digit <|> pchar '.') |>> decimal)
+            (pipe2 (many1Chars digit) (opt (pchar '.' >>. manyChars digit)) (fun s f ->
+                match f with
+                | Some frac -> decimal (s + "." + frac)
+                | None -> decimal s))
             (opt (spaces >>. pTimeZoneOffset))
             (fun h m s tz ->
                 { Hour = h
@@ -601,22 +622,49 @@ module Lexer =
             | Some e -> IntervalQualifier.Range(startF, e)
             | None -> IntervalQualifier.SingleField startF
 
+    let isValidIntervalValue (q: IntervalQualifier) (s: string) =
+        let d = @"\d+"
+        let sec = @"\d+(\.\d+)?"
+
+        let pattern =
+            match q with
+            | IntervalQualifier.SingleField Year
+            | IntervalQualifier.SingleField Month
+            | IntervalQualifier.SingleField Day
+            | IntervalQualifier.SingleField Hour
+            | IntervalQualifier.SingleField Minute -> "^" + d + "$"
+            | IntervalQualifier.SingleField Second -> "^" + sec + "$"
+            | IntervalQualifier.Range(Year, Month) -> "^" + d + "-" + d + "$"
+            | IntervalQualifier.Range(Day, Hour) -> "^" + d + @"\s+" + d + ":" + d + "$"
+            | IntervalQualifier.Range(Day, Minute) -> "^" + d + @"\s+" + d + ":" + d + ":" + d + "$"
+            | IntervalQualifier.Range(Day, Second) -> "^" + d + @"\s+" + d + ":" + d + ":" + sec + "$"
+            | IntervalQualifier.Range(Hour, Minute) -> "^" + d + ":" + d + "$"
+            | IntervalQualifier.Range(Hour, Second) -> "^" + d + ":" + d + ":" + sec + "$"
+            | IntervalQualifier.Range(Minute, Second) -> "^" + d + ":" + sec + "$"
+            | _ -> "^$"
+
+        System.Text.RegularExpressions.Regex.IsMatch(s, pattern)
+
     let pIntervalLiteral =
-        pKeyword "INTERVAL" >>. opt (pchar '-' >>% true <|> (pchar '+' >>% false))
-        .>> ws
-        .>>. between pQuote pQuote (manyChars (noneOf "'"))
+        pKeyword "INTERVAL" >>. ws .>>. between pQuote pQuote (manyChars (noneOf "'"))
         .>> ws
         .>>. pIntervalQualifier
         .>> ws
-        |>> fun ((isNegOpt, v), q) ->
-            let isNeg =
-                match isNegOpt with
-                | Some n -> n
-                | None -> false
+        >>= fun ((_, v), q) ->
+            // The sign is part of the quoted value per the grammar
+            let (isNeg, valueStr) =
+                match v with
+                | s when s.StartsWith("-") -> true, s.Substring(1)
+                | s when s.StartsWith("+") -> false, s.Substring(1)
+                | s -> false, s
 
-            { IsNegative = isNeg
-              ValueString = v
-              Qualifier = q }
+            if isValidIntervalValue q valueStr then
+                preturn
+                    { IsNegative = isNeg
+                      ValueString = valueStr
+                      Qualifier = q }
+            else
+                fail "invalid interval value"
 
     let pQuestionMark: Parser<char, unit> = pchar '?' .>> ws
 
