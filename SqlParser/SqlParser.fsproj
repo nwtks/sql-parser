@@ -12,7 +12,15 @@
     <Compile Include="QueryParser.fs" />
     <Compile Include="DmlParser.fs" />
     <Compile Include="DdlParser.fs" />
+    <Compile Include="RoutineParser.fs" />
+    <Compile Include="TypeParser.fs" />
     <Compile Include="TransactionParser.fs" />
+    <Compile Include="ControlParser.fs" />
+    <Compile Include="SessionParser.fs" />
+    <Compile Include="CursorParser.fs" />
+    <Compile Include="ConnectionParser.fs" />
+    <Compile Include="DiagnosticsParser.fs" />
+    <Compile Include="DynamicParser.fs" />
     <Compile Include="SqlParser.fs" />
   </ItemGroup>
 

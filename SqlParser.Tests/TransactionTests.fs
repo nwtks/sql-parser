@@ -29,6 +29,24 @@ let ``SET TRANSACTION verification`` () =
     | res -> Assert.Fail(sprintf "Expected SetTransaction LOCAL, got %A" res)
 
 [<Fact>]
+let ``DIAGNOSTICS SIZE transaction mode verification`` () =
+    match parse "START TRANSACTION DIAGNOSTICS SIZE 5" with
+    | StartTransaction [ DiagnosticsSize { Kind = Literal(Number 5m) } ] -> ()
+    | res -> Assert.Fail(sprintf "Expected StartTransaction DIAGNOSTICS SIZE, got %A" res)
+
+    match parse "SET TRANSACTION DIAGNOSTICS SIZE 10" with
+    | SetTransaction(false, [ DiagnosticsSize { Kind = Literal(Number 10m) } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected SetTransaction DIAGNOSTICS SIZE, got %A" res)
+
+    match parse "START TRANSACTION ISOLATION LEVEL READ COMMITTED, DIAGNOSTICS SIZE 5" with
+    | StartTransaction [ Isolation ReadCommitted; DiagnosticsSize { Kind = Literal(Number 5m) } ] -> ()
+    | res -> Assert.Fail(sprintf "Expected StartTransaction with DIAGNOSTICS SIZE combined, got %A" res)
+
+    match parse "SET SESSION CHARACTERISTICS AS TRANSACTION DIAGNOSTICS SIZE 5" with
+    | SetSessionCharacteristics [ DiagnosticsSize { Kind = Literal(Number 5m) } ] -> ()
+    | res -> Assert.Fail(sprintf "Expected SetSessionCharacteristics DIAGNOSTICS SIZE, got %A" res)
+
+[<Fact>]
 let ``SET CONSTRAINTS verification`` () =
     match parse "SET CONSTRAINTS ALL DEFERRED" with
     | SetConstraints(None, true) -> ()

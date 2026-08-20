@@ -5,18 +5,13 @@ open SqlParser.Lexer
 open SqlParser.ExpressionParser
 
 module Types =
-    // This module implements <data type> (section 6.1 of sql-2016-grammar.txt):
-    //
-    //   <data type> ::= <predefined type> | <row type>
-    //                 | <path-resolved user-defined type name> | <reference type>
-    //                 | <collection type>
-    //   <predefined type> ::= <character string type> [ CHARACTER SET ... ]
-    //                       | <national character string type> | <binary large object string type>
-    //                       | <numeric type> | <boolean type> | <datetime type> | <interval type>
+    // 6.1 <data type> — re-export (defined in ExpressionParser/TypeParser)
     let pDataType = ExpressionParser.pDataType
 
+    // 5.3 <unsigned integer> ::= <digit>...
     let pUnsignedInteger = pUnsignedInteger
 
+    // 6.1 <character string type> ::= CHARACTER [ ( <character length> ) ] | CHAR [ ( <length> ) ] | CHARACTER VARYING ( <length> ) | VARCHAR ( <length> ) | <character large object type>
     let pCharacterType =
         choice
             [ attempt (pKeyword "CHARACTER" .>> pKeyword "VARYING") >>% Varchar
@@ -32,6 +27,7 @@ module Types =
         .>>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
         |>> fun (typ, len) -> typ len
 
+    // 6.1 <national character string type> ::= NATIONAL CHARACTER [ ( <character length> ) ] | NCHAR [ ... ] | NATIONAL CHARACTER VARYING ... | <national character large object type>
     let pNationalCharacterType =
         choice
             [ attempt (pKeyword "NATIONAL" .>> pKeyword "CHARACTER" .>> pKeyword "VARYING")
@@ -55,6 +51,7 @@ module Types =
         .>>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
         |>> fun (typ, len) -> typ len
 
+    // 6.1 <binary string type> ::= BINARY [ ( <length> ) ] | BINARY VARYING ( <length> ) | VARBINARY ( <length> ) | <binary large object string type>
     let pBinaryType =
         choice
             [ attempt (pKeyword "BINARY" .>> pKeyword "VARYING") >>% VarBinary
@@ -66,6 +63,7 @@ module Types =
         .>>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
         |>> fun (typ, len) -> typ len
 
+    // 6.1 <exact numeric type> ::= NUMERIC [ ( <precision> [ , <scale> ] ) ] | DECIMAL [ ... ] | DEC [ ... ] | SMALLINT | INTEGER | INT | BIGINT  —  <decimal floating-point type> ::= DECFLOAT [ ( <precision> ) ]
     let pNumericType =
         let pPrecScale =
             between
@@ -104,6 +102,7 @@ module Types =
               pKeyword "INT" >>% Integer
               pKeyword "BIGINT" >>% BigInt ]
 
+    // 6.1 <approximate numeric type> ::= FLOAT [ ( <precision> ) ] | REAL | DOUBLE PRECISION
     let pApproximateNumericType =
         choice
             [ pKeyword "FLOAT"
@@ -112,6 +111,7 @@ module Types =
               pKeyword "REAL" >>% Real
               attempt (pKeyword "DOUBLE" .>> pKeyword "PRECISION") >>% DoublePrecision ]
 
+    // 6.1 <datetime type> ::= DATE | TIME [ ( <time precision> ) ] [ <with or without time zone> ] | TIMESTAMP [ ( <timestamp precision> ) ] [ <with or without time zone> ]
     let pDateTimeType =
         let pTz =
             opt (pKeyword "WITH" <|> pKeyword "WITHOUT" .>> pKeyword "TIME" .>> pKeyword "ZONE")
@@ -130,9 +130,11 @@ module Types =
               .>>. pTz
               |>> fun (p, tz) -> TimestampType(p, tz) ]
 
+    // 6.1 <interval type> ::= INTERVAL <interval qualifier>
     let pIntervalType =
         pKeyword "INTERVAL" >>. many1Chars (noneOf "();,") .>> ws |>> IntervalType
 
+    // 6.1 <row type> ::= ROW <row type body> — <row type body> ::= ( <field definition> [ { , <field definition> }... ] )
     let pRowType =
         pKeyword "ROW"
         >>. between
@@ -141,10 +143,11 @@ module Types =
                 (sepBy1 (pIdentifierExpr .>>. pDataType) (token (pstring ",")))
         |>> RowType
 
-    // Element type parser: all types EXCEPT collection types (to avoid left recursion)
+    // 6.1 <data type> — element type parser: all types EXCEPT collection types (to avoid left recursion)
     let pDataTypeElement, pDataTypeElementRef =
         createParserForwardedToRef<DataType, unit> ()
 
+    // 6.1 <collection type> ::= <array type> | <multiset type> — <array type> ::= <data type> ARRAY [ [ <maximum cardinality> ] ] — <multiset type> ::= <data type> MULTISET
     let pCollectionType =
         pDataTypeElement
         .>>. choice
@@ -165,6 +168,14 @@ module Types =
               attempt pDateTimeType
               attempt pIntervalType
               attempt pRowType
+              // 6.1 <reference type> ::= REF ( <referenced type> ) [ SCOPE <table name> ]
+              // (REF is a reserved word, so it must be tried before the
+              // <path-resolved user-defined type name> fallback below)
+              attempt (
+                  pKeyword "REF" >>. between (token (pstring "(")) (token (pstring ")")) pDataType
+                  .>>. opt (pKeyword "SCOPE" >>. pQualifiedName)
+                  |>> fun (t, scope) -> ReferenceType(t, scope)
+              )
               pIdentifierExpr |>> UserDefinedType ]
 
     pDataTypeRef.Value <- choice [ attempt pCollectionType; pDataTypeElement ]

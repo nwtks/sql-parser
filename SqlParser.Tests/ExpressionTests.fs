@@ -47,7 +47,7 @@ let ``Case expression verification`` () =
 [<Fact>]
 let ``Function call verification`` () =
     match parse "SELECT COUNT(*)" with
-    | FunctionCall({ Kind = Identifier "COUNT" }, false, [ { Kind = Star } ], None, None, None) -> ()
+    | FunctionCall({ Kind = Identifier "COUNT" }, false, [ { Kind = ExpressionKind.Star } ], None, None, None) -> ()
     | res -> Assert.Fail(sprintf "Expected COUNT(*), got %A" res)
 
 [<Fact>]
@@ -141,6 +141,16 @@ let ``Datetime value functions verification`` () =
     | res -> Assert.Fail(sprintf "Expected LocalTime, got %A" res)
 
 [<Fact>]
+let ``NEXT VALUE FOR verification`` () =
+    match parse "SELECT NEXT VALUE FOR order_seq" with
+    | NextValueFor({ Kind = Identifier "ORDER_SEQ" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected NextValueFor, got %A" res)
+
+    match parse "SELECT NEXT VALUE FOR app.order_seq" with
+    | NextValueFor({ Kind = ColumnReference [ "APP"; "ORDER_SEQ" ] }) -> ()
+    | res -> Assert.Fail(sprintf "Expected NextValueFor qualified, got %A" res)
+
+[<Fact>]
 let ``Quantified comparison verification`` () =
     match parse "SELECT id = ANY (SELECT id FROM users)" with
     | QuantifiedComparison(Equal, Any, { Kind = Identifier "ID" }, _) -> ()
@@ -161,8 +171,61 @@ let ``Standalone quantified subquery is rejected`` () =
     parseFails "SELECT x FROM t WHERE ALL (SELECT id FROM users)"
 
 [<Fact>]
-let ``DEFAULT as a general expression is rejected`` () =
-    parseFails "SELECT DEFAULT"
+let ``DEFAULT as a general expression is rejected`` () = parseFails "SELECT DEFAULT"
+
+[<Fact>]
+let ``Method invocation verification`` () =
+    match parse "SELECT a.obj.prune(x)" with
+    | MethodInvocation({ Kind = ColumnReference [ "A"; "OBJ" ] },
+                       { Kind = Identifier "PRUNE" },
+                       [ { Kind = Identifier "X" } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected MethodInvocation, got %A" res)
+
+[<Fact>]
+let ``Method invocation on parenthesized expression verification`` () =
+    match parse "SELECT (a.b).prune(x)" with
+    | MethodInvocation({ Kind = ColumnReference [ "A"; "B" ] },
+                       { Kind = Identifier "PRUNE" },
+                       [ { Kind = Identifier "X" } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected MethodInvocation on parenthesized, got %A" res)
+
+[<Fact>]
+let ``Static method invocation verification`` () =
+    match parse "SELECT my_type::prune(x)" with
+    | StaticMethodInvocation({ Kind = Identifier "MY_TYPE" },
+                             { Kind = Identifier "PRUNE" },
+                             [ { Kind = Identifier "X" } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected StaticMethodInvocation, got %A" res)
+
+[<Fact>]
+let ``NEW specification verification`` () =
+    match parse "SELECT NEW my_type(1, 2)" with
+    | NewSpecification({ Kind = Identifier "MY_TYPE" }, [ { Kind = Literal(Number 1m) }; { Kind = Literal(Number 2m) } ]) ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected NewSpecification, got %A" res)
+
+[<Fact>]
+let ``Field reference verification`` () =
+    match parse "SELECT a.obj.prune(x).field" with
+    | FieldReference({ Kind = MethodInvocation({ Kind = ColumnReference [ "A"; "OBJ" ] },
+                                               { Kind = Identifier "PRUNE" },
+                                               [ { Kind = Identifier "X" } ]) },
+                     { Kind = Identifier "FIELD" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected FieldReference, got %A" res)
+
+[<Fact>]
+let ``Dotted identifier chain without parens stays a column reference`` () =
+    match parse "SELECT a.b.c" with
+    | ColumnReference [ "A"; "B"; "C" ] -> ()
+    | res -> Assert.Fail(sprintf "Expected ColumnReference, got %A" res)
+
+[<Fact>]
+let ``Method invocation on last chain segment verification`` () =
+    match parse "SELECT a.b.c(x)" with
+    | MethodInvocation({ Kind = ColumnReference [ "A"; "B" ] }, { Kind = Identifier "C" }, [ { Kind = Identifier "X" } ]) ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected MethodInvocation on last segment, got %A" res)
+
     parseFails "SELECT 1 + DEFAULT"
 
 [<Fact>]
@@ -170,7 +233,7 @@ let ``FILTER clause verification`` () =
     match parse "SELECT COUNT(*) FILTER (WHERE x > 0)" with
     | FunctionCall({ Kind = Identifier "COUNT" },
                    false,
-                   [ { Kind = Star } ],
+                   [ { Kind = ExpressionKind.Star } ],
                    None,
                    Some { Kind = BinaryOp(GreaterThan, { Kind = Identifier "X" }, { Kind = Literal(Number 0m) }) },
                    None) -> ()
@@ -201,3 +264,411 @@ let ``GROUPS window frame verification`` () =
                                                  End = Some(Following { Kind = Literal(Number 1m) })
                                                  Exclusion = None } } } -> ()
     | res -> Assert.Fail(sprintf "Expected GROUPS frame, got %A" res)
+
+[<Fact>]
+let ``General value specification keyword forms verification`` () =
+    match parse "SELECT CURRENT_USER" with
+    | CurrentUser -> ()
+    | res -> Assert.Fail(sprintf "Expected CurrentUser, got %A" res)
+
+    match parse "SELECT SESSION_USER" with
+    | SessionUser -> ()
+    | res -> Assert.Fail(sprintf "Expected SessionUser, got %A" res)
+
+    match parse "SELECT SYSTEM_USER" with
+    | SystemUser -> ()
+    | res -> Assert.Fail(sprintf "Expected SystemUser, got %A" res)
+
+    match parse "SELECT USER" with
+    | User -> ()
+    | res -> Assert.Fail(sprintf "Expected User, got %A" res)
+
+    match parse "SELECT VALUE" with
+    | Value -> ()
+    | res -> Assert.Fail(sprintf "Expected Value, got %A" res)
+
+    match parse "SELECT CURRENT_CATALOG" with
+    | CurrentCatalog -> ()
+    | res -> Assert.Fail(sprintf "Expected CurrentCatalog, got %A" res)
+
+    match parse "SELECT CURRENT_SCHEMA" with
+    | CurrentSchema -> ()
+    | res -> Assert.Fail(sprintf "Expected CurrentSchema, got %A" res)
+
+    match parse "SELECT CURRENT_PATH" with
+    | CurrentPath -> ()
+    | res -> Assert.Fail(sprintf "Expected CurrentPath, got %A" res)
+
+    match parse "SELECT CURRENT_ROLE" with
+    | CurrentRole -> ()
+    | res -> Assert.Fail(sprintf "Expected CurrentRole, got %A" res)
+
+    match parse "SELECT CURRENT_DEFAULT_TRANSFORM_GROUP" with
+    | CurrentDefaultTransformGroup -> ()
+    | res -> Assert.Fail(sprintf "Expected CurrentDefaultTransformGroup, got %A" res)
+
+    match parse "SELECT CURRENT_TRANSFORM_GROUP_FOR_TYPE t" with
+    | CurrentTransformGroupForType { Kind = Identifier "T" } -> ()
+    | res -> Assert.Fail(sprintf "Expected CurrentTransformGroupForType, got %A" res)
+
+    match parse "SELECT COLLATION FOR ('abc')" with
+    | CollationFor { Kind = Literal(String "abc") } -> ()
+    | res -> Assert.Fail(sprintf "Expected CollationFor, got %A" res)
+
+[<Fact>]
+let ``TREAT subtype treatment verification`` () =
+    match parse "SELECT TREAT(x AS t)" with
+    | Treat({ Kind = Identifier "X" }, UserDefinedType { Kind = Identifier "T" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected Treat, got %A" res)
+
+[<Fact>]
+let ``DEREF reference resolution verification`` () =
+    match parse "SELECT DEREF(x)" with
+    | Deref { Kind = Identifier "X" } -> ()
+    | res -> Assert.Fail(sprintf "Expected Deref, got %A" res)
+
+[<Fact>]
+let ``ELEMENT multiset element reference verification`` () =
+    match parse "SELECT ELEMENT(x)" with
+    | Element { Kind = Identifier "X" } -> ()
+    | res -> Assert.Fail(sprintf "Expected Element, got %A" res)
+
+[<Fact>]
+let ``ARRAY value constructor verification`` () =
+    match parse "SELECT ARRAY[1, 2, 3]" with
+    | ArrayConstructor [ { Kind = Literal(Number 1m) }; { Kind = Literal(Number 2m) }; { Kind = Literal(Number 3m) } ] ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected ArrayConstructor, got %A" res)
+
+    match parse "SELECT ARRAY(SELECT id FROM t)" with
+    | ArrayQuery _ -> ()
+    | res -> Assert.Fail(sprintf "Expected ArrayQuery, got %A" res)
+
+[<Fact>]
+let ``MULTISET value constructor verification`` () =
+    match parse "SELECT MULTISET[1, 2]" with
+    | MultisetConstructor [ { Kind = Literal(Number 1m) }; { Kind = Literal(Number 2m) } ] -> ()
+    | res -> Assert.Fail(sprintf "Expected MultisetConstructor, got %A" res)
+
+    match parse "SELECT MULTISET(SELECT id FROM t)" with
+    | MultisetQuery _ -> ()
+    | res -> Assert.Fail(sprintf "Expected MultisetQuery, got %A" res)
+
+[<Fact>]
+let ``Array element reference verification`` () =
+    match parse "SELECT arr[1]" with
+    | ArrayElement({ Kind = Identifier "ARR" }, { Kind = Literal(Number 1m) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected ArrayElement, got %A" res)
+
+    match parse "SELECT arr[i + 1]" with
+    | ArrayElement({ Kind = Identifier "ARR" },
+                   { Kind = BinaryOp(Add, { Kind = Identifier "I" }, { Kind = Literal(Number 1m) }) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected ArrayElement with index expr, got %A" res)
+
+    match parse "SELECT arr??(1??)" with
+    | ArrayElement({ Kind = Identifier "ARR" }, { Kind = Literal(Number 1m) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected ArrayElement trigraph, got %A" res)
+
+[<Fact>]
+let ``IS NORMALIZED predicate verification`` () =
+    match parse "SELECT x IS NORMALIZED" with
+    | IsNormalized({ Kind = Identifier "X" }, false, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsNormalized, got %A" res)
+
+    match parse "SELECT x IS NOT NFC NORMALIZED" with
+    | IsNormalized({ Kind = Identifier "X" }, true, Some Nfc) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsNormalized NFC, got %A" res)
+
+    match parse "SELECT x IS NFKD NORMALIZED" with
+    | IsNormalized({ Kind = Identifier "X" }, false, Some Nfkd) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsNormalized NFKD, got %A" res)
+
+[<Fact>]
+let ``IS OF type predicate verification`` () =
+    match parse "SELECT x IS OF (t)" with
+    | IsOfType({ Kind = Identifier "X" }, false, [ Inclusive { Kind = Identifier "T" } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsOfType, got %A" res)
+
+    match parse "SELECT x IS NOT OF (ONLY t1, t2)" with
+    | IsOfType({ Kind = Identifier "X" },
+               true,
+               [ Exclusive { Kind = Identifier "T1" }; Inclusive { Kind = Identifier "T2" } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsOfType ONLY, got %A" res)
+
+[<Fact>]
+let ``IS JSON predicate verification`` () =
+    match parse "SELECT x IS JSON" with
+    | IsJson({ Kind = Identifier "X" }, false, None, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsJson, got %A" res)
+
+    match parse "SELECT x IS NOT JSON VALUE WITH UNIQUE KEYS" with
+    | IsJson({ Kind = Identifier "X" }, true, Some JsonTypeValue, Some true) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsJson VALUE, got %A" res)
+
+    match parse "SELECT x IS JSON ARRAY WITHOUT UNIQUE" with
+    | IsJson({ Kind = Identifier "X" }, false, Some JsonTypeArray, Some false) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsJson ARRAY, got %A" res)
+
+[<Fact>]
+let ``LIKE_REGEX predicate verification`` () =
+    match parse "SELECT x LIKE_REGEX 'a.*'" with
+    | RegexLike({ Kind = Identifier "X" }, false, { Kind = Literal(String "a.*") }, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected RegexLike, got %A" res)
+
+    match parse "SELECT x NOT LIKE_REGEX 'a' FLAG 'i'" with
+    | RegexLike({ Kind = Identifier "X" }, true, { Kind = Literal(String "a") }, Some { Kind = Literal(String "i") }) ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected RegexLike FLAG, got %A" res)
+
+[<Fact>]
+let ``MATCH predicate verification`` () =
+    match parse "SELECT x MATCH (SELECT y FROM t)" with
+    | Match({ Kind = Identifier "X" }, false, None, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected Match, got %A" res)
+
+    match parse "SELECT x MATCH UNIQUE FULL (SELECT y FROM t)" with
+    | Match({ Kind = Identifier "X" }, true, Some Full, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected Match UNIQUE FULL, got %A" res)
+
+[<Fact>]
+let ``MEMBER OF predicate verification`` () =
+    match parse "SELECT x MEMBER OF m" with
+    | MemberOf({ Kind = Identifier "X" }, false, { Kind = Identifier "M" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected MemberOf, got %A" res)
+
+    match parse "SELECT x NOT MEMBER m" with
+    | MemberOf({ Kind = Identifier "X" }, true, { Kind = Identifier "M" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected MemberOf NOT, got %A" res)
+
+[<Fact>]
+let ``SUBMULTISET OF predicate verification`` () =
+    match parse "SELECT x SUBMULTISET OF m" with
+    | SubmultisetOf({ Kind = Identifier "X" }, false, { Kind = Identifier "M" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected SubmultisetOf, got %A" res)
+
+    match parse "SELECT x NOT SUBMULTISET m" with
+    | SubmultisetOf({ Kind = Identifier "X" }, true, { Kind = Identifier "M" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected SubmultisetOf NOT, got %A" res)
+
+[<Fact>]
+let ``IS A SET predicate verification`` () =
+    match parse "SELECT x IS A SET" with
+    | IsSet({ Kind = Identifier "X" }, false) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsSet, got %A" res)
+
+    match parse "SELECT x IS NOT A SET" with
+    | IsSet({ Kind = Identifier "X" }, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsSet NOT, got %A" res)
+
+[<Fact>]
+let ``Period predicate verification`` () =
+    match parse "SELECT p1 EQUALS p2" with
+    | PeriodPredicate(PeriodEquals, { Kind = Identifier "P1" }, { Kind = Identifier "P2" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected PeriodEquals, got %A" res)
+
+    match parse "SELECT p1 CONTAINS PERIOD (s, e)" with
+    | PeriodPredicate(PeriodContains,
+                      { Kind = Identifier "P1" },
+                      { Kind = PeriodValue({ Kind = Identifier "S" }, { Kind = Identifier "E" }) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected PeriodContains, got %A" res)
+
+    match parse "SELECT p1 IMMEDIATELY PRECEDES p2" with
+    | PeriodPredicate(PeriodImmediatelyPrecedes, { Kind = Identifier "P1" }, { Kind = Identifier "P2" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected PeriodImmediatelyPrecedes, got %A" res)
+
+    match parse "SELECT p1 SUCCEEDS p2" with
+    | PeriodPredicate(PeriodSucceeds, { Kind = Identifier "P1" }, { Kind = Identifier "P2" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected PeriodSucceeds, got %A" res)
+
+[<Fact>]
+let ``PERIOD value expression verification`` () =
+    match parse "SELECT PERIOD (s, e)" with
+    | PeriodValue({ Kind = Identifier "S" }, { Kind = Identifier "E" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected PeriodValue, got %A" res)
+
+[<Fact>]
+let ``JSON_VALUE function verification`` () =
+    match parse "SELECT JSON_VALUE(doc, '$.name')" with
+    | JsonValue({ Context = { Kind = Identifier "DOC" }
+                  Path = { Kind = Literal(String "$.name") }
+                  PathName = None
+                  Passing = [] },
+                None,
+                None,
+                None) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonValue, got %A" res)
+
+    match parse "SELECT JSON_VALUE(doc, '$.x' RETURNING INT DEFAULT 0 ON EMPTY ERROR ON ERROR)" with
+    | JsonValue({ Context = { Kind = Identifier "DOC" } },
+                Some Integer,
+                Some(JsonDefault { Kind = Literal(Number 0m) }),
+                Some JsonError) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonValue with clauses, got %A" res)
+
+[<Fact>]
+let ``JSON_QUERY function verification`` () =
+    match parse "SELECT JSON_QUERY(doc, '$.x' WITH WRAPPER)" with
+    | JsonQuery({ Context = { Kind = Identifier "DOC" } },
+                None,
+                Some { WithWrapper = true
+                       Conditional = None
+                       Array = false },
+                None,
+                None,
+                None) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonQuery, got %A" res)
+
+    match
+        parse
+            "SELECT JSON_QUERY(doc, '$.x' RETURNING VARCHAR(100) FORMAT JSON WITHOUT ARRAY WRAPPER OMIT QUOTES ON SCALAR STRING NULL ON EMPTY ERROR ON ERROR)"
+    with
+    | JsonQuery({ Context = { Kind = Identifier "DOC" } },
+                Some { Returning = Varchar(Some 100)
+                       Format = Some(JsonEncoding None) },
+                Some { WithWrapper = false
+                       Conditional = None
+                       Array = true },
+                Some Omit,
+                Some JsonQueryNull,
+                Some JsonQueryError) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonQuery full, got %A" res)
+
+[<Fact>]
+let ``JSON_OBJECT function verification`` () =
+    match parse "SELECT JSON_OBJECT('a' VALUE 1)" with
+    | JsonObject([ { Name = { Kind = Literal(String "a") }
+                     Value = { Kind = Literal(Number 1m) }
+                     Key = false } ],
+                 None,
+                 None,
+                 None) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonObject, got %A" res)
+
+    match parse "SELECT JSON_OBJECT(KEY 'a' VALUE 1 ABSENT ON NULL WITH UNIQUE KEYS RETURNING VARCHAR(50))" with
+    | JsonObject([ { Name = { Kind = Literal(String "a") }
+                     Value = { Kind = Literal(Number 1m) }
+                     Key = true } ],
+                 Some JsonAbsentOnNull,
+                 Some true,
+                 Some _) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonObject full, got %A" res)
+
+    match parse "SELECT JSON_OBJECT('a' : 1)" with
+    | JsonObject([ { Name = { Kind = Literal(String "a") }
+                     Value = { Kind = Literal(Number 1m) }
+                     Key = false } ],
+                 None,
+                 None,
+                 None) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonObject colon form, got %A" res)
+
+[<Fact>]
+let ``JSON_ARRAY function verification`` () =
+    match parse "SELECT JSON_ARRAY(1, 2, 3)" with
+    | JsonArray([ { Kind = Literal(Number 1m) }; { Kind = Literal(Number 2m) }; { Kind = Literal(Number 3m) } ],
+                None,
+                None) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonArray, got %A" res)
+
+    match parse "SELECT JSON_ARRAY(NULL ON NULL RETURNING VARCHAR(50))" with
+    | JsonArray([], Some JsonNullOnNull, Some _) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonArray null clause, got %A" res)
+
+[<Fact>]
+let ``JSON_OBJECTAGG function verification`` () =
+    match parse "SELECT JSON_OBJECTAGG('a' VALUE x)" with
+    | JsonObjectAgg({ Name = { Kind = Literal(String "a") }
+                      Value = { Kind = Identifier "X" } },
+                    None,
+                    None,
+                    None) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonObjectAgg, got %A" res)
+
+[<Fact>]
+let ``JSON_ARRAYAGG function verification`` () =
+    match parse "SELECT JSON_ARRAYAGG(x ORDER BY y)" with
+    | JsonArrayAgg({ Kind = Identifier "X" }, Some [ { Kind = Identifier "Y" }, true, None ], None, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonArrayAgg, got %A" res)
+
+[<Fact>]
+let ``JSON_EXISTS predicate verification`` () =
+    match parse "SELECT JSON_EXISTS(doc, '$.x')" with
+    | JsonExists({ Context = { Kind = Identifier "DOC" } }, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonExists, got %A" res)
+
+    match parse "SELECT JSON_EXISTS(doc, '$.x' TRUE ON ERROR)" with
+    | JsonExists({ Context = { Kind = Identifier "DOC" } }, Some JsonExistsTrue) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonExists ON ERROR, got %A" res)
+
+[<Fact>]
+let ``JSON API passing clause verification`` () =
+    match parse "SELECT JSON_VALUE(doc, '$.x' PASSING a AS p)" with
+    | JsonValue({ Context = { Kind = Identifier "DOC" }
+                  Passing = [ ({ Kind = Identifier "A" }, { Kind = Identifier "P" }) ] },
+                None,
+                None,
+                None) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonValue PASSING, got %A" res)
+
+[<Fact>]
+let ``Nested row number function verification`` () =
+    match parse "SELECT ROW_NUMBER(BEGIN_PARTITION)" with
+    | NestedRowNumber RowMarker.BeginPartition -> ()
+    | res -> Assert.Fail(sprintf "Expected NestedRowNumber BEGIN_PARTITION, got %A" res)
+
+    match parse "SELECT ROW_NUMBER(END_FRAME)" with
+    | NestedRowNumber RowMarker.EndFrame -> ()
+    | res -> Assert.Fail(sprintf "Expected NestedRowNumber END_FRAME, got %A" res)
+
+[<Fact>]
+let ``VALUE_OF function verification`` () =
+    match parse "SELECT VALUE_OF(x AT CURRENT_ROW)" with
+    | ValueOf({ Kind = Identifier "X" },
+              { Marker = RowMarker.CurrentRow
+                Delta = None },
+              None) -> ()
+    | res -> Assert.Fail(sprintf "Expected ValueOf CURRENT_ROW, got %A" res)
+
+    match parse "SELECT VALUE_OF(x AT END_FRAME - 1, 0)" with
+    | ValueOf({ Kind = Identifier "X" }, marker, Some { Kind = Literal(Number 0m) }) ->
+        match marker with
+        | { Marker = RowMarker.EndFrame
+            Delta = Some(false, ({ Kind = Literal(Number 1m) })) } -> ()
+        | res -> Assert.Fail(sprintf "Expected ValueOf delta, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected ValueOf with delta and default, got %A" res)
+
+[<Fact>]
+let ``Window frame row pattern measures verification`` () =
+    match
+        parse
+            "SELECT SUM(x) OVER (MEASURES y AS m ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW PATTERN (A) DEFINE A AS a > 0)"
+    with
+    | WindowFunction { Function = { Kind = Identifier "SUM" }
+                       Args = [ { Kind = Identifier "X" } ]
+                       Window = { Frame = Some frame } } ->
+        match frame with
+        | { Unit = Rows
+            Start = UnboundedPreceding
+            End = Some CurrentRow
+            Exclusion = None
+            Measures = Some [ { Expression = { Kind = Identifier "Y" }
+                                Name = { Kind = Identifier "M" } } ]
+            RowPattern = Some { AfterMatch = None
+                                InitialOrSeek = None
+                                Pattern = { Terms = [ { Factors = [ { Primary = RowPatternVariable { Kind = Identifier "A" }
+                                                                      Quantifier = None } ] } ] }
+                                Subset = []
+                                Define = [ { Name = { Kind = Identifier "A" }
+                                             Condition = { Kind = BinaryOp(GreaterThan,
+                                                                           { Kind = Identifier "A" },
+                                                                           { Kind = Literal(Number 0m) }) } } ] } } ->
+            ()
+        | res -> Assert.Fail(sprintf "Expected window row pattern, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected window row pattern, got %A" res)
+
+[<Fact>]
+let ``Nested window function invalid syntax is rejected`` () =
+    parseFails "SELECT ROW_NUMBER(BEGIN)"
+    // VALUE_OF(x) without AT parses as a plain function call, so use a form that
+    // cannot be consumed by the routine-invocation fallback either.
+    parseFails "SELECT VALUE_OF(x AT 5)"

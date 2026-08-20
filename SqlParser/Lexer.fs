@@ -3,10 +3,7 @@ namespace SqlParser
 open FParsec
 
 module Lexer =
-    // This module implements the lexical elements of SQL-2016 (section 5 of
-    // sql-2016-grammar.txt): <token> and its parts — <key word>, <reserved word>,
-    // <identifier>, <character string literal>, <numeric literal>, <host parameter>,
-    // <comment>, and the <separator> whitespace handling.
+    // 5.2 <reserved word> — keywords that cannot be used as <regular identifier>
     let reservedWords =
         Set.ofList
             [ "ABS"
@@ -373,18 +370,24 @@ module Lexer =
               "WITHOUT"
               "YEAR" ]
 
+    // 5.2 <separator> — <white space> | <comment>
     let ws = spaces
 
+    // 5.2 <token> helper — <token> [ <separator> ]
     let token p = p .>> ws
 
+    // 5.2 <key word> ::= <reserved word> | <non-reserved word>
     let pKeyword s =
         attempt (pstringCI s .>> notFollowedBy (asciiLetter <|> digit <|> pchar '_'))
         .>> ws
 
+    // 5.2 <quote> ::= '
     let pQuote = pchar '\''
 
+    // 5.3 <hexit> ::= <digit> | A | B | C | D | E | F | a | b | c | d | e | f
     let pHexit = hex <|> digit
 
+    // 5.2 <Unicode escape value> helper — reads one Unicode scalar value (handles surrogate pairs)
     let pAnyRune =
         anyChar
         >>= fun c1 ->
@@ -400,6 +403,7 @@ module Lexer =
             else
                 System.Text.Rune c1 |> string |> preturn
 
+    // 5.2 <Unicode escape value> — <Unicode escape character> <Unicode escape character>
     let pCharacterEscape esc = pstring esc >>. pstring esc
 
     [<TailCall>]
@@ -412,31 +416,37 @@ module Lexer =
     let parseHead p n = loopParseHead p n []
 
     let hexToInt32 (chars: char list) =
-        System.Convert.ToInt32(System.String.Concat(chars), 16)
+        System.Convert.ToInt32(System.String.Concat chars, 16)
 
+    // 5.2 <Unicode 4 digit escape value> ::= <Unicode escape character> <hexit> <hexit> <hexit> <hexit>
     let pUnicode4DigitEscape esc =
         pstring esc >>. parseHead pHexit 4
         |>> hexToInt32
         |>> System.Convert.ToChar
         |>> string
 
+    // 5.2 <Unicode 6 digit escape value> ::= <Unicode escape character> <plus sign> <hexit> <hexit> <hexit> <hexit> <hexit> <hexit>
     let pUnicode6DigitEscape esc =
         pstring esc >>. pchar '+' >>. parseHead pHexit 6
         |>> hexToInt32
         |>> System.Char.ConvertFromUtf32
 
+    // 5.2 <Unicode escape specifier> ::= [ UESCAPE <quote> <Unicode escape character> <quote> ]
     let pUnicodeEscapeSpecifier =
         opt (pKeyword "UESCAPE" >>. pQuote >>. pAnyRune .>> pQuote)
         |>> Option.defaultValue "\\"
 
+    // 5.2 <identifier body> — <identifier start> [ <identifier part>... ]
     let isIdentifierFirstChar c = isLetter c || c = '_'
     let isIdentifierChar c = isLetter c || isDigit c || c = '_'
 
+    // 5.4 <regular identifier> ::= <identifier body>
     let pIdentifierRaw =
         many1Satisfy2L isIdentifierFirstChar isIdentifierChar "identifier"
         |>> (fun s -> s.ToUpperInvariant())
         .>> ws
 
+    // 5.2 <regular identifier> — fails on <reserved word>
     let pRegularIdentifier =
         attempt (
             pIdentifierRaw
@@ -447,9 +457,11 @@ module Lexer =
                     preturn s
         )
 
+    // 5.2 <delimited identifier> ::= <double quote> <delimited identifier body> <double quote>
     let pDelimitedIdentifier =
         between (pchar '\"') (pchar '\"') (manyChars (attempt (pstring "\"\"") >>% '\"' <|> noneOf "\""))
 
+    // 5.2 <Unicode delimiter body> ::= <Unicode identifier part>...
     let pUnicodeDelimitedIdentifierBody esc =
         many (
             choice
@@ -461,6 +473,7 @@ module Lexer =
         )
         |>> String.concat ""
 
+    // 5.2 <Unicode delimited identifier> ::= U <ampersand> <double quote> <Unicode delimiter body> <double quote> <Unicode escape specifier>
     let pUnicodeDelimitedIdentifier =
         pchar 'U'
         >>. pchar '&'
@@ -469,6 +482,7 @@ module Lexer =
             between (pchar '"') (pchar '"') (pUnicodeDelimitedIdentifierBody esc)
             .>> pUnicodeEscapeSpecifier
 
+    // 5.4 <identifier> ::= <actual identifier> — <regular identifier> | <delimited identifier> | <Unicode delimited identifier>
     let pIdentifier =
         choice
             [ attempt pUnicodeDelimitedIdentifier
@@ -476,8 +490,12 @@ module Lexer =
               pDelimitedIdentifier ]
         .>> ws
 
+    // 5.3 <character representation> ::= <nonquote character> | <quote symbol>
+    // 5.3 <quote symbol> ::= <quote> <quote>
     let pCharacterRepresentation = attempt (pstring "''") >>% '\'' <|> noneOf "'"
 
+    // 5.2 <separator> ::= { <comment> | <white space> }...
+    // 5.2 <comment> ::= <simple comment> | <bracketed comment>
     let pSeparator =
         skipMany (
             skipMany1 (pchar ' ' <|> pchar '\t' <|> pchar '\n' <|> pchar '\r')
@@ -485,6 +503,7 @@ module Lexer =
             <|> (attempt (pstring "/*") >>. skipCharsTillString "*/" true 10000 >>% ())
         )
 
+    // 5.3 <character string literal> ::= [ <introducer> <character set specification> ] <quote> [ <character representation>... ] <quote> [ { <separator> <quote> [ <character representation>... ] <quote> }... ]
     let pCharacterStringLiteral =
         let pSegment = between pQuote pQuote (manyChars pCharacterRepresentation)
 
@@ -492,8 +511,10 @@ module Lexer =
         |>> fun (first, rest) -> String.concat "" (first :: rest)
         .>> ws
 
+    // 5.3 <national character string literal> ::= N <quote> [ <character representation>... ] <quote> [ { <separator> <quote> [ <character representation>... ] <quote> }... ]
     let pNationalCharacterStringLiteral = pchar 'N' >>. pCharacterStringLiteral
 
+    // 5.3 <binary string literal> ::= X <quote> [ <space>... ] [ { <hexit> [ <space>... ] <hexit> [ <space>... ] }... ] <quote> [ { <separator> <quote> ... ] <quote> }... ]
     let pHexStringLiteral =
         let pSegment =
             between
@@ -511,6 +532,7 @@ module Lexer =
         |>> fun (first, rest) -> first :: rest |> List.concat |> List.toArray
         .>> ws
 
+    // 5.3 <Unicode representation> ::= <character representation> | <Unicode escape value>
     let pUnicodeCharacterStringLiteralBody esc =
         many (
             choice
@@ -522,6 +544,7 @@ module Lexer =
         )
         |>> String.concat ""
 
+    // 5.3 <Unicode character string literal> ::= [ <introducer> <character set specification> ] U <ampersand> <quote> [ <Unicode representation>... ] <quote> [ { <separator> <quote> [ <Unicode representation>... ] <quote> }... ] <Unicode escape specifier>
     let pUnicodeCharacterStringLiteral =
         pchar 'U'
         >>. pchar '&'
@@ -534,8 +557,10 @@ module Lexer =
             .>> ws
             .>> pUnicodeEscapeSpecifier
 
+    // 5.3 <unsigned integer> ::= <digit>...
     let pUnsignedInteger: Parser<uint64, unit> = many1Chars digit |>> uint64
 
+    // 5.3 <exact numeric literal> ::= <unsigned integer> [ <period> [ <unsigned integer> ] ] | <period> <unsigned integer>
     let pExactNumericLiteral =
         attempt (
             pipe2 (many1Chars digit) (opt (pchar '.' >>. manyChars digit)) (fun p f ->
@@ -546,6 +571,7 @@ module Lexer =
         <|> (pchar '.' >>. many1Chars digit |>> fun f -> decimal ("0." + f))
         .>> ws
 
+    // 5.3 <approximate numeric literal> ::= <mantissa> E <exponent>
     let pApproximateNumericLiteral =
         pipe3
             pExactNumericLiteral
@@ -562,14 +588,17 @@ module Lexer =
                     m * decimal (10.0 ** float exp))
         .>> ws
 
+    // 5.3 <signed numeric literal> ::= [ <sign> ] <unsigned numeric literal>
     let pNumericLiteral: Parser<decimal, unit> =
         attempt pApproximateNumericLiteral <|> pExactNumericLiteral
 
+    // 5.3 <boolean literal> ::= TRUE | FALSE | UNKNOWN
     let pBooleanLiteral: Parser<bool option, unit> =
         pKeyword "TRUE" >>% Some true
         <|> (pKeyword "FALSE" >>% Some false)
         <|> (pKeyword "UNKNOWN" >>% None)
 
+    // 5.3 <date value> ::= <years value> <minus sign> <months value> <minus sign> <days value>
     let pDateValue =
         pUnsignedInteger .>> pchar '-' .>>. pUnsignedInteger .>> pchar '-'
         .>>. pUnsignedInteger
@@ -581,12 +610,15 @@ module Lexer =
             else
                 preturn { Year = yi; Month = mi; Day = di }
 
+    // 5.3 <date literal> ::= DATE <date string>
     let pDateLiteral = pKeyword "DATE" >>. between pQuote pQuote pDateValue .>> ws
 
+    // 5.3 <time zone interval> ::= <sign> <hours value> <colon> <minutes value>
     let pTimeZoneOffset =
         pchar '+' >>% 1 <|> (pchar '-' >>% -1) .>>. (pint32 .>> pchar ':' .>>. pint32)
         |>> fun (sign, (h, m)) -> { Sign = sign; Hours = h; Minutes = m }
 
+    // 5.3 <time value> ::= <hours value> <colon> <minutes value> <colon> <seconds value>
     let pTimeValue =
         pipe4
             (pint32 .>> pchar ':')
@@ -602,14 +634,18 @@ module Lexer =
                   Second = s
                   TzOffset = tz })
 
+    // 5.3 <time literal> ::= TIME <time string>
     let pTimeLiteral = pKeyword "TIME" >>. between pQuote pQuote pTimeValue .>> ws
 
+    // 5.3 <unquoted timestamp string> ::= <unquoted date string> <space> <unquoted time string>
     let pTimestampValue =
         pDateValue .>> spaces1 .>>. pTimeValue |>> fun (d, t) -> { Date = d; Time = t }
 
+    // 5.3 <timestamp literal> ::= TIMESTAMP <timestamp string>
     let pTimestampLiteral =
         pKeyword "TIMESTAMP" >>. between pQuote pQuote pTimestampValue .>> ws
 
+    // 6.1 <interval qualifier> — <datetime field> ::= YEAR | MONTH | DAY | HOUR | MINUTE | SECOND
     let pIntervalField =
         choice
             [ attempt (pKeyword "YEAR") >>% Year
@@ -619,6 +655,7 @@ module Lexer =
               attempt (pKeyword "MINUTE") >>% Minute
               attempt (pKeyword "SECOND") >>% Second ]
 
+    // 6.1 <interval qualifier> ::= <start field> TO <end field> | <single datetime field>
     let pIntervalQualifier =
         pIntervalField .>>. opt (pKeyword "TO" >>. pIntervalField)
         |>> fun (startF, endFOpt) ->
@@ -626,6 +663,7 @@ module Lexer =
             | Some e -> IntervalQualifier.Range(startF, e)
             | None -> IntervalQualifier.SingleField startF
 
+    // 5.3 <unquoted interval string> — validates <year-month literal> | <day-time literal> | <time interval> against <interval qualifier>
     let isValidIntervalValue (q: IntervalQualifier) (s: string) =
         let d = @"\d+"
         let sec = @"\d+(\.\d+)?"
@@ -649,6 +687,7 @@ module Lexer =
 
         System.Text.RegularExpressions.Regex.IsMatch(s, pattern)
 
+    // 5.3 <interval literal> ::= INTERVAL [ <sign> ] <interval string> <interval qualifier>
     let pIntervalLiteral =
         pKeyword "INTERVAL" >>. ws .>>. between pQuote pQuote (manyChars (noneOf "'"))
         .>> ws
@@ -656,10 +695,10 @@ module Lexer =
         .>> ws
         >>= fun ((_, v), q) ->
             // The sign is part of the quoted value per the grammar
-            let (isNeg, valueStr) =
+            let isNeg, valueStr =
                 match v with
-                | s when s.StartsWith("-") -> true, s.Substring(1)
-                | s when s.StartsWith("+") -> false, s.Substring(1)
+                | s when s.StartsWith "-" -> true, s.Substring 1
+                | s when s.StartsWith "+" -> false, s.Substring 1
                 | s -> false, s
 
             if isValidIntervalValue q valueStr then
@@ -670,7 +709,9 @@ module Lexer =
             else
                 fail "invalid interval value"
 
+    // 5.4 <dynamic parameter specification> ::= <question mark>
     let pQuestionMark: Parser<char, unit> = pchar '?' .>> ws
 
+    // 5.4 <host parameter name> ::= <colon> <identifier>
     let pHostParameter: Parser<string, unit> =
         pchar ':' >>. pIdentifier |>> (fun name -> ":" + name) .>> ws

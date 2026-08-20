@@ -6,19 +6,6 @@ open SqlParser.ExpressionParser
 open SqlParser.Types
 
 module DdlParser =
-    // This module implements the data-definition and authorization statements of the
-    // SQL-2016 grammar:
-    //
-    //   11.1  <table definition> (CREATE TABLE)
-    //   11.2  <column definition> / <column constraint definition>
-    //   11.6  <table constraint definition>
-    //   11.10 <alter table statement>
-    //   11.31 <drop table statement>
-    //   11.32 <view definition> (CREATE VIEW)
-    //   12.2  <grant privilege statement> / 12.5 <grant role statement>
-    //   12.4  <role definition> / 12.6 <drop role statement>
-    //   12.7  <revoke statement>
-    //   14.10 <truncate table statement>
     type ColumnConstraintKind =
         | NotNull
         | Null
@@ -28,6 +15,7 @@ module DdlParser =
         | Check of Expression
         | Default of Expression
 
+    // 11.8 <referential action> ::= CASCADE | SET NULL | SET DEFAULT | RESTRICT | NO ACTION
     let pReferentialAction =
         choice
             [ pKeyword "CASCADE" >>% ReferentialAction.Cascade
@@ -36,20 +24,22 @@ module DdlParser =
               attempt (pKeyword "RESTRICT" >>% ReferentialAction.Restrict)
               attempt (pKeyword "NO" >>. pKeyword "ACTION" >>% ReferentialAction.NoAction) ]
 
+    // 11.8 <referential triggered action> ::= [ <update rule> ] [ <delete rule> ] | [ <delete rule> ] [ <update rule> ] — <update rule> ::= ON UPDATE <referential action>
     let pReferentialTriggeredAction =
         many (
             choice
                 [ attempt (
                       pKeyword "ON" >>. pKeyword "UPDATE" >>. pReferentialAction
-                      |>> fun a -> (Some a, None)
+                      |>> fun a -> Some a, None
                   )
                   attempt (
                       pKeyword "ON" >>. pKeyword "DELETE" >>. pReferentialAction
-                      |>> fun a -> (None, Some a)
+                      |>> fun a -> None, Some a
                   ) ]
         )
-        |>> fun acts -> (List.tryPick fst acts, List.tryPick snd acts)
+        |>> fun acts -> List.tryPick fst acts, List.tryPick snd acts
 
+    // 11.4 <column constraint definition> — NOT NULL | NULL | PRIMARY KEY | UNIQUE | REFERENCES <table> | CHECK ( <search condition> ) | DEFAULT <value expression>
     let pColumnConstraint =
         choice
             [ pKeyword "NOT" >>. pKeyword "NULL" >>% NotNull
@@ -78,9 +68,48 @@ module DdlParser =
               )
               attempt (pKeyword "DEFAULT" >>. pExpression |>> Default) ]
 
+    // 5.3 <signed numeric literal> ::= [ <sign> ] <unsigned numeric literal>
+    let pSignedNumericLiteral =
+        opt (pchar '-' <|> pchar '+') .>>. pNumericLiteral
+        |>> fun (sign, n) -> if sign = Some '-' then -n else n
+
+    // 11.72 <sequence generator option> — shared by CREATE/ALTER SEQUENCE and
+    // the <identity column specification> (11.2).
+    let pSequenceOption =
+        choice
+            [ attempt (pKeyword "AS" >>. pDataType |>> DataTypeOption)
+              attempt (pKeyword "START" >>. pKeyword "WITH" >>. pSignedNumericLiteral |>> StartWith)
+              attempt (pKeyword "INCREMENT" >>. pKeyword "BY" >>. pSignedNumericLiteral |>> IncrementBy)
+              attempt (pKeyword "MAXVALUE" >>. pSignedNumericLiteral |>> fun v -> MaxValue(Some v))
+              attempt (pKeyword "NO" >>. pKeyword "MAXVALUE" >>% MaxValue None)
+              attempt (pKeyword "MINVALUE" >>. pSignedNumericLiteral |>> fun v -> MinValue(Some v))
+              attempt (pKeyword "NO" >>. pKeyword "MINVALUE" >>% MinValue None)
+              attempt (pKeyword "CYCLE" >>% Cycle true)
+              attempt (pKeyword "NO" >>. pKeyword "CYCLE" >>% Cycle false)
+              attempt (
+                  pKeyword "RESTART" >>. opt (pKeyword "WITH" >>. pSignedNumericLiteral)
+                  |>> Restart
+              ) ]
+
+    // 11.2 <identity column specification> ::= GENERATED { ALWAYS | BY DEFAULT }
+    //     AS IDENTITY [ ( <common sequence generator options> ) ]
+    let pIdentitySpec =
+        pKeyword "GENERATED"
+        >>. (pKeyword "ALWAYS" >>% true <|> (pKeyword "BY" >>. pKeyword "DEFAULT" >>% false))
+        .>> pKeyword "AS"
+        .>> pKeyword "IDENTITY"
+        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (many pSequenceOption))
+        |>> fun (isAlways, opts) ->
+            { IsAlways = isAlways
+              Options = Option.defaultValue [] opts }
+
+    // 11.4 <column definition> ::= <column name> <data type> [ <default clause> ] [ <column constraint definition>... ] [ <collate clause> ]
     let pColumnDefinition =
-        pIdentifierExpr .>>. pDataType .>>. many pColumnConstraint
-        |>> fun ((name, typ), cons) ->
+        pIdentifierExpr
+        .>>. pDataType
+        .>>. opt (attempt pIdentitySpec)
+        .>>. many pColumnConstraint
+        |>> fun (((name, typ), identity), cons) ->
             { Name = name
               DataType = typ
               IsNullable =
@@ -113,8 +142,10 @@ module DdlParser =
                 cons
                 |> List.tryPick (function
                     | Check e -> Some e
-                    | _ -> None) }
+                    | _ -> None)
+              Identity = identity }
 
+    // 11.8 <referential constraint definition> ::= FOREIGN KEY ( <column list> ) REFERENCES <table> [ ( <column list> ) ] [ <referential triggered action> ]
     let pForeignKeyConstraint =
         pKeyword "FOREIGN"
         >>. pKeyword "KEY"
@@ -132,6 +163,7 @@ module DdlParser =
               OnDelete = onDel }
             : ForeignKeyConstraint
 
+    // 11.6 <table constraint definition> ::= [ <constraint name definition> ] <table constraint> — <table constraint> ::= PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK
     let pTableConstraint =
         let pName = opt (pKeyword "CONSTRAINT" >>. pIdentifierExpr)
 
@@ -157,27 +189,56 @@ module DdlParser =
                   |>> fun (n, e) -> TableConstraint.Check(n, e)
               ) ]
 
+    // 11.72 <sequence generator definition> ::= CREATE SEQUENCE <sequence generator name> [ <sequence generator options> ]
+    let pCreateSequenceStatement =
+        pKeyword "CREATE" >>. pKeyword "SEQUENCE" >>. pQualifiedName
+        .>>. many pSequenceOption
+        |>> fun (name, opts) -> CreateSequence(name, opts)
+
+    // 11.73 <alter sequence generator statement> ::= ALTER SEQUENCE <name> <options>
+    let pAlterSequenceStatement =
+        pKeyword "ALTER" >>. pKeyword "SEQUENCE" >>. pQualifiedName
+        .>>. many1 pSequenceOption
+        |>> fun (name, opts) -> AlterSequence(name, opts)
+
+    // 11.1 <table definition> ::= CREATE [ <table scope> ] TABLE <table name> <table contents source> [ <typed table clause> ]
     let pCreateTableStatement =
+        // 11.1 <table element> ::= <column definition> | <table constraint definition>
         let pTableElement =
             attempt (pColumnDefinition |>> Choice1Of2) <|> (pTableConstraint |>> Choice2Of2)
 
+        // 11.1 <as subquery clause> ::= AS <query expression> [ WITH [ NO ] DATA ]
         let pAsSubquery =
             pKeyword "AS" >>. pQuery
             .>>. opt (pKeyword "WITH" >>. opt (pKeyword "NO") .>> pKeyword "DATA" |>> Option.isNone)
-            |>> fun (q, withData) -> (q, withData)
+            |>> fun (q, withData) -> q, withData
 
-        pKeyword "CREATE" >>. pKeyword "TABLE" >>. pQualifiedName
+        // 11.3 <table scope> ::= GLOBAL TEMPORARY | LOCAL TEMPORARY
+        let pTableScope =
+            attempt (pKeyword "GLOBAL" >>. pKeyword "TEMPORARY" >>% TableScope.Global)
+            <|> (pKeyword "LOCAL" >>. pKeyword "TEMPORARY" >>% TableScope.Local)
+
+        // 11.1 <typed table clause> ::= OF <UDT name> [ UNDER <supertable> ]
+        // (the <subtable clause> is parsed and discarded; the <typed table element
+        // list> is not supported — see docs/trade-off.md)
+        let pTypedTableClause =
+            pKeyword "OF" >>. pQualifiedName .>>. opt (pKeyword "UNDER" >>. pQualifiedName)
+            |>> fun (typ, _sub) -> typ
+
+        pKeyword "CREATE" >>. opt pTableScope .>> pKeyword "TABLE"
+        .>>. pQualifiedName
         .>>. (attempt (
                   between (token (pstring "(")) (token (pstring ")")) (sepBy1 pTableElement (token (pstring ",")))
-                  |>> fun elems -> (elems, None, None)
+                  |>> fun elems -> elems, None, None, None
               )
               <|> attempt (
                   between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
                   .>>. pAsSubquery
-                  |>> fun (cols, (q, withData)) -> ([], Some cols, Some(q, withData))
+                  |>> fun (cols, (q, withData)) -> [], Some cols, Some(q, withData), None
               )
-              <|> (pAsSubquery |>> fun (q, withData) -> ([], None, Some(q, withData))))
-        |>> fun (name, (elems, asCols, asQuery)) ->
+              <|> (pAsSubquery |>> fun (q, withData) -> [], None, Some(q, withData), None)
+              <|> (pTypedTableClause |>> fun typ -> [], None, None, Some typ))
+        |>> fun ((scope, name), (elems, asCols, asQuery, ofType)) ->
             let cols =
                 elems
                 |> List.choose (function
@@ -191,27 +252,58 @@ module DdlParser =
                     | _ -> None)
 
             { Table = name
+              TableScope = scope
               Columns = cols
               Constraints = cons
               AsQuery = asQuery |> Option.map fst
               AsColumns = asCols
-              WithData = asQuery |> Option.bind snd }
+              WithData = asQuery |> Option.bind snd
+              OfType = ofType }
             |> CreateTable
 
+    // 11.32 <levels clause> ::= CASCADED | LOCAL   (default is CASCADED)
+    let pCheckOption =
+        pKeyword "WITH"
+        >>. opt (pKeyword "CASCADED" >>% true <|> (pKeyword "LOCAL" >>% false))
+        .>> pKeyword "CHECK"
+        .>> pKeyword "OPTION"
+        |>> Option.defaultValue true
+
+    // 11.32 <view definition> ::= CREATE VIEW <table name> [ <view column list> ] [ <referenceable view specification> ] AS <query expression> [ <view check option> ]
     let pCreateViewStatement =
+        // 11.32 <view specification> ::= <regular view specification> | <referenceable view specification>
+        // (regular = column list; referenceable = OF <UDT name> — the <subview clause>
+        // and <view element list> are not captured — see docs/trade-off.md)
+        let pViewSpecification =
+            choice
+                [ attempt (
+                      between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
+                      |>> Choice1Of2
+                  )
+                  attempt (pKeyword "OF" >>. pQualifiedName |>> Choice2Of2) ]
+
         pKeyword "CREATE" >>. pKeyword "VIEW" >>. pQualifiedName
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ","))))
+        .>>. opt pViewSpecification
         .>> pKeyword "AS"
         .>>. pQuery
-        |>> fun ((name, cols), query) ->
+        .>>. opt (attempt pCheckOption)
+        |>> fun (((name, spec), query), checkOpt) ->
+            let cols, ofType =
+                match spec with
+                | Some(Choice1Of2 c) -> Some c, None
+                | Some(Choice2Of2 t) -> None, Some t
+                | None -> None, None
+
             { Name = name
               Columns = cols
-              Query = query }
+              Query = query
+              CheckOption = checkOpt
+              OfType = ofType }
             |> CreateView
 
-    // <grantor> ::= CURRENT_USER | CURRENT_ROLE
+    // 12.2 <grantor> ::= CURRENT_USER | CURRENT_ROLE
     let pGrantor =
-        (pIdentifierExpr |>> ignore)
+        pIdentifierExpr |>> ignore
         <|> (pKeyword "CURRENT_USER" |>> ignore)
         <|> (pKeyword "CURRENT_ROLE" |>> ignore)
 
@@ -221,15 +313,55 @@ module DdlParser =
         .>>. opt (pKeyword "WITH" >>. pKeyword "ADMIN" >>. pGrantor)
         |>> fun (name, _) -> CreateRole name
 
+    // 12.3 <privilege column list> ::= ( <column name list> )
     let pPrivilegeColumnList =
         between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
 
-    // <action> ::= SELECT [ <privilege column list> ] | INSERT [ <privilege column list> ]
-    //             | UPDATE [ <privilege column list> ] | DELETE | REFERENCES [ <privilege column list> ]
-    //             | USAGE | TRIGGER | UNDER | EXECUTE
+    // 10.6 <specific routine designator> ::= SPECIFIC <routine type> <specific name> | <routine designator>
+    // (simplified: the trailing [ FOR <user-defined type name> ] clause is not captured)
+    let pRoutineType =
+        choice
+            [ pKeyword "ROUTINE" >>% ()
+              pKeyword "FUNCTION" >>% ()
+              pKeyword "PROCEDURE" >>% ()
+              attempt (
+                  opt (
+                      choice
+                          [ pKeyword "INSTANCE" >>% ()
+                            pKeyword "STATIC" >>% ()
+                            pKeyword "CONSTRUCTOR" >>% () ]
+                  )
+                  >>. pKeyword "METHOD"
+                  >>% ()
+              ) ]
+
+    // 10.6 <routine designator> ::= [ <routine type> ] <qualified identifier>
+    let pRoutineDesignatorWithType =
+        choice [ attempt (pRoutineType >>. pQualifiedName); pQualifiedName ]
+
+    // 10.6 <specific routine designator> ::= SPECIFIC <routine type> <specific name> | <routine designator>
+    let pSpecificRoutineDesignator =
+        choice
+            [ attempt (pKeyword "SPECIFIC" >>. pRoutineType >>. pQualifiedName)
+              attempt pRoutineDesignatorWithType ]
+
+    // 12.3 <privilege method list> ::= <specific routine designator> [ { , <specific routine designator> }... ]
+    let pPrivilegeMethodList = sepBy1 pSpecificRoutineDesignator (token (pstring ","))
+
+    // 12.3 <action> ::= SELECT [ <privilege column list> ] | SELECT ( <privilege method list> )
+    //             | INSERT [ <privilege column list> ] | UPDATE [ <privilege column list> ]
+    //             | DELETE | REFERENCES [ <privilege column list> ] | USAGE | TRIGGER | UNDER | EXECUTE
     let pPrivilegeAction =
         choice
-            [ attempt (pKeyword "SELECT" >>. opt pPrivilegeColumnList |>> PrivilegeAction.Select)
+            [ // SELECT ( <privilege method list> ) must be tried before the plain
+              // SELECT [ <privilege column list> ] alternative, otherwise the
+              // leading SELECT would consume the input and leave the '(' behind.
+              attempt (
+                  pKeyword "SELECT"
+                  >>. between (token (pstring "(")) (token (pstring ")")) pPrivilegeMethodList
+                  |>> fun methods -> PrivilegeAction.Select(Some methods)
+              )
+              attempt (pKeyword "SELECT" >>. opt pPrivilegeColumnList |>> PrivilegeAction.Select)
               attempt (pKeyword "INSERT" >>. opt pPrivilegeColumnList |>> PrivilegeAction.Insert)
               attempt (pKeyword "UPDATE" >>. opt pPrivilegeColumnList |>> PrivilegeAction.Update)
               attempt (pKeyword "DELETE" >>% PrivilegeAction.Delete)
@@ -242,11 +374,13 @@ module DdlParser =
               attempt (pKeyword "UNDER" >>% PrivilegeAction.Under)
               attempt (pKeyword "EXECUTE" >>% PrivilegeAction.Execute) ]
 
+    // 12.3 <privileges> ::= ALL PRIVILEGES | <action> [ { <comma> <action> }... ]
     let pPrivileges =
         choice
             [ attempt (pKeyword "ALL" >>. pKeyword "PRIVILEGES" >>% Privileges.AllPrivileges)
               attempt (sepBy1 pPrivilegeAction (token (pstring ",")) |>> Privileges.Actions) ]
 
+    // 12.3 <object name> / 12.2 <grant privilege statement> — <object name> ::= [ <object kind> ] <qualified name> | <specific routine designator>
     let pObjectName =
         let pKind =
             choice
@@ -258,9 +392,9 @@ module DdlParser =
                   pKeyword "SEQUENCE"
                   pKeyword "TRANSLATION" ]
 
-        opt pKind >>. pQualifiedName
+        choice [ attempt (opt pKind >>. pQualifiedName); attempt pRoutineDesignatorWithType ]
 
-    // <drop behavior> ::= CASCADE | RESTRICT   (true = CASCADE, false = RESTRICT)
+    // 11.2 <drop behavior> ::= CASCADE | RESTRICT   (true = CASCADE, false = RESTRICT)
     let pDropBehavior = pKeyword "CASCADE" >>% true <|> (pKeyword "RESTRICT" >>% false)
 
     // 12.2 <grant privilege statement> ::= GRANT <privileges> TO <grantee> [ { , <grantee> }... ]
@@ -296,7 +430,7 @@ module DdlParser =
         |>> Grant
 
     // 12.7 <revoke statement> ::= <revoke privilege statement> | <revoke role statement>
-    // <revoke option extension> ::= GRANT OPTION FOR | HIERARCHY OPTION FOR
+    // 12.7 <revoke option extension> ::= GRANT OPTION FOR | HIERARCHY OPTION FOR
     let pRevokeOptionExtension =
         choice
             [ attempt (pKeyword "GRANT" >>. pKeyword "OPTION" >>. pKeyword "FOR" >>% GrantOptionFor)
@@ -305,7 +439,7 @@ module DdlParser =
                   >>% HierarchyOptionFor
               ) ]
 
-    // <revoke privilege statement> ::= REVOKE [ <revoke option extension> ] <privileges>
+    // 12.7 <revoke privilege statement> ::= REVOKE [ <revoke option extension> ] <privileges>
     //     FROM <grantee> [ { , <grantee> }... ] [ GRANTED BY <grantor> ] <drop behavior>
     let pRevokeStatement =
         pKeyword "REVOKE"
@@ -326,7 +460,7 @@ module DdlParser =
                               cascade
                           )
                   )
-                  // <revoke role statement> ::= REVOKE [ ADMIN OPTION FOR ] <role revoked>
+                  // 12.7 <revoke role statement> ::= REVOKE [ ADMIN OPTION FOR ] <role revoked>
                   //     [ { , <role revoked> }... ] FROM <grantee> [ { , <grantee> }... ]
                   //     [ GRANTED BY <grantor> ] <drop behavior>
                   attempt (
@@ -341,15 +475,69 @@ module DdlParser =
                   ) ]
         |>> Revoke
 
+    // 11.71 <transforms to be dropped> ::= ALL | <transform group element>
+    let pTransformsToBeDropped =
+        pKeyword "ALL" >>% TransformDropTarget.AllTransforms
+        <|> (pQualifiedName |>> TransformDropTarget.TransformGroup)
+
     // 11.31 <drop table statement> ::= DROP TABLE <table name> <drop behavior>
+    // 11.33 <drop view statement> ::= DROP VIEW <table name> <drop behavior>
+    // 11.74 <drop sequence generator statement> ::= DROP SEQUENCE <sequence generator name> <drop behavior>
+    // 12.6 <drop role statement> ::= DROP ROLE <role name>
+    // 11.2 <drop schema statement> ::= DROP SCHEMA <schema name> <drop behavior>
+    // 11.40 <drop domain statement> ::= DROP DOMAIN <domain name> <drop behavior>
+    // 11.44 <drop collation statement> ::= DROP COLLATION <collation name> <drop behavior>
+    // 11.42 <drop character set statement> ::= DROP CHARACTER SET <character set name>
+    // 11.46 <drop transliteration statement> ::= DROP TRANSLATION <transliteration name>
+    // 11.48 <drop assertion statement> ::= DROP ASSERTION <constraint name> [ <drop behavior> ]
+    // 11.64 <drop user-defined cast statement> ::= DROP CAST (<source data type> AS <target data type>) <drop behavior>
+    // 11.66 <drop user-defined ordering statement> ::= DROP ORDERING FOR <schema-resolved user-defined type name> <drop behavior>
+    // 11.71 <drop transform statement> ::= DROP { TRANSFORM | TRANSFORMS } <transforms to be dropped> FOR <schema-resolved user-defined type name> <drop behavior>
+    // 11.50 <drop trigger statement> ::= DROP TRIGGER <trigger name>
+    // 11.62 <drop routine statement> ::= DROP <specific routine designator> <drop behavior>
+    // 11.59 <drop data type statement> ::= DROP TYPE <schema-resolved user-defined type name> <drop behavior>
     let pDropStatement =
         pKeyword "DROP"
         >>. choice
                 [ attempt (pKeyword "TABLE" >>. pQualifiedName .>>. pDropBehavior) |>> DropTable
-                  attempt (pKeyword "VIEW" >>. pIdentifierExpr) |>> DropView
-                  attempt (pKeyword "ROLE" >>. pIdentifierExpr) |>> DropStatement.DropRole ]
+                  attempt (pKeyword "VIEW" >>. pQualifiedName .>>. pDropBehavior) |>> DropView
+                  attempt (pKeyword "SEQUENCE" >>. pQualifiedName .>>. pDropBehavior)
+                  |>> DropSequence
+                  attempt (pKeyword "ROLE" >>. pIdentifierExpr) |>> DropStatement.DropRole
+                  attempt (pKeyword "SCHEMA" >>. pQualifiedName .>>. pDropBehavior) |>> DropSchema
+                  attempt (pKeyword "DOMAIN" >>. pQualifiedName .>>. pDropBehavior) |>> DropDomain
+                  attempt (pKeyword "COLLATION" >>. pQualifiedName .>>. pDropBehavior)
+                  |>> DropCollation
+                  attempt (pKeyword "CHARACTER" >>. pKeyword "SET" >>. pQualifiedName)
+                  |>> DropCharacterSet
+                  attempt (pKeyword "TRANSLATION" >>. pQualifiedName) |>> DropTransliteration
+                  attempt (pKeyword "ASSERTION" >>. pQualifiedName .>>. opt pDropBehavior)
+                  |>> DropAssertion
+                  attempt (
+                      pKeyword "CAST"
+                      >>. between
+                              (token (pstring "("))
+                              (token (pstring ")"))
+                              (pDataType .>>. (pKeyword "AS" >>. pDataType))
+                      .>>. pDropBehavior
+                  )
+                  |>> fun ((source, target), behavior) -> DropCast(source, target, behavior)
+                  attempt (pKeyword "ORDERING" >>. pKeyword "FOR" >>. pQualifiedName .>>. pDropBehavior)
+                  |>> DropOrdering
+                  attempt (
+                      pKeyword "TRANSFORM" <|> pKeyword "TRANSFORMS" >>. pTransformsToBeDropped
+                      .>>. (pKeyword "FOR" >>. pQualifiedName)
+                      .>>. pDropBehavior
+                  )
+                  |>> fun ((target, forName), behavior) -> DropTransform(forName, target, behavior)
+                  // 11.62 <drop routine statement> ::= DROP <specific routine designator> <drop behavior>
+                  attempt (pKeyword "TRIGGER" >>. pQualifiedName) |>> DropTrigger
+                  attempt (pRoutineDesignatorWithType .>>. pDropBehavior) |>> DropRoutine
+                  // 11.59 <drop data type statement> ::= DROP TYPE <name> <drop behavior>
+                  attempt (pKeyword "TYPE" >>. pQualifiedName .>>. pDropBehavior) |>> DropType ]
         |>> Drop
 
+    // 11.10 <alter table statement> ::= ALTER TABLE <table name> <alter table action>
     let pAlterTableStatement =
         let pColumnAction =
             choice
@@ -371,12 +559,17 @@ module DdlParser =
                       |>> ColumnAlteration.SetDataType
                   ) ]
 
+        // 11.10 <alter table action> ::= ADD COLUMN <column definition> | ADD <table constraint>
+        //     | DROP COLUMN <column name> | DROP CONSTRAINT <constraint name> | ALTER COLUMN ...
         let pAction =
             choice
                 [ attempt (pKeyword "ADD" >>. opt (pKeyword "COLUMN") >>. pColumnDefinition |>> AddColumn)
-                  attempt (pKeyword "ADD" >>. pTableConstraint |>> AddConstraint)
+                  attempt (pKeyword "ADD" >>. pTableConstraint |>> AlterTableAction.AddConstraint)
                   attempt (pKeyword "DROP" >>. opt (pKeyword "COLUMN") >>. pIdentifierExpr |>> DropColumn)
-                  attempt (pKeyword "DROP" >>. pKeyword "CONSTRAINT" >>. pIdentifierExpr |>> DropConstraint)
+                  attempt (
+                      pKeyword "DROP" >>. pKeyword "CONSTRAINT" >>. pIdentifierExpr
+                      |>> AlterTableAction.DropConstraint
+                  )
                   attempt (
                       pKeyword "ALTER" >>. opt (pKeyword "COLUMN") >>. pIdentifierExpr
                       .>>. pColumnAction
@@ -386,6 +579,7 @@ module DdlParser =
         pKeyword "ALTER" >>. pKeyword "TABLE" >>. pQualifiedName .>>. pAction
         |>> fun (name, action) -> { Table = name; Action = action } |> AlterTable
 
+    // 17.12 <truncate table statement> ::= TRUNCATE TABLE <target table> [ <identity column restart option> ]
     let pTruncateStatement =
         pKeyword "TRUNCATE" >>. opt (pKeyword "TABLE") >>. pQualifiedName
         .>>. opt (
@@ -393,3 +587,273 @@ module DdlParser =
             <|> (pKeyword "CONTINUE" >>. pKeyword "IDENTITY" >>% false)
         )
         |>> fun (table, restart) -> Truncate(table, restart)
+
+    // 10.8 <constraint characteristics> ::= [ <constraint check time> ] [ [ NOT ] DEFERRABLE ] [ [ NOT ] ENFORCED ]
+    let pConstraintCharacteristics =
+        // 10.8 <constraint check time> ::= INITIALLY DEFERRED | INITIALLY IMMEDIATE
+        let pCheckTime =
+            pKeyword "INITIALLY" >>. pKeyword "DEFERRED" >>% Some true
+            <|> (pKeyword "INITIALLY" >>. pKeyword "IMMEDIATE" >>% Some false)
+
+        // 10.8 <constraint deferrability> ::= [ NOT ] DEFERRABLE
+        // 10.8 <constraint characteristics> — <constraint deferrability> ::= [ NOT ] DEFERRABLE
+        let pDeferrable =
+            pKeyword "NOT" >>. pKeyword "DEFERRABLE" >>% Some false
+            <|> (pKeyword "DEFERRABLE" >>% Some true)
+
+        // 10.8 <constraint enforcement> ::= [ NOT ] ENFORCED
+        let pEnforced =
+            pKeyword "NOT" >>. pKeyword "ENFORCED" >>% Some false
+            <|> (pKeyword "ENFORCED" >>% Some true)
+
+        // 10.8 <constraint characteristic> helper — combines check time / deferrability / enforcement
+        let pItem =
+            choice
+                [ attempt (pCheckTime |>> fun b -> b, None, None)
+                  attempt (pDeferrable |>> fun b -> None, b, None)
+                  attempt (pEnforced |>> fun b -> None, None, b) ]
+
+        many pItem
+        |>> fun items ->
+            { InitiallyDeferred = List.tryPick (fun (a, _, _) -> a) items
+              Deferrable = List.tryPick (fun (_, b, _) -> b) items
+              Enforced = List.tryPick (fun (_, _, c) -> c) items }
+
+    // Forward reference to the full DDL statement set; a <schema element> is any
+    // DDL statement. Wired to pDdl in SqlParser.fs (which also contains the
+    // CREATE SCHEMA parser that consumes these elements).
+    // 11.1 <schema element> ::= <table definition> | <view definition> | <domain definition> | ...
+    let pSchemaElement, pSchemaElementImpl =
+        createParserForwardedToRef<StatementKind, unit> ()
+
+    // 11.1 <schema definition> ::= CREATE SCHEMA <schema name clause> [ <schema character set or path> ] [ <schema element>... ]
+    let pCreateSchemaStatement =
+        let pNameClause =
+            choice
+                [ attempt (
+                      pQualifiedName .>>. opt (pKeyword "AUTHORIZATION" >>. pIdentifierExpr)
+                      |>> fun (name, auth) -> Some name, auth
+                  )
+                  pKeyword "AUTHORIZATION" >>. pIdentifierExpr |>> fun auth -> None, Some auth ]
+
+        // 11.1 <schema character set or path> ::= DEFAULT CHARACTER SET <name> | PATH <path> — the two clauses may appear in either order
+        let pSchemaCharsetOrPath =
+            let pCharset =
+                attempt (
+                    pKeyword "DEFAULT"
+                    >>. pKeyword "CHARACTER"
+                    >>. pKeyword "SET"
+                    >>. pQualifiedName
+                    |>> Choice1Of2
+                )
+
+            // 11.1 <path specification> ::= PATH <path-resolved user-defined type name> [ { <comma> <path-resolved user-defined type name> }... ]
+            let pPath =
+                attempt (pKeyword "PATH" >>. sepBy1 pQualifiedName (token (pstring ",")) |>> Choice2Of2)
+
+            many (pCharset <|> pPath)
+            |>> fun items ->
+                let charset =
+                    List.tryPick
+                        (function
+                        | Choice1Of2 c -> Some c
+                        | _ -> None)
+                        items
+
+                let path =
+                    List.tryPick
+                        (function
+                        | Choice2Of2 p -> Some p
+                        | _ -> None)
+                        items
+
+                charset, path
+
+        pKeyword "CREATE" >>. pKeyword "SCHEMA" >>. pNameClause
+        .>>. pSchemaCharsetOrPath
+        .>>. many pSchemaElement
+        |>> fun ((nameClause, (charset, path)), elements) ->
+            CreateSchema
+                { Name = fst nameClause
+                  Authorization = snd nameClause
+                  CharacterSet = charset
+                  Path = path
+                  Elements = elements }
+
+    // 11.34 <domain constraint> ::= [ <constraint name definition> ] CHECK ( <search condition> ) [ <constraint characteristics> ]
+    let pDomainConstraint =
+        opt (pKeyword "CONSTRAINT" >>. pQualifiedName)
+        .>>. (pKeyword "CHECK"
+              >>. between (token (pstring "(")) (token (pstring ")")) pExpression)
+        .>>. pConstraintCharacteristics
+        |>> fun ((name, check), chars) ->
+            { Name = name
+              Check = check
+              Characteristics = chars }
+
+    // 11.34 <domain definition> ::= CREATE DOMAIN <domain name> [ AS ] <data type> [ <default clause> ] [ <domain constraint>... ] [ <collate clause> ]
+    let pCreateDomainStatement =
+        pKeyword "CREATE" >>. pKeyword "DOMAIN" >>. pQualifiedName
+        .>>. opt (pKeyword "AS")
+        .>>. pDataType
+        .>>. opt (pKeyword "DEFAULT" >>. pExpression)
+        .>>. many pDomainConstraint
+        .>>. opt (pKeyword "COLLATE" >>. pQualifiedName)
+        |>> fun (((((name, _), dataType), def), constraints), collation) ->
+            CreateDomain
+                { Name = name
+                  DataType = dataType
+                  Default = def
+                  Constraints = constraints
+                  Collation = collation }
+
+    // 11.35 <alter domain statement> ::= ALTER DOMAIN <domain name> <alter domain action>
+    let pAlterDomainStatement =
+        let pAction =
+            choice
+                [ attempt (
+                      pKeyword "SET" >>. pKeyword "DEFAULT" >>. pExpression
+                      |>> DomainAlteration.SetDefault
+                  )
+                  attempt (pKeyword "DROP" >>. pKeyword "DEFAULT" >>% DomainAlteration.DropDefault)
+                  attempt (pKeyword "ADD" >>. pDomainConstraint |>> DomainAlteration.AddConstraint)
+                  attempt (
+                      pKeyword "DROP" >>. pKeyword "CONSTRAINT" >>. pQualifiedName
+                      |>> DomainAlteration.DropConstraint
+                  ) ]
+
+        pKeyword "ALTER" >>. pKeyword "DOMAIN" >>. pQualifiedName .>>. pAction
+        |>> fun (name, action) -> AlterDomain(name, action)
+
+    // 11.41 <character set definition> ::= CREATE CHARACTER SET <character set name> [ AS GET <character set name> ] [ <collate clause> ]
+    let pCreateCharacterSetStatement =
+        pKeyword "CREATE" >>. pKeyword "CHARACTER" >>. pKeyword "SET" >>. pQualifiedName
+        .>>. opt (pKeyword "AS")
+        .>>. (pKeyword "GET" >>. pQualifiedName)
+        .>>. opt (pKeyword "COLLATE" >>. pQualifiedName)
+        |>> fun (((name, _), source), collate) -> CreateCharacterSet(name, source, collate)
+
+    // 11.43 <collation definition> ::= CREATE COLLATION <collation name> FOR <character set name> FROM <collation name> [ <pad characteristic> ]
+    let pCreateCollationStatement =
+        // 11.43 <pad characteristic> ::= NO PAD | PAD SPACE
+        let pPadCharacteristic =
+            pKeyword "NO" >>. pKeyword "PAD" >>% true
+            <|> (pKeyword "PAD" >>. pKeyword "SPACE" >>% false)
+
+        pKeyword "CREATE" >>. pKeyword "COLLATION" >>. pQualifiedName
+        .>>. (pKeyword "FOR" >>. pQualifiedName)
+        .>>. (pKeyword "FROM" >>. pQualifiedName)
+        .>>. opt pPadCharacteristic
+        |>> fun (((name, cs), existing), pad) -> CreateCollation(name, cs, existing, pad)
+
+    // 11.45 <transliteration definition> ::= CREATE TRANSLATION <transliteration name> FOR <source character set> TO <target character set> FROM <transliteration source>
+    let pCreateTransliterationStatement =
+        pKeyword "CREATE" >>. pKeyword "TRANSLATION" >>. pQualifiedName
+        .>>. (pKeyword "FOR" >>. pQualifiedName)
+        .>>. (pKeyword "TO" >>. pQualifiedName)
+        .>>. (pKeyword "FROM" >>. pQualifiedName)
+        |>> fun (((name, source), target), trSource) -> CreateTransliteration(name, source, target, trSource)
+
+    // 11.47 <assertion definition> ::= CREATE ASSERTION <constraint name> CHECK ( <search condition> ) [ <constraint characteristics> ]
+    let pCreateAssertionStatement =
+        pKeyword "CREATE" >>. pKeyword "ASSERTION" >>. pQualifiedName
+        .>>. (pKeyword "CHECK"
+              >>. between (token (pstring "(")) (token (pstring ")")) pExpression)
+        .>>. pConstraintCharacteristics
+        |>> fun ((name, check), chars) -> CreateAssertion(name, check, chars)
+
+    // 11.63 <user-defined cast definition> ::= CREATE CAST ( <source data type> AS <target data type> ) WITH <cast function> [ AS ASSIGNMENT ]
+    let pCreateCastStatement =
+        pKeyword "CREATE"
+        >>. pKeyword "CAST"
+        >>. between (token (pstring "(")) (token (pstring ")")) (pDataType .>>. (pKeyword "AS" >>. pDataType))
+        .>>. (pKeyword "WITH" >>. pSpecificRoutineDesignator)
+        .>>. opt (pKeyword "AS" >>. pKeyword "ASSIGNMENT" >>% true)
+        |>> fun (((source, target), fn), assignment) ->
+            CreateCast(source, target, fn, Option.defaultValue false assignment)
+
+    // 11.65 <ordering category> ::= RELATIVE WITH <specific routine designator> | MAP WITH <specific routine designator> | STATE [ <data type> ]
+    let pOrderingCategory =
+        choice
+            [ attempt (
+                  pKeyword "RELATIVE" >>. pKeyword "WITH" >>. pSpecificRoutineDesignator
+                  |>> OrderingCategory.Relative
+              )
+              attempt (
+                  pKeyword "MAP" >>. pKeyword "WITH" >>. pSpecificRoutineDesignator
+                  |>> OrderingCategory.Map
+              )
+              attempt (pKeyword "STATE" >>. opt pQualifiedName |>> OrderingCategory.State) ]
+
+    // 11.65 <ordering form> ::= EQUALS ONLY BY <ordering category> | ORDER FULL BY <ordering category>
+    let pOrderingForm =
+        pKeyword "EQUALS" >>. pKeyword "ONLY" >>. pKeyword "BY" >>. pOrderingCategory
+        |>> OrderingForm.EqualsOnlyBy
+        <|> (pKeyword "ORDER" >>. pKeyword "FULL" >>. pKeyword "BY" >>. pOrderingCategory
+             |>> OrderingForm.OrderFullBy)
+
+    // 11.65 <user-defined ordering definition> ::= CREATE ORDERING FOR <schema-resolved user-defined type name> <ordering form>
+    let pCreateOrderingStatement =
+        pKeyword "CREATE" >>. pKeyword "ORDERING" >>. pKeyword "FOR" >>. pQualifiedName
+        .>>. pOrderingForm
+        |>> fun (name, form) -> CreateOrdering(name, form)
+
+    // 11.67 <transform element> ::= TO SQL WITH <specific routine designator> | FROM SQL WITH <specific routine designator>
+    let pTransformElement =
+        pKeyword "TO"
+        >>. pKeyword "SQL"
+        >>. pKeyword "WITH"
+        >>. pSpecificRoutineDesignator
+        |>> TransformElement.ToSql
+        <|> (pKeyword "FROM"
+             >>. pKeyword "SQL"
+             >>. pKeyword "WITH"
+             >>. pSpecificRoutineDesignator
+             |>> TransformElement.FromSql)
+
+    // 11.67 <transform group> ::= <group name> ( <transform element> [ { <comma> <transform element> }... ] )
+    let pTransformGroup =
+        pQualifiedName
+        .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pTransformElement (token (pstring ",")))
+        |>> fun (name, elements) -> { Name = name; Elements = elements }
+
+    // 11.67 <transform definition> ::= CREATE { TRANSFORM | TRANSFORMS } FOR <schema-resolved user-defined type name> <transform group> [ { <comma> <transform group> }... ]
+    let pCreateTransformStatement =
+        pKeyword "CREATE"
+        >>. (pKeyword "TRANSFORM" <|> pKeyword "TRANSFORMS")
+        >>. pKeyword "FOR"
+        >>. pQualifiedName
+        .>>. many1 pTransformGroup
+        |>> fun (name, groups) -> CreateTransform(name, groups)
+
+    // 11.68 <transform kind> ::= TO SQL | FROM SQL
+    let pTransformKind =
+        pKeyword "TO" >>. pKeyword "SQL" >>% TransformKind.ToSqlKind
+        <|> (pKeyword "FROM" >>. pKeyword "SQL" >>% TransformKind.FromSqlKind)
+
+    // 11.68 <alter transform action> ::= ADD <transform element list> | DROP ( <transform kind list> ) <drop behavior>
+    let pAlterTransformAction =
+        pKeyword "ADD"
+        >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pTransformElement (token (pstring ",")))
+        |>> TransformAlteration.AddTransformElements
+        <|> (pKeyword "DROP"
+             >>. between
+                     (token (pstring "("))
+                     (token (pstring ")"))
+                     (sepBy1 pTransformKind (token (pstring ",")) .>>. pDropBehavior)
+             |>> TransformAlteration.DropTransformElements)
+
+    // 11.68 <alter transform group> ::= <group name> ( <alter transform action> [ { <comma> <alter transform action> }... ] )
+    let pAlterTransformGroup =
+        pQualifiedName
+        .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pAlterTransformAction (token (pstring ",")))
+        |>> fun (name, actions) -> { Name = name; Actions = actions }
+
+    // 11.68 <alter transform statement> ::= ALTER { TRANSFORM | TRANSFORMS } FOR <schema-resolved user-defined type name> <alter transform group> [ { <comma> <alter transform group> }... ]
+    let pAlterTransformStatement =
+        pKeyword "ALTER"
+        >>. (pKeyword "TRANSFORM" <|> pKeyword "TRANSFORMS")
+        >>. pKeyword "FOR"
+        >>. pQualifiedName
+        .>>. many1 pAlterTransformGroup
+        |>> fun (name, groups) -> AlterTransform(name, groups)

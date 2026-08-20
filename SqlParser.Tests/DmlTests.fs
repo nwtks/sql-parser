@@ -8,6 +8,11 @@ let parse sql =
     | Ok res -> res.Kind
     | Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
 
+let parseFails sql =
+    match SqlParser.parse sql with
+    | Ok _ -> failwithf "Expected parse failure for %s" sql
+    | Error _ -> ()
+
 [<Fact>]
 let ``INSERT verification`` () =
     match parse "INSERT INTO users (id, name) VALUES (1, 'alice')" with
@@ -74,6 +79,41 @@ let ``UPDATE with alias verification`` () =
     | res -> Assert.Fail(sprintf "Expected Update with alias, got %A" res)
 
 [<Fact>]
+let ``UPDATE positioned (WHERE CURRENT OF) verification`` () =
+    match parse "UPDATE users SET name = 'x' WHERE CURRENT OF cur" with
+    | Update { Table = { Kind = Identifier "USERS" }
+               Cursor = Some { Kind = Identifier "CUR" }
+               Where = None } -> ()
+    | res -> Assert.Fail(sprintf "Expected positioned Update, got %A" res)
+
+[<Fact>]
+let ``UPDATE FOR PORTION OF verification`` () =
+    match parse "UPDATE users FOR PORTION OF p FROM x TO y SET name = 'x'" with
+    | Update { Table = { Kind = Identifier "USERS" }
+               PortionOf = Some { PeriodName = { Kind = Identifier "P" }
+                                  From = { Kind = Identifier "X" }
+                                  To = { Kind = Identifier "Y" } } } -> ()
+    | res -> Assert.Fail(sprintf "Expected Update FOR PORTION OF, got %A" res)
+
+[<Fact>]
+let ``UPDATE mutated set clause verification`` () =
+    match parse "UPDATE users SET a.b = 1" with
+    | Update { Set = [ MutatedSet({ Kind = Identifier "A" }, { Kind = Identifier "B" }, { Kind = Literal(Number 1m) }) ] } ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected Update mutated set clause, got %A" res)
+
+[<Fact>]
+let ``UPDATE nested mutated set clause verification`` () =
+    match parse "UPDATE users SET a.b.c = 1" with
+    | Update { Set = [ MutatedSet({ Kind = FieldReference({ Kind = Identifier "A" }, { Kind = Identifier "B" }) },
+                                  { Kind = Identifier "C" },
+                                  { Kind = Literal(Number 1m) }) ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected Update nested mutated set clause, got %A" res)
+
+[<Fact>]
+let ``UPDATE mutated set clause error`` () = parseFails "UPDATE users SET a. = 1"
+
+[<Fact>]
 let ``DELETE with alias verification`` () =
     match parse "DELETE FROM users AS u WHERE u.id = 1" with
     | Delete { Table = { Kind = Identifier "USERS" }
@@ -99,4 +139,39 @@ let ``MERGE verification`` () =
               On = { Kind = BinaryOp(Equal,
                                      { Kind = ColumnReference [ "T"; "ID" ] },
                                      { Kind = ColumnReference [ "S"; "ID" ] }) } } -> ()
+    | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)
+
+[<Fact>]
+let ``MERGE INSERT OVERRIDING SYSTEM VALUE verification`` () =
+    match
+        parse
+            "MERGE INTO t USING s ON t.id = s.id WHEN NOT MATCHED THEN INSERT (id) OVERRIDING SYSTEM VALUE VALUES (DEFAULT)"
+    with
+    | Merge { WhenClauses = [ clause ] } ->
+        match clause.Action with
+        | MergeInsert(cols, Some false, [ { Kind = Default } ]) ->
+            match cols with
+            | Some [ col ] ->
+                match col.Kind with
+                | Identifier "ID" -> ()
+                | _ -> Assert.Fail(sprintf "Expected insert column ID, got %A" col)
+            | _ -> Assert.Fail(sprintf "Expected insert column list, got %A" cols)
+        | res -> Assert.Fail(sprintf "Expected MergeInsert, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)
+
+[<Fact>]
+let ``MERGE INSERT OVERRIDING USER VALUE verification`` () =
+    match
+        parse "MERGE INTO t USING s ON t.id = s.id WHEN NOT MATCHED THEN INSERT (id) OVERRIDING USER VALUE VALUES (1)"
+    with
+    | Merge { WhenClauses = [ clause ] } ->
+        match clause.Action with
+        | MergeInsert(cols, Some true, [ { Kind = Literal(Number 1m) } ]) ->
+            match cols with
+            | Some [ col ] ->
+                match col.Kind with
+                | Identifier "ID" -> ()
+                | _ -> Assert.Fail(sprintf "Expected insert column ID, got %A" col)
+            | _ -> Assert.Fail(sprintf "Expected insert column list, got %A" cols)
+        | res -> Assert.Fail(sprintf "Expected MergeInsert, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)
