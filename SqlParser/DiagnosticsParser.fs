@@ -9,7 +9,7 @@ module DiagnosticsParser =
     // 23.1 <condition information item> ::= <simple target specification> <equals operator> <condition information item name>
     // 23.1 <statement information item> / <condition information item> — <target> = <item name> (shorthand)
     let pInfoItem =
-        pQualifiedName .>> token (pstring "=") .>>. pIdentifierRaw
+        pQualifiedNameExpr .>> token (pstring "=") .>>. pIdentifierRaw
         |>> fun (target, name) -> target, name
 
     // 23.1 <get diagnostics statement> ::= GET DIAGNOSTICS <SQL diagnostics information>
@@ -25,7 +25,7 @@ module DiagnosticsParser =
                  |>> fun (num, items) -> ConditionInfo(num, items)
              )
              <|> attempt (
-                 pQualifiedName .>> token (pstring "=") .>> pKeyword "ALL"
+                 pQualifiedNameExpr .>> token (pstring "=") .>> pKeyword "ALL"
                  .>>. opt (
                      attempt (pKeyword "STATEMENT" >>% AllStatement)
                      <|> (pKeyword "CONDITION" >>. opt pExpression |>> AllCondition)

@@ -371,7 +371,7 @@ module QueryParser =
                   // <only spec> ::= ONLY ( <table or query name> ) [ <correlation or recognition> ]
                   attempt (
                       pKeyword "ONLY"
-                      >>. between (token (pstring "(")) (token (pstring ")")) pQualifiedName
+                      >>. between (token (pstring "(")) (token (pstring ")")) pQualifiedNameExpr
                       .>>. opt (attempt pCorrelationOrRecognition)
                       |>> fun (name, _) -> Only name
                   )
@@ -423,7 +423,7 @@ module QueryParser =
                   // Must precede the plain <table or query name> branch below so that
                   // "t MATCH_RECOGNIZE(...)" is not consumed as just "t".
                   attempt (
-                      pQualifiedName
+                      pQualifiedNameExpr
                       .>>. opt (
                           attempt (
                               pCorrelationName
@@ -454,7 +454,7 @@ module QueryParser =
                   //     [ <correlation or recognition> ]
                   attempt (
                       getPosition
-                      .>>. (pQualifiedName
+                      .>>. (pQualifiedNameExpr
                             .>>. opt (attempt pSystemTimeSpec)
                             .>>. opt (attempt pCorrelationName))
                       |>> fun (pos, ((name, sysTime), alias)) ->
@@ -752,7 +752,7 @@ module QueryParser =
         choice
             [ attempt (pQuerySpecification |>> SelectQuery)
               attempt (pTableValueConstructor |>> TableValueConstructor)
-              attempt (pKeyword "TABLE" >>. pQualifiedName |>> ExplicitTable) ]
+              attempt (pKeyword "TABLE" >>. pQualifiedNameExpr |>> ExplicitTable) ]
 
     // 7.17 <order by clause> ::= ORDER BY <sort specification list>
     let pOrderByClause =

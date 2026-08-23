@@ -58,10 +58,19 @@ type DateTimeField =
     | Minute
     | Second
 
-// 6.1 <interval qualifier> ::= <start field> TO <end field> | <single datetime field>
+// 10.1 <interval leading field precision> ::= <unsigned integer>
+// 10.1 <interval fractional seconds precision> ::= <unsigned integer>
+// Precision attached to an <interval qualifier> field. `Leading` is the <interval leading field
+// precision> (applies to the start field / a single non-second field), `FractionalSeconds` is the
+// <interval fractional seconds precision> (applies to a SECOND end field).
+type IntervalPrecision =
+    { Leading: int option
+      FractionalSeconds: int option }
+
+// 10.1 <interval qualifier> ::= <start field> TO <end field> | <single datetime field>
 type IntervalQualifier =
-    | SingleField of DateTimeField
-    | Range of DateTimeField * DateTimeField
+    | SingleField of DateTimeField * IntervalPrecision option
+    | Range of DateTimeField * DateTimeField * IntervalPrecision option
 
 // 6.1 <interval literal> / 5.3 <interval string>
 type IntervalValue =

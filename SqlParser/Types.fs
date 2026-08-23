@@ -8,9 +8,6 @@ module Types =
     // 6.1 <data type> — re-export (defined in ExpressionParser/TypeParser)
     let pDataType = ExpressionParser.pDataType
 
-    // 5.3 <unsigned integer> ::= <digit>...
-    let pUnsignedInteger = pUnsignedInteger
-
     // 6.1 <character string type> ::= CHARACTER [ ( <character length> ) ] | CHAR [ ( <length> ) ] | CHARACTER VARYING ( <length> ) | VARCHAR ( <length> ) | <character large object type>
     let pCharacterType =
         choice
@@ -173,7 +170,7 @@ module Types =
               // <path-resolved user-defined type name> fallback below)
               attempt (
                   pKeyword "REF" >>. between (token (pstring "(")) (token (pstring ")")) pDataType
-                  .>>. opt (pKeyword "SCOPE" >>. pQualifiedName)
+                  .>>. opt (pKeyword "SCOPE" >>. pQualifiedNameExpr)
                   |>> fun (t, scope) -> ReferenceType(t, scope)
               )
               pIdentifierExpr |>> UserDefinedType ]

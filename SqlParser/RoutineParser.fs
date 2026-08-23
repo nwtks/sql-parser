@@ -44,7 +44,7 @@ module RoutineParser =
         choice
             [ attempt (pKeyword "LANGUAGE" >>. pIdentifierRaw |>> Language)
               attempt (pKeyword "PARAMETER" >>. pKeyword "STYLE" >>. pIdentifierRaw |>> ParameterStyle)
-              attempt (pKeyword "SPECIFIC" >>. pQualifiedName |>> SpecificName)
+              attempt (pKeyword "SPECIFIC" >>. pQualifiedNameExpr |>> SpecificName)
               attempt (pKeyword "NOT" >>. pKeyword "DETERMINISTIC" >>% Deterministic false)
               attempt (pKeyword "DETERMINISTIC" >>% Deterministic true)
               attempt (pKeyword "NO" >>. pKeyword "SQL" >>% SqlDataAccess NoSql)
@@ -84,13 +84,13 @@ module RoutineParser =
                   pKeyword "OLD" >>. pKeyword "SAVEPOINT" >>. pKeyword "LEVEL"
                   >>% SavepointLevel false
               )
-              attempt (pKeyword "NAME" >>. pQualifiedName |>> ExternalName) ]
+              attempt (pKeyword "NAME" >>. pQualifiedNameExpr |>> ExternalName) ]
 
     // 11.60 <routine body> ::= <SQL routine spec> | <external body reference>
     let pRoutineBody =
         choice
             [ attempt (
-                  pKeyword "EXTERNAL" >>. opt (pKeyword "NAME" >>. pQualifiedName)
+                  pKeyword "EXTERNAL" >>. opt (pKeyword "NAME" >>. pQualifiedNameExpr)
                   |>> ExternalRoutine
               )
               attempt (
@@ -104,7 +104,7 @@ module RoutineParser =
 
     // 11.60 <schema procedure> ::= CREATE <SQL-invoked procedure> — <SQL-invoked procedure> ::= PROCEDURE <schema qualified routine name> <SQL parameter declaration list> <routine characteristics> <routine body>
     let pCreateProcedureStatement =
-        pKeyword "CREATE" >>. pKeyword "PROCEDURE" >>. pQualifiedName
+        pKeyword "CREATE" >>. pKeyword "PROCEDURE" >>. pQualifiedNameExpr
         .>>. pParameterDeclarationList
         .>>. many pRoutineCharacteristic
         .>>. pRoutineBody
@@ -118,7 +118,7 @@ module RoutineParser =
 
     // 11.60 <schema function> ::= CREATE <SQL-invoked function> — <SQL-invoked function> ::= { <function specification> | <method specification designator> } <routine body>
     let pCreateFunctionStatement =
-        pKeyword "CREATE" >>. pKeyword "FUNCTION" >>. pQualifiedName
+        pKeyword "CREATE" >>. pKeyword "FUNCTION" >>. pQualifiedNameExpr
         .>>. pParameterDeclarationList
         .>>. (pKeyword "RETURNS" >>. pDataType)
         .>>. many pRoutineCharacteristic
@@ -216,10 +216,10 @@ module RoutineParser =
 
     // 11.49 <trigger definition> ::= CREATE TRIGGER <trigger name> <trigger action time> <trigger event> ON <table name> [ REFERENCING <transition table or variable list> ] <triggered action>
     let pCreateTriggerStatement =
-        pKeyword "CREATE" >>. pKeyword "TRIGGER" >>. pQualifiedName
+        pKeyword "CREATE" >>. pKeyword "TRIGGER" >>. pQualifiedNameExpr
         .>>. pTriggerActionTime
         .>>. pTriggerEvent
-        .>>. (pKeyword "ON" >>. pQualifiedName)
+        .>>. (pKeyword "ON" >>. pQualifiedNameExpr)
         .>>. opt (pKeyword "REFERENCING" >>. many pTransitionTableOrVariable)
         .>>. pTriggeredAction
         |>> fun (((((name, actionTime), event), table), transitions), action) ->

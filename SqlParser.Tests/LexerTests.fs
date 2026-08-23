@@ -33,12 +33,25 @@ let ``Delimited identifiers are parsed correctly`` () =
     Assert.Equal("Quoted \" quote", test pIdentifier "\"Quoted \"\" quote\"")
 
 [<Fact>]
+let ``Schema qualified names are parsed correctly`` () =
+    Assert.Equal<string list>([ "APP" ], test pSchemaQualifiedName "app")
+    Assert.Equal<string list>([ "APP"; "USERS" ], test pSchemaQualifiedName "app.users")
+    Assert.Equal<string list>([ "CAT"; "APP"; "USERS" ], test pSchemaQualifiedName "cat.app.users")
+    Assert.Equal<string list>([ "APP"; "USERS" ], test pSchemaQualifiedName "app . users")
+    Assert.Equal<string list>([ "APP"; "USERS" ], test pSchemaQualifiedName "app.\"USERS\"")
+
+[<Fact>]
+let ``Schema qualified names with reserved words are rejected`` () =
+    testFails pSchemaQualifiedName "app.SELECT"
+    testFails pSchemaQualifiedName "SELECT.app"
+
+[<Fact>]
 let ``Numeric literals are parsed correctly`` () =
-    Assert.Equal(123m, test pNumericLiteral "123")
-    Assert.Equal(123.45m, test pNumericLiteral "123.45")
-    Assert.Equal(0.45m, test pNumericLiteral ".45")
-    Assert.Equal(12300m, test pNumericLiteral "1.23E4")
-    Assert.Equal(0.0123m, test pNumericLiteral "1.23E-2")
+    Assert.Equal(123m, test pUnsignedNumericLiteral "123")
+    Assert.Equal(123.45m, test pUnsignedNumericLiteral "123.45")
+    Assert.Equal(0.45m, test pUnsignedNumericLiteral ".45")
+    Assert.Equal(12300m, test pUnsignedNumericLiteral "1.23E4")
+    Assert.Equal(0.0123m, test pUnsignedNumericLiteral "1.23E-2")
 
 [<Fact>]
 let ``String literals are parsed correctly`` () =
@@ -48,11 +61,11 @@ let ``String literals are parsed correctly`` () =
 
 [<Fact>]
 let ``Binary literals are parsed correctly`` () =
-    Assert.Equal<byte array>([| 0x01uy; 0xAFuy |], test pHexStringLiteral "X'01AF'")
+    Assert.Equal<byte array>([| 0x01uy; 0xAFuy |], test pBinaryStringLiteral "X'01AF'")
 
 [<Fact>]
 let ``Hex literal with spaces between hexit pairs is parsed`` () =
-    Assert.Equal<byte array>([| 0x01uy; 0xAFuy; 0x02uy |], test pHexStringLiteral "X'01 AF 02'")
+    Assert.Equal<byte array>([| 0x01uy; 0xAFuy; 0x02uy |], test pBinaryStringLiteral "X'01 AF 02'")
 
 [<Fact>]
 let ``Invalid date values are rejected`` () =
@@ -68,14 +81,14 @@ let ``Invalid interval values are rejected`` () =
     Assert.Equal(
         { IsNegative = false
           ValueString = "1"
-          Qualifier = IntervalQualifier.SingleField Year },
+          Qualifier = IntervalQualifier.SingleField(Year, None) },
         test pIntervalLiteral "INTERVAL '1' YEAR"
     )
 
     Assert.Equal(
         { IsNegative = false
           ValueString = "1:30"
-          Qualifier = IntervalQualifier.Range(Hour, Minute) },
+          Qualifier = IntervalQualifier.Range(Hour, Minute, None) },
         test pIntervalLiteral "INTERVAL '1:30' HOUR TO MINUTE"
     )
 
@@ -106,7 +119,7 @@ let ``Interval literals are parsed correctly`` () =
     Assert.Equal(
         { IsNegative = false
           ValueString = "1-2"
-          Qualifier = IntervalQualifier.Range(Year, Month) },
+          Qualifier = IntervalQualifier.Range(Year, Month, None) },
         test pIntervalLiteral "INTERVAL '1-2' YEAR TO MONTH"
     )
 
@@ -115,9 +128,78 @@ let ``Interval sign inside quotes is parsed`` () =
     Assert.Equal(
         { IsNegative = true
           ValueString = "1-2"
-          Qualifier = IntervalQualifier.Range(Year, Month) },
+          Qualifier = IntervalQualifier.Range(Year, Month, None) },
         test pIntervalLiteral "INTERVAL '-1-2' YEAR TO MONTH"
     )
+
+[<Fact>]
+let ``Interval single field with leading precision is parsed`` () =
+    Assert.Equal(
+        { IsNegative = false
+          ValueString = "1"
+          Qualifier =
+            IntervalQualifier.SingleField(
+                Year,
+                Some
+                    { IntervalPrecision.Leading = Some 4
+                      FractionalSeconds = None }
+            ) },
+        test pIntervalLiteral "INTERVAL '1' YEAR(4)"
+    )
+
+[<Fact>]
+let ``Interval single SECOND with leading and fractional precision is parsed`` () =
+    Assert.Equal(
+        { IsNegative = false
+          ValueString = "1.5"
+          Qualifier =
+            IntervalQualifier.SingleField(
+                Second,
+                Some
+                    { IntervalPrecision.Leading = Some 2
+                      FractionalSeconds = Some 3 }
+            ) },
+        test pIntervalLiteral "INTERVAL '1.5' SECOND(2,3)"
+    )
+
+[<Fact>]
+let ``Interval range with leading precision on start field is parsed`` () =
+    Assert.Equal(
+        { IsNegative = false
+          ValueString = "1-2"
+          Qualifier =
+            IntervalQualifier.Range(
+                Year,
+                Month,
+                Some
+                    { IntervalPrecision.Leading = Some 4
+                      FractionalSeconds = None }
+            ) },
+        test pIntervalLiteral "INTERVAL '1-2' YEAR(4) TO MONTH"
+    )
+
+[<Fact>]
+let ``Interval range with fractional seconds precision on SECOND end is parsed`` () =
+    Assert.Equal(
+        { IsNegative = false
+          ValueString = "1:30:05.5"
+          Qualifier =
+            IntervalQualifier.Range(
+                Hour,
+                Second,
+                Some
+                    { IntervalPrecision.Leading = None
+                      FractionalSeconds = Some 3 }
+            ) },
+        test pIntervalLiteral "INTERVAL '1:30:05.5' HOUR TO SECOND(3)"
+    )
+
+[<Fact>]
+let ``Interval precision with invalid value shape is rejected`` () =
+    // The precision clause is parsed, but the value string must still match the qualifier shape.
+    testFails pIntervalLiteral "INTERVAL '1-2' YEAR(4)"
+    testFails pIntervalLiteral "INTERVAL 'abc' SECOND(2,3)"
+    testFails pIntervalLiteral "INTERVAL '1:30' HOUR TO SECOND(3)"
 
 [<Fact>]
 let ``Unicode escape sequences are decoded correctly`` () =
@@ -127,7 +209,7 @@ let ``Unicode escape sequences are decoded correctly`` () =
 
 [<Fact>]
 let ``Large exponent literals do not overflow`` () =
-    let result = test pNumericLiteral "1E400"
+    let result = test pUnsignedNumericLiteral "1E400"
     Assert.True(result > 0m)
 
 [<Fact>]

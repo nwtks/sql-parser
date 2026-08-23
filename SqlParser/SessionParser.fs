@@ -78,7 +78,7 @@ module SessionParser =
                   >>. pKeyword "GROUP"
                   >>. pKeyword "FOR"
                   >>. pKeyword "TYPE"
-                  >>. pQualifiedName
+                  >>. pQualifiedNameExpr
                   .>>. pExpression
                   |>> fun (t, g) -> g, Some t))
         |>> fun (group, typeName) -> SetTransformGroup(group, typeName)

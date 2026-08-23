@@ -33,7 +33,7 @@ module DmlParser =
     let pWhereClause =
         pKeyword "WHERE"
         >>. (attempt (
-                 pKeyword "CURRENT" >>. pKeyword "OF" >>. pQualifiedName
+                 pKeyword "CURRENT" >>. pKeyword "OF" >>. pQualifiedNameExpr
                  |>> fun c -> Some c, None
              )
              <|> (pExpression |>> fun e -> None, Some e))
@@ -57,7 +57,7 @@ module DmlParser =
                     (token (pstring ","))
             |>> Values
 
-        pKeyword "INSERT" >>. pKeyword "INTO" >>. pQualifiedName
+        pKeyword "INSERT" >>. pKeyword "INTO" >>. pQualifiedNameExpr
         .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ","))))
         .>>. pOverride
         .>>. (pContextuallyTypedTableValueConstructor
@@ -111,7 +111,7 @@ module DmlParser =
             pIdentifierExpr .>> token (pstring "=") .>>. (pDefaultValue <|> pExpression)
             |>> SingleSet)
 
-        pKeyword "UPDATE" >>. pQualifiedName
+        pKeyword "UPDATE" >>. pQualifiedNameExpr
         .>>. opt (attempt pPortionOf)
         .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
         .>> pKeyword "SET"
@@ -136,7 +136,7 @@ module DmlParser =
     //     [ FOR PORTION OF <application time period name> FROM <point in time 1> TO <point in time 2> ]
     //     [ [ AS ] <correlation name> ] [ WHERE <search condition> ]
     let pDeleteStatement =
-        pKeyword "DELETE" >>. pKeyword "FROM" >>. pQualifiedName
+        pKeyword "DELETE" >>. pKeyword "FROM" >>. pQualifiedNameExpr
         .>>. opt (attempt pPortionOf)
         .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
         .>>. opt pWhereClause
@@ -197,7 +197,7 @@ module DmlParser =
                   Condition = filter
                   Action = action }
 
-        pKeyword "MERGE" >>. pKeyword "INTO" >>. pQualifiedName
+        pKeyword "MERGE" >>. pKeyword "INTO" >>. pQualifiedNameExpr
         .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
         .>> pKeyword "USING"
         .>>. pTableReference

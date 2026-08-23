@@ -68,11 +68,6 @@ module DdlParser =
               )
               attempt (pKeyword "DEFAULT" >>. pExpression |>> Default) ]
 
-    // 5.3 <signed numeric literal> ::= [ <sign> ] <unsigned numeric literal>
-    let pSignedNumericLiteral =
-        opt (pchar '-' <|> pchar '+') .>>. pNumericLiteral
-        |>> fun (sign, n) -> if sign = Some '-' then -n else n
-
     // 11.72 <sequence generator option> — shared by CREATE/ALTER SEQUENCE and
     // the <identity column specification> (11.2).
     let pSequenceOption =
@@ -191,13 +186,13 @@ module DdlParser =
 
     // 11.72 <sequence generator definition> ::= CREATE SEQUENCE <sequence generator name> [ <sequence generator options> ]
     let pCreateSequenceStatement =
-        pKeyword "CREATE" >>. pKeyword "SEQUENCE" >>. pQualifiedName
+        pKeyword "CREATE" >>. pKeyword "SEQUENCE" >>. pQualifiedNameExpr
         .>>. many pSequenceOption
         |>> fun (name, opts) -> CreateSequence(name, opts)
 
     // 11.73 <alter sequence generator statement> ::= ALTER SEQUENCE <name> <options>
     let pAlterSequenceStatement =
-        pKeyword "ALTER" >>. pKeyword "SEQUENCE" >>. pQualifiedName
+        pKeyword "ALTER" >>. pKeyword "SEQUENCE" >>. pQualifiedNameExpr
         .>>. many1 pSequenceOption
         |>> fun (name, opts) -> AlterSequence(name, opts)
 
@@ -222,11 +217,12 @@ module DdlParser =
         // (the <subtable clause> is parsed and discarded; the <typed table element
         // list> is not supported — see docs/trade-off.md)
         let pTypedTableClause =
-            pKeyword "OF" >>. pQualifiedName .>>. opt (pKeyword "UNDER" >>. pQualifiedName)
+            pKeyword "OF" >>. pQualifiedNameExpr
+            .>>. opt (pKeyword "UNDER" >>. pQualifiedNameExpr)
             |>> fun (typ, _sub) -> typ
 
         pKeyword "CREATE" >>. opt pTableScope .>> pKeyword "TABLE"
-        .>>. pQualifiedName
+        .>>. pQualifiedNameExpr
         .>>. (attempt (
                   between (token (pstring "(")) (token (pstring ")")) (sepBy1 pTableElement (token (pstring ",")))
                   |>> fun elems -> elems, None, None, None
@@ -280,9 +276,9 @@ module DdlParser =
                       between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
                       |>> Choice1Of2
                   )
-                  attempt (pKeyword "OF" >>. pQualifiedName |>> Choice2Of2) ]
+                  attempt (pKeyword "OF" >>. pQualifiedNameExpr |>> Choice2Of2) ]
 
-        pKeyword "CREATE" >>. pKeyword "VIEW" >>. pQualifiedName
+        pKeyword "CREATE" >>. pKeyword "VIEW" >>. pQualifiedNameExpr
         .>>. opt pViewSpecification
         .>> pKeyword "AS"
         .>>. pQuery
@@ -337,12 +333,12 @@ module DdlParser =
 
     // 10.6 <routine designator> ::= [ <routine type> ] <qualified identifier>
     let pRoutineDesignatorWithType =
-        choice [ attempt (pRoutineType >>. pQualifiedName); pQualifiedName ]
+        choice [ attempt (pRoutineType >>. pQualifiedNameExpr); pQualifiedNameExpr ]
 
     // 10.6 <specific routine designator> ::= SPECIFIC <routine type> <specific name> | <routine designator>
     let pSpecificRoutineDesignator =
         choice
-            [ attempt (pKeyword "SPECIFIC" >>. pRoutineType >>. pQualifiedName)
+            [ attempt (pKeyword "SPECIFIC" >>. pRoutineType >>. pQualifiedNameExpr)
               attempt pRoutineDesignatorWithType ]
 
     // 12.3 <privilege method list> ::= <specific routine designator> [ { , <specific routine designator> }... ]
@@ -392,7 +388,9 @@ module DdlParser =
                   pKeyword "SEQUENCE"
                   pKeyword "TRANSLATION" ]
 
-        choice [ attempt (opt pKind >>. pQualifiedName); attempt pRoutineDesignatorWithType ]
+        choice
+            [ attempt (opt pKind >>. pQualifiedNameExpr)
+              attempt pRoutineDesignatorWithType ]
 
     // 11.2 <drop behavior> ::= CASCADE | RESTRICT   (true = CASCADE, false = RESTRICT)
     let pDropBehavior = pKeyword "CASCADE" >>% true <|> (pKeyword "RESTRICT" >>% false)
@@ -478,7 +476,7 @@ module DdlParser =
     // 11.71 <transforms to be dropped> ::= ALL | <transform group element>
     let pTransformsToBeDropped =
         pKeyword "ALL" >>% TransformDropTarget.AllTransforms
-        <|> (pQualifiedName |>> TransformDropTarget.TransformGroup)
+        <|> (pQualifiedNameExpr |>> TransformDropTarget.TransformGroup)
 
     // 11.31 <drop table statement> ::= DROP TABLE <table name> <drop behavior>
     // 11.33 <drop view statement> ::= DROP VIEW <table name> <drop behavior>
@@ -499,19 +497,22 @@ module DdlParser =
     let pDropStatement =
         pKeyword "DROP"
         >>. choice
-                [ attempt (pKeyword "TABLE" >>. pQualifiedName .>>. pDropBehavior) |>> DropTable
-                  attempt (pKeyword "VIEW" >>. pQualifiedName .>>. pDropBehavior) |>> DropView
-                  attempt (pKeyword "SEQUENCE" >>. pQualifiedName .>>. pDropBehavior)
+                [ attempt (pKeyword "TABLE" >>. pQualifiedNameExpr .>>. pDropBehavior)
+                  |>> DropTable
+                  attempt (pKeyword "VIEW" >>. pQualifiedNameExpr .>>. pDropBehavior) |>> DropView
+                  attempt (pKeyword "SEQUENCE" >>. pQualifiedNameExpr .>>. pDropBehavior)
                   |>> DropSequence
                   attempt (pKeyword "ROLE" >>. pIdentifierExpr) |>> DropStatement.DropRole
-                  attempt (pKeyword "SCHEMA" >>. pQualifiedName .>>. pDropBehavior) |>> DropSchema
-                  attempt (pKeyword "DOMAIN" >>. pQualifiedName .>>. pDropBehavior) |>> DropDomain
-                  attempt (pKeyword "COLLATION" >>. pQualifiedName .>>. pDropBehavior)
+                  attempt (pKeyword "SCHEMA" >>. pQualifiedNameExpr .>>. pDropBehavior)
+                  |>> DropSchema
+                  attempt (pKeyword "DOMAIN" >>. pQualifiedNameExpr .>>. pDropBehavior)
+                  |>> DropDomain
+                  attempt (pKeyword "COLLATION" >>. pQualifiedNameExpr .>>. pDropBehavior)
                   |>> DropCollation
-                  attempt (pKeyword "CHARACTER" >>. pKeyword "SET" >>. pQualifiedName)
+                  attempt (pKeyword "CHARACTER" >>. pKeyword "SET" >>. pQualifiedNameExpr)
                   |>> DropCharacterSet
-                  attempt (pKeyword "TRANSLATION" >>. pQualifiedName) |>> DropTransliteration
-                  attempt (pKeyword "ASSERTION" >>. pQualifiedName .>>. opt pDropBehavior)
+                  attempt (pKeyword "TRANSLATION" >>. pQualifiedNameExpr) |>> DropTransliteration
+                  attempt (pKeyword "ASSERTION" >>. pQualifiedNameExpr .>>. opt pDropBehavior)
                   |>> DropAssertion
                   attempt (
                       pKeyword "CAST"
@@ -522,19 +523,19 @@ module DdlParser =
                       .>>. pDropBehavior
                   )
                   |>> fun ((source, target), behavior) -> DropCast(source, target, behavior)
-                  attempt (pKeyword "ORDERING" >>. pKeyword "FOR" >>. pQualifiedName .>>. pDropBehavior)
+                  attempt (pKeyword "ORDERING" >>. pKeyword "FOR" >>. pQualifiedNameExpr .>>. pDropBehavior)
                   |>> DropOrdering
                   attempt (
                       pKeyword "TRANSFORM" <|> pKeyword "TRANSFORMS" >>. pTransformsToBeDropped
-                      .>>. (pKeyword "FOR" >>. pQualifiedName)
+                      .>>. (pKeyword "FOR" >>. pQualifiedNameExpr)
                       .>>. pDropBehavior
                   )
                   |>> fun ((target, forName), behavior) -> DropTransform(forName, target, behavior)
                   // 11.62 <drop routine statement> ::= DROP <specific routine designator> <drop behavior>
-                  attempt (pKeyword "TRIGGER" >>. pQualifiedName) |>> DropTrigger
+                  attempt (pKeyword "TRIGGER" >>. pQualifiedNameExpr) |>> DropTrigger
                   attempt (pRoutineDesignatorWithType .>>. pDropBehavior) |>> DropRoutine
                   // 11.59 <drop data type statement> ::= DROP TYPE <name> <drop behavior>
-                  attempt (pKeyword "TYPE" >>. pQualifiedName .>>. pDropBehavior) |>> DropType ]
+                  attempt (pKeyword "TYPE" >>. pQualifiedNameExpr .>>. pDropBehavior) |>> DropType ]
         |>> Drop
 
     // 11.10 <alter table statement> ::= ALTER TABLE <table name> <alter table action>
@@ -576,12 +577,12 @@ module DdlParser =
                       |>> AlterColumn
                   ) ]
 
-        pKeyword "ALTER" >>. pKeyword "TABLE" >>. pQualifiedName .>>. pAction
+        pKeyword "ALTER" >>. pKeyword "TABLE" >>. pQualifiedNameExpr .>>. pAction
         |>> fun (name, action) -> { Table = name; Action = action } |> AlterTable
 
     // 17.12 <truncate table statement> ::= TRUNCATE TABLE <target table> [ <identity column restart option> ]
     let pTruncateStatement =
-        pKeyword "TRUNCATE" >>. opt (pKeyword "TABLE") >>. pQualifiedName
+        pKeyword "TRUNCATE" >>. opt (pKeyword "TABLE") >>. pQualifiedNameExpr
         .>>. opt (
             pKeyword "RESTART" >>. pKeyword "IDENTITY" >>% true
             <|> (pKeyword "CONTINUE" >>. pKeyword "IDENTITY" >>% false)
@@ -631,7 +632,7 @@ module DdlParser =
         let pNameClause =
             choice
                 [ attempt (
-                      pQualifiedName .>>. opt (pKeyword "AUTHORIZATION" >>. pIdentifierExpr)
+                      pQualifiedNameExpr .>>. opt (pKeyword "AUTHORIZATION" >>. pIdentifierExpr)
                       |>> fun (name, auth) -> Some name, auth
                   )
                   pKeyword "AUTHORIZATION" >>. pIdentifierExpr |>> fun auth -> None, Some auth ]
@@ -643,13 +644,16 @@ module DdlParser =
                     pKeyword "DEFAULT"
                     >>. pKeyword "CHARACTER"
                     >>. pKeyword "SET"
-                    >>. pQualifiedName
+                    >>. pQualifiedNameExpr
                     |>> Choice1Of2
                 )
 
             // 11.1 <path specification> ::= PATH <path-resolved user-defined type name> [ { <comma> <path-resolved user-defined type name> }... ]
             let pPath =
-                attempt (pKeyword "PATH" >>. sepBy1 pQualifiedName (token (pstring ",")) |>> Choice2Of2)
+                attempt (
+                    pKeyword "PATH" >>. sepBy1 pQualifiedNameExpr (token (pstring ","))
+                    |>> Choice2Of2
+                )
 
             many (pCharset <|> pPath)
             |>> fun items ->
@@ -682,7 +686,7 @@ module DdlParser =
 
     // 11.34 <domain constraint> ::= [ <constraint name definition> ] CHECK ( <search condition> ) [ <constraint characteristics> ]
     let pDomainConstraint =
-        opt (pKeyword "CONSTRAINT" >>. pQualifiedName)
+        opt (pKeyword "CONSTRAINT" >>. pQualifiedNameExpr)
         .>>. (pKeyword "CHECK"
               >>. between (token (pstring "(")) (token (pstring ")")) pExpression)
         .>>. pConstraintCharacteristics
@@ -693,12 +697,12 @@ module DdlParser =
 
     // 11.34 <domain definition> ::= CREATE DOMAIN <domain name> [ AS ] <data type> [ <default clause> ] [ <domain constraint>... ] [ <collate clause> ]
     let pCreateDomainStatement =
-        pKeyword "CREATE" >>. pKeyword "DOMAIN" >>. pQualifiedName
+        pKeyword "CREATE" >>. pKeyword "DOMAIN" >>. pQualifiedNameExpr
         .>>. opt (pKeyword "AS")
         .>>. pDataType
         .>>. opt (pKeyword "DEFAULT" >>. pExpression)
         .>>. many pDomainConstraint
-        .>>. opt (pKeyword "COLLATE" >>. pQualifiedName)
+        .>>. opt (pKeyword "COLLATE" >>. pQualifiedNameExpr)
         |>> fun (((((name, _), dataType), def), constraints), collation) ->
             CreateDomain
                 { Name = name
@@ -718,19 +722,22 @@ module DdlParser =
                   attempt (pKeyword "DROP" >>. pKeyword "DEFAULT" >>% DomainAlteration.DropDefault)
                   attempt (pKeyword "ADD" >>. pDomainConstraint |>> DomainAlteration.AddConstraint)
                   attempt (
-                      pKeyword "DROP" >>. pKeyword "CONSTRAINT" >>. pQualifiedName
+                      pKeyword "DROP" >>. pKeyword "CONSTRAINT" >>. pQualifiedNameExpr
                       |>> DomainAlteration.DropConstraint
                   ) ]
 
-        pKeyword "ALTER" >>. pKeyword "DOMAIN" >>. pQualifiedName .>>. pAction
+        pKeyword "ALTER" >>. pKeyword "DOMAIN" >>. pQualifiedNameExpr .>>. pAction
         |>> fun (name, action) -> AlterDomain(name, action)
 
     // 11.41 <character set definition> ::= CREATE CHARACTER SET <character set name> [ AS GET <character set name> ] [ <collate clause> ]
     let pCreateCharacterSetStatement =
-        pKeyword "CREATE" >>. pKeyword "CHARACTER" >>. pKeyword "SET" >>. pQualifiedName
+        pKeyword "CREATE"
+        >>. pKeyword "CHARACTER"
+        >>. pKeyword "SET"
+        >>. pQualifiedNameExpr
         .>>. opt (pKeyword "AS")
-        .>>. (pKeyword "GET" >>. pQualifiedName)
-        .>>. opt (pKeyword "COLLATE" >>. pQualifiedName)
+        .>>. (pKeyword "GET" >>. pQualifiedNameExpr)
+        .>>. opt (pKeyword "COLLATE" >>. pQualifiedNameExpr)
         |>> fun (((name, _), source), collate) -> CreateCharacterSet(name, source, collate)
 
     // 11.43 <collation definition> ::= CREATE COLLATION <collation name> FOR <character set name> FROM <collation name> [ <pad characteristic> ]
@@ -740,23 +747,23 @@ module DdlParser =
             pKeyword "NO" >>. pKeyword "PAD" >>% true
             <|> (pKeyword "PAD" >>. pKeyword "SPACE" >>% false)
 
-        pKeyword "CREATE" >>. pKeyword "COLLATION" >>. pQualifiedName
-        .>>. (pKeyword "FOR" >>. pQualifiedName)
-        .>>. (pKeyword "FROM" >>. pQualifiedName)
+        pKeyword "CREATE" >>. pKeyword "COLLATION" >>. pQualifiedNameExpr
+        .>>. (pKeyword "FOR" >>. pQualifiedNameExpr)
+        .>>. (pKeyword "FROM" >>. pQualifiedNameExpr)
         .>>. opt pPadCharacteristic
         |>> fun (((name, cs), existing), pad) -> CreateCollation(name, cs, existing, pad)
 
     // 11.45 <transliteration definition> ::= CREATE TRANSLATION <transliteration name> FOR <source character set> TO <target character set> FROM <transliteration source>
     let pCreateTransliterationStatement =
-        pKeyword "CREATE" >>. pKeyword "TRANSLATION" >>. pQualifiedName
-        .>>. (pKeyword "FOR" >>. pQualifiedName)
-        .>>. (pKeyword "TO" >>. pQualifiedName)
-        .>>. (pKeyword "FROM" >>. pQualifiedName)
+        pKeyword "CREATE" >>. pKeyword "TRANSLATION" >>. pQualifiedNameExpr
+        .>>. (pKeyword "FOR" >>. pQualifiedNameExpr)
+        .>>. (pKeyword "TO" >>. pQualifiedNameExpr)
+        .>>. (pKeyword "FROM" >>. pQualifiedNameExpr)
         |>> fun (((name, source), target), trSource) -> CreateTransliteration(name, source, target, trSource)
 
     // 11.47 <assertion definition> ::= CREATE ASSERTION <constraint name> CHECK ( <search condition> ) [ <constraint characteristics> ]
     let pCreateAssertionStatement =
-        pKeyword "CREATE" >>. pKeyword "ASSERTION" >>. pQualifiedName
+        pKeyword "CREATE" >>. pKeyword "ASSERTION" >>. pQualifiedNameExpr
         .>>. (pKeyword "CHECK"
               >>. between (token (pstring "(")) (token (pstring ")")) pExpression)
         .>>. pConstraintCharacteristics
@@ -783,7 +790,7 @@ module DdlParser =
                   pKeyword "MAP" >>. pKeyword "WITH" >>. pSpecificRoutineDesignator
                   |>> OrderingCategory.Map
               )
-              attempt (pKeyword "STATE" >>. opt pQualifiedName |>> OrderingCategory.State) ]
+              attempt (pKeyword "STATE" >>. opt pQualifiedNameExpr |>> OrderingCategory.State) ]
 
     // 11.65 <ordering form> ::= EQUALS ONLY BY <ordering category> | ORDER FULL BY <ordering category>
     let pOrderingForm =
@@ -794,7 +801,10 @@ module DdlParser =
 
     // 11.65 <user-defined ordering definition> ::= CREATE ORDERING FOR <schema-resolved user-defined type name> <ordering form>
     let pCreateOrderingStatement =
-        pKeyword "CREATE" >>. pKeyword "ORDERING" >>. pKeyword "FOR" >>. pQualifiedName
+        pKeyword "CREATE"
+        >>. pKeyword "ORDERING"
+        >>. pKeyword "FOR"
+        >>. pQualifiedNameExpr
         .>>. pOrderingForm
         |>> fun (name, form) -> CreateOrdering(name, form)
 
@@ -813,7 +823,7 @@ module DdlParser =
 
     // 11.67 <transform group> ::= <group name> ( <transform element> [ { <comma> <transform element> }... ] )
     let pTransformGroup =
-        pQualifiedName
+        pQualifiedNameExpr
         .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pTransformElement (token (pstring ",")))
         |>> fun (name, elements) -> { Name = name; Elements = elements }
 
@@ -822,7 +832,7 @@ module DdlParser =
         pKeyword "CREATE"
         >>. (pKeyword "TRANSFORM" <|> pKeyword "TRANSFORMS")
         >>. pKeyword "FOR"
-        >>. pQualifiedName
+        >>. pQualifiedNameExpr
         .>>. many1 pTransformGroup
         |>> fun (name, groups) -> CreateTransform(name, groups)
 
@@ -845,7 +855,7 @@ module DdlParser =
 
     // 11.68 <alter transform group> ::= <group name> ( <alter transform action> [ { <comma> <alter transform action> }... ] )
     let pAlterTransformGroup =
-        pQualifiedName
+        pQualifiedNameExpr
         .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pAlterTransformAction (token (pstring ",")))
         |>> fun (name, actions) -> { Name = name; Actions = actions }
 
@@ -854,6 +864,6 @@ module DdlParser =
         pKeyword "ALTER"
         >>. (pKeyword "TRANSFORM" <|> pKeyword "TRANSFORMS")
         >>. pKeyword "FOR"
-        >>. pQualifiedName
+        >>. pQualifiedNameExpr
         .>>. many1 pAlterTransformGroup
         |>> fun (name, groups) -> AlterTransform(name, groups)

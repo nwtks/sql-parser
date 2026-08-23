@@ -13,7 +13,7 @@ module TypeParser =
         pIdentifierExpr
         .>>. pDataType
         .>>. opt (pKeyword "DEFAULT" >>. pExpression)
-        .>>. opt (pKeyword "COLLATE" >>. pQualifiedName)
+        .>>. opt (pKeyword "COLLATE" >>. pQualifiedNameExpr)
         |>> fun (((name, dataType), def), collate) ->
             { Name = name
               DataType = dataType
@@ -115,7 +115,7 @@ module TypeParser =
         .>>. (pKeyword "METHOD" >>. pIdentifierExpr)
         .>>. pParameterDeclarationList
         .>>. opt (pKeyword "RETURNS" >>. pDataType)
-        .>>. opt (pKeyword "SPECIFIC" >>. pQualifiedName)
+        .>>. opt (pKeyword "SPECIFIC" >>. pQualifiedNameExpr)
         |>> fun ((((kind, name), parameters), returns), specific) ->
             { Kind = kind
               Name = name
@@ -188,8 +188,8 @@ module TypeParser =
     // 11.51 <user-defined type body> ::= <schema-resolved user-defined type name> [ <subtype clause> ] [ AS <representation> ] [ <user-defined type option list> ] [ <method specification list> ]
     // 11.51 <subtype clause> ::= UNDER <supertype name>
     let pCreateTypeStatement =
-        pKeyword "CREATE" >>. pKeyword "TYPE" >>. pQualifiedName
-        .>>. opt (pKeyword "UNDER" >>. pQualifiedName)
+        pKeyword "CREATE" >>. pKeyword "TYPE" >>. pQualifiedNameExpr
+        .>>. opt (pKeyword "UNDER" >>. pQualifiedNameExpr)
         .>>. opt (pKeyword "AS" >>. pRepresentation)
         .>>. many pTypeOption
         .>>. opt pMethodSpecificationList
@@ -236,5 +236,6 @@ module TypeParser =
 
     // 11.53 <alter type statement> ::= ALTER TYPE <schema-resolved user-defined type name> <alter type action>
     let pAlterTypeStatement =
-        pKeyword "ALTER" >>. pKeyword "TYPE" >>. pQualifiedName .>>. pAlterTypeAction
+        pKeyword "ALTER" >>. pKeyword "TYPE" >>. pQualifiedNameExpr
+        .>>. pAlterTypeAction
         |>> fun (name, action) -> AlterType { Name = name; Action = action }

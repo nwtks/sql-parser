@@ -16,20 +16,20 @@ module CursorParser =
         <|> (pKeyword "RELATIVE" >>. pExpression |>> Relative)
 
     // 14.4 <open statement> ::= OPEN <cursor name>
-    let pOpenStatement = pKeyword "OPEN" >>. pQualifiedName |>> Open
+    let pOpenStatement = pKeyword "OPEN" >>. pQualifiedNameExpr |>> Open
 
     // 14.5 <fetch statement> ::= FETCH [ [ <fetch orientation> ] FROM ]
     //                                <cursor name> INTO <fetch target list>
     let pFetchStatement =
         pKeyword "FETCH" >>. opt (attempt pFetchOrientation)
         .>>. opt (attempt (pKeyword "FROM" >>% ()))
-        .>>. pQualifiedName
+        .>>. pQualifiedNameExpr
         .>> pKeyword "INTO"
-        .>>. sepBy1 pQualifiedName (token (pstring ","))
+        .>>. sepBy1 pQualifiedNameExpr (token (pstring ","))
         |>> fun (((orient, _), cursor), targets) -> Fetch(orient, cursor, targets)
 
     // 14.6 <close statement> ::= CLOSE <cursor name>
-    let pCloseStatement = pKeyword "CLOSE" >>. pQualifiedName |>> Close
+    let pCloseStatement = pKeyword "CLOSE" >>. pQualifiedNameExpr |>> Close
 
     // 14.7 <select statement: single row>
     // SELECT [ <set quantifier> ] <select list> INTO <select target list>
@@ -40,7 +40,7 @@ module CursorParser =
         pKeyword "SELECT" >>. pSetQuantifier
         .>>. sepBy1 pSelectSublist (token (pstring ","))
         >>= fun (dist, cols) ->
-            pKeyword "INTO" >>. sepBy1 pQualifiedName (token (pstring ","))
+            pKeyword "INTO" >>. sepBy1 pQualifiedNameExpr (token (pstring ","))
             >>= fun into ->
                 opt (attempt pFromClause)
                 >>= fun from ->

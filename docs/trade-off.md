@@ -87,11 +87,11 @@ Column-level `UNIQUE`, `REFERENCES`, and `CHECK` were previously rejected. `Colu
 
 - **Trade-off:** Optional fields on the existing record keep the common `CREATE TABLE (col defs)` shape unchanged, but the `(a, b)` column-name list in the AS-SELECT form is stored separately from `Columns` (which holds `ColumnDefinition`s). `pCreateTableStatement` tries the table-element list first, then the column-name-list + AS form, then bare AS.
 
-## Schema-qualified names via `pQualifiedName`
+## Schema-qualified names via `pSchemaQualifiedName` / `pQualifiedNameExpr`
 
-`app.users` (and deeper `a.b.c`) now parse in table-name positions (`FROM`, `INSERT INTO`, `UPDATE`, `DELETE FROM`, `MERGE INTO`, `CREATE TABLE/INDEX/VIEW`, `DROP`, `TRUNCATE`, `ALTER TABLE`, `GRANT`/`REVOKE` objects). `pQualifiedName` returns a single `Expression` — `Identifier` for one part, `ColumnReference parts` for two or more — reusing the same shape as column references.
+The 5.4 `<schema qualified name>` rule (`[ <schema name> <period> ] <qualified identifier>`, i.e. `catalog.schema.name`) is implemented in the Lexer as `pSchemaQualifiedName`, which returns the parts as a `string list`. `app.users` (and deeper `a.b.c`) now parse in table-name positions (`FROM`, `INSERT INTO`, `UPDATE`, `DELETE FROM`, `MERGE INTO`, `CREATE TABLE/INDEX/VIEW`, `DROP`, `TRUNCATE`, `ALTER TABLE`, `GRANT`/`REVOKE` objects). `pQualifiedNameExpr` (in `ExpressionParser`) maps that list to a single `Expression` — `Identifier` for one part, `ColumnReference parts` for two or more — reusing the same shape as column references.
 
-- **Trade-off:** Reusing `ColumnReference` avoids a new AST case but means a table name and a column reference are indistinguishable by `Kind` alone (consumers must rely on position). A dedicated `QualifiedName` case would be clearer but adds a case for a shape already modeled.
+- **Trade-off:** Reusing `ColumnReference` avoids a new AST case but means a table name and a column reference are indistinguishable by `Kind` alone (consumers must rely on position). A dedicated `QualifiedName` case would be clearer but adds a case for a shape already modeled. The Lexer returns a plain `string list` (not a dedicated type) so the same parser can feed both the expression path and any future name-only consumers.
 
 ## Quantified comparison via an intermediate `QuantifiedSubquery` term
 

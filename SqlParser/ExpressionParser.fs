@@ -37,13 +37,13 @@ module ExpressionParser =
               attempt (pCharacterStringLiteral |>> String |>> Literal)
               attempt (pNationalCharacterStringLiteral |>> NationalString |>> Literal)
               attempt (pUnicodeCharacterStringLiteral |>> UnicodeString |>> Literal)
-              attempt (pNumericLiteral |>> Number |>> Literal)
+              attempt (pUnsignedNumericLiteral |>> Number |>> Literal)
               attempt (pBooleanLiteral |>> Bool |>> Literal)
               attempt (pDateLiteral |>> Date |>> Literal)
               attempt (pTimeLiteral |>> Time |>> Literal)
               attempt (pTimestampLiteral |>> Timestamp |>> Literal)
               attempt (pIntervalLiteral |>> Interval |>> Literal)
-              attempt (pHexStringLiteral |>> Literal.Binary |>> Literal) ]
+              attempt (pBinaryStringLiteral |>> Literal.Binary |>> Literal) ]
         |> withExprPosition
 
     // 6.3 <column reference> / 5.4 <identifier> — <identifier> | <column reference>
@@ -61,19 +61,16 @@ module ExpressionParser =
         pIdentifier
         .>>. many (attempt (token (pstring ".") >>. pIdentifier .>>? notFollowedBy (token (pstring "("))))
         |>> function
-            | (id, []) -> Identifier id
-            | (first, rest) -> ColumnReference(first :: rest)
+            | id, [] -> Identifier id
+            | first, rest -> ColumnReference(first :: rest)
         |> withExprPosition
 
-    // 5.4 <schema qualified name> / <identifier chain> — <identifier> [ { <period> <identifier> }... ]
-    let pQualifiedName =
-        pIdentifier .>>. many (token (pstring ".") >>. pIdentifier)
-        |>> fun (first, rest) ->
-            let parts = first :: rest
-
-            match parts with
+    // 5.4 <schema qualified name>
+    let pQualifiedNameExpr =
+        pSchemaQualifiedName
+        |>> function
             | [ s ] -> Identifier s
-            | _ -> ColumnReference parts
+            | parts -> ColumnReference parts
         |> withExprPosition
 
     // 6.13 <cast specification> ::= CAST ( <value expression> AS <data type> )
@@ -263,7 +260,7 @@ module ExpressionParser =
               pKeyword "SYSTEM_USER" >>% SystemUser |> withExprPosition
               pKeyword "USER" >>% User |> withExprPosition
               pKeyword "VALUE" >>% Value |> withExprPosition
-              pKeyword "CURRENT_TRANSFORM_GROUP_FOR_TYPE" >>. pQualifiedName
+              pKeyword "CURRENT_TRANSFORM_GROUP_FOR_TYPE" >>. pQualifiedNameExpr
               |>> CurrentTransformGroupForType
               |> withExprPosition
               // <current collation specification> ::= COLLATION FOR ( <string value expression> )
@@ -369,7 +366,7 @@ module ExpressionParser =
 
     // 6.14 <next value expression> ::= NEXT VALUE FOR <sequence generator name>
     let pNextValueExpression =
-        pKeyword "NEXT" >>. pKeyword "VALUE" >>. pKeyword "FOR" >>. pQualifiedName
+        pKeyword "NEXT" >>. pKeyword "VALUE" >>. pKeyword "FOR" >>. pQualifiedNameExpr
         |>> NextValueFor
         |> withExprPosition
 
@@ -880,14 +877,14 @@ module ExpressionParser =
     // 6.18 <static method invocation> ::= <path-resolved UDT name> :: <method name>
     //     [ <SQL argument list> ]
     let pStaticMethodInvocation =
-        pQualifiedName
+        pQualifiedNameExpr
         .>>. (token (pstring "::") >>. pIdentifierExpr .>>. pValueExpressionList)
         |>> fun (typ, (name, args)) -> StaticMethodInvocation(typ, name, args)
         |> withExprPosition
 
     // 6.19 <new specification> ::= NEW <path-resolved UDT name> <SQL argument list>
     let pNewSpecification =
-        pKeyword "NEW" >>. pQualifiedName .>>. pValueExpressionList
+        pKeyword "NEW" >>. pQualifiedNameExpr .>>. pValueExpressionList
         |>> fun (typ, args) -> NewSpecification(typ, args)
         |> withExprPosition
 
@@ -975,8 +972,8 @@ module ExpressionParser =
     // 8.19 <user-defined type specification> ::= <user-defined type name> | ONLY <user-defined type name>
     let pTypeSpec =
         choice
-            [ pKeyword "ONLY" >>. pQualifiedName |>> Exclusive
-              pQualifiedName |>> Inclusive ]
+            [ pKeyword "ONLY" >>. pQualifiedNameExpr |>> Exclusive
+              pQualifiedNameExpr |>> Inclusive ]
 
     // 8.1 <predicate> — a postfix predicate applied to a <value expression primary>:
     //   <between predicate>, <in predicate>, <null predicate>, <distinct predicate>,
