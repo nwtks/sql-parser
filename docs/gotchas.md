@@ -1,625 +1,372 @@
 # Gotchas & Common Mistakes
 
-## F# union-case name clashes
+Recurring pitfalls in this codebase. Entries are the ones worth knowing *before*
+writing code here; [architecture.md](architecture.md) covers the design and
+[trade-off.md](trade-off.md) the rationale behind the strictness.
 
-Many SQL keywords map to natural F# union-case names that already exist elsewhere in `Ast.fs`. Adding a new DU case with a clashing name silently resolves to the wrong type (usually the most recently defined). Known clashes:
+## F# language pitfalls
+
+### Union-case names clash — qualify at the use site
+
+Many SQL keywords map to natural F# case names that already exist elsewhere in
+`Ast.fs`. An unqualified name silently resolves to the wrong type (usually the
+most recently defined).
 
 | Case name | Clashes between |
 |-----------|-----------------|
 | `Select`, `Insert`, `Update`, `Delete` | `StatementKind` vs `PrivilegeAction` |
-| `Unique` | `ExpressionKind` (subquery predicate) vs `TableConstraint` |
-| `DropRole` | `StatementKind` vs `DropStatement` |
-| `SetDefault` | `ReferentialAction` vs `ColumnAlteration` |
+| `Unique`, `PrimaryKey`, `Check` | `ExpressionKind`/`ColumnConstraintKind` vs `TableConstraint` |
+| `DropRole`, `DropType` | `StatementKind` vs `DropStatement` |
+| `SetDefault`, `DropDefault`, `AddConstraint`, `DropConstraint` | `ReferentialAction`/`ColumnAlteration`/`AlterTableAction`/`DomainAlteration` |
+| `Final` | `ResultOption` vs `TypeOption` vs `RunningOrFinal` |
+| `Range` | `IntervalQualifier` vs `WindowFrameUnit` |
+| `BeginAtomic` | `RoutineBody` vs `TriggeredStatement` |
+| `First`, `Last`, `Next` | `Direction` vs `FirstOrLast`/`PrevOrNext` |
 
-**Fix:** qualify with the type name at the use site, e.g. `PrivilegeAction.Select`, `TableConstraint.Unique`, `DropStatement.DropRole`, `ReferentialAction.SetDefault`. Always qualify new case names that could clash with existing ones.
+Always qualify (`PrivilegeAction.Select`, `TableConstraint.Unique`,
+`IntervalQualifier.Range(…)`, `TypeOption.Final false`, `RunningOrFinal.Final`).
+`ColumnConstraintKind.Null` was *removed* for this reason (it clashed with
+`Literal.Null`).
 
-## `pKeyword` returns `Parser<string, unit>`, not `Parser<unit, unit>`
+### Reserved F# keywords cannot be identifiers or lambda parameters
 
-`pKeyword` keeps the matched string as its result. This is normally harmless because it is combined with `>>.`/`.>>`/`>>%`. But in an `<|>` (or other places where both branch result types must agree), mix it with a `Parser<unit, _>` and you get a type error. Coerce branches with `|>> ignore`.
+`override`, `base`, `default`, `when`, `constraint` are reserved (some are
+"reserved for future use"). Rename the binding: `ovr`, `tbl`, `defaultVal`,
+`whenCond`, `typeConstraint`.
 
-## Nested `Some <record>` patterns in tests
+### `char list` → `string` is not `string`
 
-F#'s pattern parser is finicky about `Some <record-pattern>` (e.g. `Some { Kind = ... }`) when it appears inside a union-case tuple pattern. It can fail with "Unexpected start of structured construct in pattern". Prefer binding to a variable and asserting on fields, e.g. match `Some name` then check `name.Kind`, instead of inlining the record pattern.
+`List.toArray |> string` on a `char list` yields `"System.Char[]"`, not the
+characters. Use `System.String.Concat`.
 
-## `char list` to `string` conversion
+### `List.fold` needs all three arguments
 
-`List.toArray |> string` on a `char list` yields `"System.Char[]"`, not the character contents. Use `System.String.Concat` (see `hexToInt32` in `Lexer.fs`). The old form made `Convert.ToInt32(..., 16)` throw `FormatException`, crashing every Unicode escape (`U&'\0041'`, `U&"\0041"`).
+`p |>> List.fold (fun acc x -> …)` type-checks as a partial application and
+yields a function, not an `Expression`. Bind the pair and fold explicitly:
+`|>> fun (first, rest) -> rest |> List.fold folder first`.
 
-## Data type left recursion
+### Record types with identical field shapes are inference-ambiguous
 
-6.1 `<data type>` — `pCollectionType` must NOT be inside the same `choice` as the base type parser it calls, or unknown types (`MyType`, typos) trigger infinite recursion → `StackOverflowException`. Split into `pDataTypeElement` (all non-collection types) + `pDataType` = `pCollectionType <|> pDataTypeElement` (`Types.fs`).
+`Expression`, `TableSource` and `Statement` all have `Kind` + `Pos`, so an
+unannotated record literal like `{ Kind = Literal(Number 1m); Pos = … }` can be
+inferred as `Statement`. Adding `Columns` to `CreateViewStatement` made it
+identical to `Cte`, so `pCte`'s literal silently became a `CreateViewStatement`.
 
-## `decimal` overflow in approximate literals
+**Fix:** qualify the first field (`{ Expression.Kind = …; … }`,
+`{ TableSource.Kind = …; … }`, `{ Cte.Name = name; … }`) or annotate the binding
+(`let defaultCount: Expression = …`).
 
-5.3 `<approximate numeric literal>` — `1E400` / `1.23E400` overflowed `decimal` with `OverflowException`. Clamp the exponent to ~28 (decimal max) before computing (`pApproximateNumericLiteral` in `Lexer.fs`).
+### Value restriction: named parsers need an explicit type
 
-## Time seconds must not accept repeated dots
+A `let`-bound parser whose type is not pinned hits the value restriction
+(`val pLeftBrace: Parser<char,'_a>`), because `pchar` returns `Parser<char,'u>`.
+Annotate: `let pLeftBrace: Parser<char, unit> = pchar '{'` (use
+`Parser<string, unit>` for `pstring`). Inline `token (pstring "{")` is unaffected.
 
-5.3 `<time literal>` — `TIME '12:00:00.5.5'` used to throw `FormatException` from `decimal`. Parse seconds as digits + optional `.fraction` only, so invalid input fails cleanly (`pTimeValue` in `Lexer.fs`).
+### Record patterns: alignment and nesting rules
 
-## Record patterns: no `; _`
+- Omitted fields are ignored — never write `{ Kind = X; _ }` (syntax error).
+- Newline-separated fields must start at the **same column** (FS0010). Extract the
+  record and match on it separately, or bind the payload and assert on fields.
+- A `[` for a list value must start on the **same line** as the `=`:
 
-F# record patterns ignore omitted fields automatically — do NOT write `{ Kind = X; _ }` (syntax error: "Unexpected symbol '_' in pattern"). Use `{ Kind = X }`.
+  ```fsharp
+  // FAILS
+  | CreateProcedure { Parameters =
+                          [ { Mode = Some In } ] } -> ()
+  // WORKS
+  | CreateProcedure { Parameters = [ { Mode = Some In } ] } -> ()
+  ```
 
-## FParsec combinator precedence
+- An inline list-of-record pattern nested inside `Some(...)` fails even then
+  (FS0010). Bind it first:
+  `| CreateType { Representation = Some(MemberList attrs) } -> match attrs with …`.
+- Deeply nested multi-line record patterns are fragile. Bind intermediate values
+  and assert with `Assert.Equal` instead of matching the whole shape.
 
-`<|>` binds TIGHTER than `.>>`/`.>>.`/`>>.` in FParsec (all `>>.`-family operators are left-associative at equal precedence). Forgetting this produces wrong tuple arities (e.g. `pKeyword "X" >>. p >>. q` gives `p * q`, not a 3-tuple).
+### Functions cannot appear in patterns
 
-## Record type inference: `{ Kind = ...; Pos = ... }` may resolve to `Statement`
+`Parameters = [ { ParameterType = dataTypeParam Integer } ]` does not compile — a
+record pattern may contain only literals and constructors. Bind
+(`Parameters = [ param ]`) and assert, or match the DU case directly.
 
-Both `Expression` and `Statement` have `Kind` + `Pos` fields. When a record literal like `{ Kind = Literal(Number 1m); Pos = ... }` is bound with `let` and its expected type isn't known at the binding site, F# can infer `Statement` (whose `Kind` is `StatementKind`) and report "expected StatementKind but here has type ExpressionKind". Fix: annotate explicitly, e.g. `let defaultCount: Expression = { ... }` (see `pFetch` in `QueryParser.fs`).
+## FParsec combinator pitfalls
 
-## `sepBy1` does not backtrack a consumed separator
+### Operator precedence
 
-7.6 `<derived column>` — `sepBy1 p sep` fails if `sep` succeeds but the following `p` fails — the consumed separator is not rolled back. For `t.*` (identifier chain ending in `*`), `sepBy1 pIdentifier (token ".")` consumes `t.` then fails on `*`. Use `p .>>. many (attempt (sep >>. p))` instead so a trailing separator is optional (see the qualified-star branch of `pDerivedColumn` in `QueryParser.fs`).
+`<|>` binds **tighter** than the `.>>`/`.>>.`/`>>.` family (which are
+left-associative at equal precedence), and `>>%` shares F#'s precedence group
+with `<|>` (both start `<`/`>`). Consequences:
 
-## `override` is a reserved F# keyword
+- `pKeyword "X" >>. p >>. q` yields `p * q`, not a 3-tuple.
+- `p >>% x <|> q >>% y` parses as `((p >>% x) <|> q) >>% y`. Parenthesise each
+  alternative, or use `choice [ … ]`.
+- `attempt pTargetTable |>> DmlTarget.TableTarget <|> preturn …` parses as
+  `attempt pTargetTable |>> (DmlTarget.TableTarget <|> preturn …)`. Parenthesise
+  the constructor branch — `|>>` binds looser than `<|>`.
 
-14.8 `<insert statement>` / `<override clause>` — `override` cannot be used as a lambda parameter or local binding name (used for `OVERRIDING` in `INSERT`). F# reports "Unexpected keyword 'override' in lambda expression". Rename the variable (e.g. `ovr`) — see `pInsertStatement` in `DmlParser.fs`.
+### `.>>.` produces nested 2-tuples
 
-## Record type inference ambiguity with identical field shapes
+`p1 .>>. p2 .>>. p3` is `(a * b) * c`, so the pattern must be
+`fun ((x, y), z) -> …`. The compiler reports "Expecting a tuple of length 2 …
+but given a tuple of length 3".
 
-When two record types have the same field names/types, an unannotated record literal resolves to the *most recently defined* type. Adding `Columns: Expression list option` to `CreateViewStatement` made it identical to `Cte` (`{ Name: Expression; Columns: Expression list option; Query: Query }`), so `pCte`'s record literal silently became `CreateViewStatement` and broke `WithQuery`. Fix: qualify the first field, e.g. `{ Cte.Name = name; ... }` (see `pCte` in `ExpressionParser.fs`).
+### `>>.` silently discards a result
 
-## `base` is a reserved F# keyword
+`pKeyword "A" >>. opt p >>. q` drops the `opt`'s value. Use `.>>.` when the value
+must survive: `>>. opt p .>>. q`. This produced the `BETWEEN` symmetry bug, where
+the parser compiled but never saw the qualifier.
 
-7.6 `<table primary>` — `base` cannot be used as a lambda parameter or local binding (used for the table primary in `TABLESAMPLE`). F# reports "Unexpected keyword 'base' in pattern". Rename the variable (e.g. `tbl`) — see `pTablePrimary` in `QueryParser.fs`.
+A `>>.`-chain also returns the *last* keyword's string, so
+`pKeyword "DROP" >>. pKeyword "SYSTEM" >>. pKeyword "VERSIONING" .>>. pDropBehavior`
+yields `string * bool`. Use `>>.` (not `.>>.`) for the final keyword.
 
-## `TableSource` record inference may resolve to `Statement`
-
-7.6 `<table primary>` — like `Expression`, `TableSource` has `Kind` + `Pos` fields, so an unannotated `{ Kind = TableSample(...); Pos = ... }` literal can be inferred as `Statement`. Qualify the first field: `{ TableSource.Kind = ...; Pos = ... }` (see the `TABLESAMPLE` suffix in `pTablePrimary`).
-
-## `Range` clashes between `IntervalQualifier` and `WindowFrameUnit`
-
-6.1 `<interval qualifier>` / 7.15 `<window frame unit>` — `Range` is a case of both `IntervalQualifier` (with arguments) and `WindowFrameUnit` (no arguments). In `Lexer.fs`, an unqualified `Range(Year, Month)` pattern resolves to `WindowFrameUnit.Range` and fails with "This union case does not take arguments". Qualify as `IntervalQualifier.Range(...)` (see `isValidIntervalValue` in `Lexer.fs`).
-
-## `pint32` accepts a leading `-` in date components
-
-5.3 `<date literal>` — `pDateValue` previously used `pint32`, so `DATE '2023--1-5'` parsed with a negative month. Use `pUnsignedInteger` (which rejects `-`) and validate month/day ranges explicitly (see `pDateValue` in `Lexer.fs`).
-
-## Value restriction on parsers built with `withExprPosition`
-
-A `let`-bound parser whose type isn't pinned to `Parser<_, unit>` can hit F#'s value restriction ("The value 'p' has an inferred generic function type"). `withExprPosition` is generic over the user-state type, so `let pDefaultValue = pKeyword "DEFAULT" >>% Default |> withExprPosition` fails. Fix: annotate explicitly, e.g. `let pDefaultValue: Parser<Expression, unit> = ...` (see `ExpressionParser.fs`).
-
-## FParsec `opt` does not backtrack on partial consumption
-
-12.2 `<grant privilege statement>` / 12.7 `<revoke statement>` — `opt p` is `(p |>> Some) <|> preturn None`. If `p` consumes input and then fails, the `<|>` cannot recover because input was consumed — the whole `opt` fails. This bites with multi-keyword optional clauses: `opt (pKeyword "WITH" >>. pKeyword "HIERARCHY" >>. pKeyword "OPTION")` consumes `WITH` then fails on `GRANT` (for `WITH GRANT OPTION`), failing the entire statement. Fix: wrap the optional body in `attempt`, e.g. `opt (attempt (pKeyword "WITH" >>. pKeyword "HIERARCHY" >>. pKeyword "OPTION"))` (see `pGrantStatement`/`pRevokeStatement` in `DdlParser.fs`).
-
-## Adding a `<simple table>` case makes `pQuery` greedily match `(VALUES ...)` in FROM
-
-7.6 `<table primary>` / 7.17 `<simple table>` / `<table value constructor>` — once `TableValueConstructor` was added to `pSimpleTable`, `pQuery` (a full query expression) could parse a bare `VALUES ...`. In `FROM (VALUES ...) AS t(...)`, the `pTablePrimary` subquery branch (`( <pQuery> )`) then matched first and produced `Subquery(TableValueConstructor ...)` instead of the dedicated `ValuesTable` node. Fix: in `pTablePrimary`, try the parenthesized `<table value constructor>` branch *before* the subquery branch so `FROM (VALUES ...)` keeps yielding `ValuesTable` (see `pTablePrimary` in `QueryParser.fs`).
-
-## FParsec has no `pipe6`
-
-7.16 `<query specification>` — FParsec's `pipe` combinator only goes up to `pipe5`. A 6-way `pipe6` fails to compile with "The value or constructor 'pipe6' is not defined". Fix: split into two stages — `pipe5` for the first five parsers returning an intermediate tuple, then `pipe2` with the sixth (see `pSelectBase` + `pQuerySpecification` in `QueryParser.fs`).
-
-## `>>.` discards earlier results (CREATE TABLE scope)
-
-11.1 `<table definition>` — in `pCreateTableStatement`, `pKeyword "CREATE" >>. opt pTableScope .>> pKeyword "TABLE" >>. pQualifiedName` discards the scope: `>>. pQualifiedName` throws away the accumulated `TableScope option` (all `>>.`-family combinators are left-associative at equal precedence, so only the last result survives). The compiler only flags the mismatch later, in the final lambda ("expected Expression but is a tuple"). Fix: use `.>>. pQualifiedName` to keep the scope in the tuple (see `pCreateTableStatement` in `DdlParser.fs`).
-
-## Optional `Identity`/`CHECK OPTION` need `opt (attempt ...)`
-
-11.2 `<column definition>` / 11.32 `<view definition>` — `opt` does not backtrack on partial consumption, so a bare `opt pIdentitySpec` would consume `GENERATED` and then fail on a plain column, taking the whole column down. Wrap in `attempt`: `opt (attempt pIdentitySpec)` and `opt (attempt pCheckOption)` (see `pColumnDefinition`/`pCreateViewStatement` in `DdlParser.fs`).
-
-## New parsers must be defined before their users (forward references)
-
-F# requires definitions before use. Adding `Identity` to `pColumnDefinition` means `pIdentitySpec` (and its dependency `pSequenceOption`) must be defined *before* `pColumnDefinition`; defining it after fails with FS0727/FS0001 "value not defined" (see the ordering at the top of `DdlParser.fs`). The same applies to `pCreateSequenceStatement`/`pAlterSequenceStatement`, which must precede any `pDdl` wiring that references them.
-
-## `>>%` and `<|>` have the same F# precedence (left-associative)
-
-7.6 `<table reference>` — `>>%` starts with `>` and `<|>` starts with `<` — both are in the same F# operator-precedence group, so `pKeyword "A" >>% x <|> pKeyword "B" >>% y` parses as `((pKeyword "A" >>% x) <|> pKeyword "B") >>% y`, not as two alternatives. Parenthesize each alternative: `(pKeyword "A" >>% x) <|> (pKeyword "B" >>% y)` (see the `FINAL|NEW|OLD` choice in `pTablePrimary`).
-
-## `SystemTime`'s first argument is a full `TableSource`
-
-7.6 `<table reference>` (FOR SYSTEM_TIME) — `TableSourceKind.SystemTime of TableSource * SystemTimeSpec` wraps the base `Table(name, alias)` so the position is preserved. Tests must match `SystemTime({ Kind = Table(...) }, spec)`, and the construction needs `{ TableSource.Kind = Table(name, alias); Pos = pos' }` (record inference would otherwise resolve to `Statement`).
-
-## `FINAL` is not a reserved word
-
-5.2 `<reserved word>` — `FINAL` is not in `reservedWords`, so `pKeyword "FINAL"` works — but the `DataChangeDelta` alternative (`FINAL|NEW|OLD TABLE (...)`) must precede the plain `Table` alternative in `pTablePrimary`, otherwise `FINAL TABLE (...)` would parse `FINAL` as a table name.
-
-## `pExpression` includes boolean ops — use a boolean-free parser
-
-6.3 `<value expression primary>` — the full `pExpression` would consume `BETWEEN ... AND ...`'s `AND` as a boolean operator, so boolean-free slots need a dedicated parser: `<point in time>` (7.6 `FOR SYSTEM_TIME`, 14.9/14.14 `FOR PORTION OF`) uses `pDatetimeValueExpression` (6.35), and the JSON slots use `pValueExpressionNoBoolean = opp.ExpressionParser` (the `OperatorPrecedenceParser` without boolean `AND`/`OR`).
-
-## F# record patterns with newline-separated fields require same-column alignment
-
-A record pattern whose fields are on separate lines fails with FS0010 ("Unexpected symbol") unless all fields start at the *same column*. Either align the fields or extract the record first and match on it separately (see the `WITH SEARCH`/`WITH CYCLE` tests in `QueryTests.fs`).
-
-## `opt pLockingClause` no-backtrack — `FOR` is now ambiguous
-
-7.6 `<updatability clause>` / FOR SYSTEM_TIME — `FOR` starts both the `<updatability clause>` (`FOR READ ONLY`/`FOR UPDATE`, query level) and `FOR SYSTEM_TIME` (table reference). If a table reference fails to consume `FOR SYSTEM_TIME ...` (e.g. an unsupported point-in-time literal), the query-level `opt pLockingClause` consumes `FOR` and then fails without backtracking, taking the whole query down. Fix: `opt (attempt pLockingClause)` at all three query-level sites in `QueryParser.fs`.
-
-## `pchar '*'` does not consume trailing whitespace
-
-7.6 `<derived column>` — `pKeyword` (and every token parser) does NOT skip leading whitespace — the previous parser must consume its own trailing whitespace. In `pQualifiedAsterisk`, after `pchar '*'` the parser sits at ` AS ...` (leading space), so `opt (attempt (pKeyword "AS" >>. ...))` fails and the `AS (cols)` suffix is silently dropped, leaving `SELECT t.* AS (a, b)` to fail at `AS`. Fix: `pchar '*' .>> ws` so the following `pKeyword "AS"` starts at the token.
-
-## `pRoutineInvocation` only accepts reserved *function* keywords
-
-10.9 `<routine invocation>` — `pRoutineInvocation` derives the routine name from `pReservedFunctionName`, an explicit whitelist of the reserved keywords the grammar spells as functions (`COUNT`, `ROW_NUMBER`, `PERCENTILE_CONT`, `ABS`, `MOD`, `LOWER`, ...), plus non-reserved/delimited identifiers. Two consequences:
-
-- Any reserved word that starts a dedicated construct (`EXISTS (SELECT ...)`, `UNIQUE (...)`, `JSON_EXISTS(...)`, `PERIOD (s, e)`, `VALUE_OF (...)`) must **not** be whitelisted, and its dedicated parser must still be listed BEFORE `pRoutineInvocation` in `pValueExpressionPrimary` (belt and braces).
-- **Adding a new built-in or vendor function whose name is reserved requires adding it to `functionKeywords`** — otherwise `SELECT ROW_NUMBER() OVER (...)` / `SELECT ABS(x)` fail with "reserved word." Non-reserved names (`foo(...)`, `app.foo(...)`) are unaffected. See `pReservedFunctionName` in `ExpressionParser.fs`.
-
-## `JSON_ARRAY(NULL ON NULL)` — `NULL` is ambiguous with the null clause
-
-6.33 `<JSON array constructor>` — `sepBy pExpression ","` greedily parses `NULL` as an element, so `JSON_ARRAY(NULL ON NULL)` leaves `ON NULL` unconsumed and fails. Guard each element with `pExpression .>>? notFollowedBy (attempt (pKeyword "ON" >>. pKeyword "NULL"))` so a leading `NULL`/`ABSENT` that starts the null clause is rejected as an element (see `pJsonArrayFunction` in `ExpressionParser.fs`).
-
-## `constraint` is a reserved F# identifier
-
-8.22 `<JSON predicate>` — `constraint` cannot be used as a lambda parameter or local binding ("The identifier 'constraint' is reserved for future use by F#"). Rename (e.g. `typeConstraint`) — see the `IS JSON` predicate in `ExpressionParser.fs`.
-
-## `opt` double-wraps a parser that already returns `option`
-
-6.27 `<JSON key uniqueness>` — `opt p` wraps the result in `Some`, so `opt pJsonKeyUniqueness` where `pJsonKeyUniqueness` returns `bool option` yields `bool option option`. Make the parser return the bare value (`bool`) and let the caller apply `opt` (see `pJsonKeyUniqueness` in `ExpressionParser.fs`).
-
-## `DomainAlteration` case names clash with `ColumnAlteration` / `AlterTableAction`
-
-11.35 `<alter domain statement>` / 11.10 `<alter table statement>` — `DomainAlteration`'s cases `SetDefault`/`DropDefault`/`AddConstraint`/`DropConstraint` clash with `ColumnAlteration.SetDefault`/`DropDefault` and `AlterTableAction.AddConstraint`/`DropConstraint`. Unqualified use in `pAlterDomainStatement` or `pAlterTableStatement` resolves to the wrong type. Qualify at the use site: `DomainAlteration.SetDefault`, `AlterTableAction.AddConstraint`, etc. (see `pAlterDomainStatement`/`pAlterTableStatement` in `DdlParser.fs` and the `ALTER TABLE extended actions` / `ALTER DOMAIN` tests).
-
-## `opt` double-wraps again: `pConstraintCharacteristics` / `pPadCharacteristic`
-
-11.6 `<table constraint definition>` / 11.43 `<collation definition>` — `pCheckTime` already returns `bool option`, so `attempt (pCheckTime |>> fun b -> (Some b, None, None))` produced `bool option option`. Fix: `fun b -> (b, None, None)`.
-- `pPadCharacteristic` returned `bool option`, then `opt pPadCharacteristic` gave `bool option option` but `CreateCollation`'s 4th field is `bool option`. Fix: `pPadCharacteristic` returns `bool` (`>>% true`/`>>% false`), so `opt pPadCharacteristic : bool option`.
-
-## Forward-ref wiring must happen after `pDdl` in `SqlParser.fs`
-
-`pSchemaElementImpl` (a `createParserForwardedToRef` in `DdlParser.fs`) is wired with `pSchemaElementImpl.Value <- pDdl` in `SqlParser.fs` *after* `pDdl` is defined — the same pattern as `pDataChangeStatementRef`. Wiring it inside `DdlParser.fs` would fail because `pDdl` lives in `SqlParser.fs` (compiled later).
-
-## `pTransformsToBeDropped` must precede `pDropStatement`
-
-11.71 `<drop transform statement>` — `pDropStatement`'s `DROP TRANSFORM` alternative references `pTransformsToBeDropped`, so that parser must be defined *before* `pDropStatement` (F# define-before-use). Placing it after produces FS0727/FS0001 "value not defined".
-
-## Avoid deeply nested multi-line record patterns in tests
-
-A record pattern nested several levels deep inside a list pattern (e.g. `[ { Constraints = [ { Name = ...; Characteristics = { ... } } ] } ]` spread across many lines) fails with "Unexpected start of structured construct in pattern" / "Incomplete structured construct ... Expected '->'". Fix: bind sub-values to names and assert on their fields separately, e.g. match `Constraints = [ c ]` then `Assert.Equal(None, c.Name)` / `Assert.Equal(None, c.Characteristics.InitiallyDeferred)`, or match `Actions = [ addAction; dropAction ]` then `match addAction with ...` (see the `CREATE DOMAIN` / `ALTER TRANSFORM` tests in `DdlTests.fs`).
-
-## `ALTER TRANSFORM` drop behavior is inside the parens
-
-11.70 `<drop transform element list> ::= DROP ( <transform kind> [ , <transform kind> ] <drop behavior> )` — the `CASCADE`/`RESTRICT` goes *inside* the parentheses: `ALTER TRANSFORM FOR t g (DROP (TO SQL RESTRICT))`. Writing `DROP (TO SQL) RESTRICT` (behavior outside) fails with a confusing top-level error (backtracked to `ALTER TABLE` expecting `TABLE`). The parser is correct per the grammar; the test input was wrong.
-
-## `default` and `when` are reserved F# keywords
-
-11.60 `<SQL-invoked routine>` / 11.49 `<trigger definition>` — `default` and `when` cannot be used as lambda parameter names (F# reports "Unexpected keyword 'default'/'when' in lambda expression"). `ParameterDeclaration.Default` and `TriggeredAction.When` are record fields, so the lambda parameters must be renamed (e.g. `defaultVal`, `whenCond`) — see `pParameterDeclaration`/`pTriggeredAction` in `RoutineParser.fs`.
-
-## `BeginAtomic` is a case of both `RoutineBody` and `TriggeredStatement`
-
-11.60 `<SQL-invoked routine>` / 11.49 `<trigger definition>` — both `RoutineBody` and `TriggeredStatement` have a `BeginAtomic of StatementKind list` case. An unqualified `BeginAtomic` in `RoutineParser.fs` resolves to the wrong type (F# reports "expected RoutineBody but here has type TriggeredStatement"). Qualify: `RoutineBody.BeginAtomic` / `TriggeredStatement.BeginAtomic` — in both the parser and the tests.
-
-## `[` must be on the same line as `=` in a record pattern with a list of records
-
-A record pattern whose value is a list of inline records fails with "Unexpected start of structured construct in pattern" when the `[` is on its own line after `=`:
+### `|>>` swallows a following `>>=` into the lambda body
 
 ```fsharp
-// FAILS
-| CreateProcedure { Parameters =
-                        [ { Mode = Some In } ] } -> ()
-// WORKS
-| CreateProcedure { Parameters = [ { Mode = Some In } ] } -> ()
+|>> fun x -> { … } >>= f    // parses as |>> (fun x -> { … } >>= f)
 ```
 
-The `[` must start on the same line as the `=` (the `{` may then span lines). This bit the `CREATE PROCEDURE`/`CREATE FUNCTION`/`CREATE TRIGGER` tests (see `DdlTests.fs` — 11.60 `<SQL-invoked routine>` / 11.49 `<trigger definition>`).
+Parenthesise the lambda: `|>> (fun x -> { … }) >>= f`. Also note an `|>>`
+projection can never fail — validation must use `>>=` and `fail`, and the
+`StatementKind` wrapper must come *after* the validation step.
 
-## `LOG` is a reserved word
+### `opt` does not backtrack partial consumption
 
-5.2 `<reserved word>` — `LOG` is in `reservedWords` (Lexer.fs line 193), so `INSERT INTO log (msg) ...` fails to parse — `pQualifiedName` rejects it. Use a non-reserved table name (e.g. `logs`) in tests. The `CREATE TRIGGER BEFORE INSERT` test hit this.
+`opt p` is `(p |>> Some) <|> preturn None`. If `p` consumes input and then fails,
+`<|>` cannot recover. Wrap optional multi-keyword clauses in `attempt`:
+`opt (attempt (pKeyword "WITH" >>. pKeyword "HIERARCHY" >>. pKeyword "OPTION"))`.
+This is required for `pIdentitySpec`, `pCheckOption`, `pLockingClause`,
+`pCursorHoldability`, `pCursorReturnability`, the `FOR UPDATE OF` group, and the
+`WITH`-prefixed clauses generally.
 
-## `pUnsignedInteger` does not consume trailing whitespace
+### `notFollowedBy` makes the failure fatal — wrap in `attempt`
 
-11.60 `<SQL-invoked routine>` — `pUnsignedInteger` (`many1Chars digit |>> uint64`) leaves trailing whitespace unconsumed, so a following `pKeyword` (which does not skip leading whitespace) fails. In `DYNAMIC RESULT SETS <n> <next characteristic>`, follow it with `.>> ws`: `pUnsignedInteger .>> ws |>> DynamicResultSets` (see `pRoutineCharacteristic` in `RoutineParser.fs`).
+When the inner parser succeeds, `notFollowedBy p` marks the failure as fatal, and
+`opt` does not catch fatal errors. Wrap with `attempt` so `opt` can return `None`
+(see `pExistingWindowName` / `pWindowFrame`).
 
-## `SELECT ( <privilege method list> )` must precede `SELECT [ <privilege column list> ]`
+### `attempt` is required inside postfix loops
 
-12.3 `<privileges>` — in `pPrivilegeAction`, the method-list alternative must be tried *before* the plain `SELECT [ column list ]` one. Otherwise `opt pPrivilegeColumnList` succeeds with `None` (leaving the `(` unconsumed) and the grant fails on the following `ON` (see `pPrivilegeAction` in `DdlParser.fs`).
+A branch that consumes a token and then fails aborts the enclosing `many` rather
+than stopping it. `many (attempt pDereferenceReference <|> attempt pMethodOrFieldReference)`
+and `many (attempt pPredicate <|> … <|> attempt pTimeZoneSuffix)` are the canonical
+examples.
 
-## `TYPE` / `UNDER` / `OVERRIDING` / `INSTANCE` / `CONSTRUCTOR` / `INSTANTIABLE` / `FINAL` are not reserved words
+### `sepBy1` does not backtrack a consumed separator — and must not re-parse `p`
 
-5.2 `<reserved word>` — `TYPE`, `UNDER`, `OVERRIDING`, `INSTANCE`, `CONSTRUCTOR`, `INSTANTIABLE`, and `FINAL` are **not** in `reservedWords` (only `REF`, `METHOD`, `NEW`, `SCOPE`, `STATIC`, `SYSTEM`, `LOG` are). Consequences:
+`sepBy1 p sep` is `p .>>. many (sep >>. p)`, so it fails if `sep` succeeds and `p`
+then fails. Use `p .>>. many (attempt (sep >>. p))` when a trailing separator is
+optional (e.g. `t.*` in `<derived column>`).
 
-- `pAlterTypeStatement` must be tried **before** `pAlterRoutineStatement` in `pDdl` — otherwise `ALTER TYPE my_type ...` is consumed as `ALTER ROUTINE` (which expects `FUNCTION`/`PROCEDURE`/`ROUTINE`/`METHOD`).
-- `DROP TYPE` must be placed **after** `DropRoutine` in `pDropStatement` — otherwise `DROP TYPE t` is consumed as a bare routine designator (`DROP t`).
-- `pKeyword "TYPE"` still matches the literal string, so `CREATE TYPE` works; the risk is only in ambiguous positions.
+Also do not put `p` in `sep`: `sepBy1 pIdentifier (token "." >>. pIdentifier)`
+double-parses. The separator should consume only `.`:
+`pIdentifier .>>. many (attempt (token "." >>. pIdentifier .>>? notFollowedBy "("))`.
 
-## `pKeyword` returns `Parser<string, unit>` — discard with `>>.` / `>>% ()`
+### Whitespace is not skipped automatically
 
-11.54 `<alter type action>` — `pKeyword s` keeps the matched string. When chained with `.>>.`/`.>>`, the string lands in the tuple and must be discarded (`|>> ignore` or `>>% ()`). In the four `CAST` type options (`CAST (SOURCE AS REF) WITH a` etc.), `pKeyword "CAST" >>. between "(" ")" (KEYWORDS >>% ()) .>> pKeyword "WITH" >>. pIdentifierExpr` — the `>>.` (not `.>>.`) discards the keyword strings (see `pTypeOption` in `TypeParser.fs`).
+`pKeyword` and most token parsers do not skip *leading* whitespace, and several
+parsers do not consume *trailing* whitespace: `pchar '*'`, `pUnsignedInteger`,
+and other raw character/digit parsers. Follow them with `.>> ws` / `token` (e.g.
+`pchar '*' .>> ws`, `pUnsignedInteger .>> ws`), otherwise the next `pKeyword`
+fails on the space.
 
-## `Final` clashes between `ResultOption` and `TypeOption`
+`pKeyword` also refuses to match a keyword immediately followed by an identifier
+character, which is why `SYSTEM` does not match `SYSTEM_TIME` and `C` does not
+match `COBOL`.
 
-`Final` is a case of both `ResultOption` (7.6) and `TypeOption` (11.40). In `TypeParser.fs`, an unqualified `Final false` resolves to `ResultOption.Final` (which takes no arguments) and fails. Qualify: `TypeOption.Final false` (see `pTypeOption`).
+### `pKeyword` returns `Parser<string, unit>`, not `Parser<unit, unit>`
 
-## `sepBy1` parses `p` in the separator — don't put `p` in both
+Usually harmless (it feeds `>>.`/`.>>`/`>>%`), but in an `<|>` where both branches
+must agree, mix it with a `Parser<unit, _>` and you get a type error. Coerce with
+`|>> ignore` or `>>% ()`.
+
+### There is no `pipe6`
 
-6.3 `<column reference>` — `sepBy1 p sep = p .>>. many (sep >>. p)`. The original `pColumnReferenceExpr` used `sepBy1 pIdentifier (attempt (token "." >>. pIdentifier .>>? notFollowedBy "("))` — the separator already parsed `pIdentifier`, so `t.id` double-parsed and broke `SELECT t.id FROM t`, `JOIN ... ON a.id = b.id`, and DML aliases. Fix: `pIdentifier .>>. many (attempt (token "." >>. pIdentifier .>>? notFollowedBy "("))` (see `ExpressionParser.fs`).
+FParsec only provides `pipe2`–`pipe5`. Split a six-way pipeline into `pipe5` plus
+`pipe2` (see `pSelectBase` + `pQuerySpecification`).
+
+## Definition order, forward references and dispatch
 
-## `Choice1Of2` / `Choice2Of2` type inference back-propagates from record fields
+### Define before use, or use a forward reference
 
-`pViewSpecification` returns `Choice1Of2 (column list) | Choice2Of2 (OF type)`, and the caller destructures it into `CreateViewStatement.Columns`/`OfType`. If the `Choice1Of2`/`Choice2Of2` arguments are not annotated, F# infers them from the record field types — but only after the whole expression type-checks, so a wrong guess surfaces as a confusing error at the `|>>` lambda. Fix: annotate the choice arguments explicitly (`Choice1Of2 c` / `Choice2Of2 t`) and destructure with a `match` (see `pCreateViewStatement` in `DdlParser.fs`).
+F# requires definitions before use. Adding a parser dependency means moving the
+dependency *above* its user (`pIdentitySpec` and `pSequenceOption` before
+`pColumnDefinition`; `pTransformsToBeDropped` before `pDropStatement`;
+`pConstraintEnforcement` next to `pDropBehavior`). Cross-module recursion uses
+`createParserForwardedToRef`.
 
-## `METHOD` and `ref` are reserved words — use non-reserved names in tests
+### Forward-reference wiring happens in `SqlParser.fs`
 
-`METHOD` is reserved, so a method name cannot be `METHOD` (`SELECT a.b.method(x)` fails). Use e.g. `prune`. `ref` is reserved, so a column named `ref` fails (`CREATE TABLE t (ref REF(...))`); use `r`. The `CREATE TYPE` tests hit both.
+`pSchemaElementImpl`, `pDataChangeStatementRef`, `pRoutineBodyStatementRefImpl`
+and `pStatementRef` are assigned in `SqlParser.fs` *after* the target is defined.
+Wiring them inside their own module fails (the target is compiled later). Use the
+forwarding **parser**, never `…Ref.Value`, inside a combinator — reading `.Value`
+at module-initialisation time captures FParsec's dummy parser.
 
-## Inline list-of-record pattern must not be nested inside `Some(...)`
+### An optional-looking sub-rule must not match empty input
 
-The previous rule ("`[` on the same line as `=`") is necessary but not sufficient: an inline list-of-record pattern *inside* `Some(...)` still fails with FS0010 ("Unexpected identifier in pattern"):
+Transcribing `A | B...` as `opt A .>>. many B` makes the parser succeed on empty
+input because both `opt` and `many` allow zero matches, silently shadowing later
+alternatives. Transcribe the alternatives literally, e.g. 11.20:
+`attempt (pSetIdentityColumnGeneration .>>. many option) <|> (many1 option)`.
 
-```fsharp
-// FAILS — `[` is inside Some(...), not directly after `=`
-| CreateType { Representation = Some(TypeRepresentation.MemberList [ { Name = ... } ]) } -> ()
-// WORKS — bind the list, then match it separately
-| CreateType { Representation = Some(TypeRepresentation.MemberList attrs) } ->
-    match attrs with
-    | [ { Name = ... } ] -> ()
-```
+### Dispatch order is load-bearing
 
-The `[` must be directly after the `=` of the field it is assigned to. A single-level `Methods = [ { ... } ]` (with `[` after `=`) and a nested `Methods = [ { ... Parameters = [ { ... } ] ... } ]` both work; only the `Some(...)`-wrapped form fails (see the `CREATE TYPE` tests in `DdlTests.fs`).
+Because `pKeyword` matches non-reserved words too, `choice` order keeps prefixes
+apart. The pairs that must be ordered:
 
-## `Expression` constructions need `Pos` — prefer patterns over `Assert.Equal`
+- `ALTER TYPE` **before** `ALTER ROUTINE`.
+- `DROP TYPE` **after** `DROP ROUTINE`.
+- `EXECUTE IMMEDIATE` **before** `EXECUTE <name>`.
+- `DECLARE LOCAL TEMPORARY TABLE` **before** `DECLARE <cursor>`.
+- `SELECT ... INTO` **before** `pQuery`.
+- The PTF `DESCRIBE WITH …` body **before** the generic statement branch.
+- 20.17 `ALLOCATE … FOR <statement>` **before** 20.18 `ALLOCATE … FOR PROCEDURE`.
+- The `(VALUES …)` branch **before** the subquery branch in `pTablePrimary`.
+- `SELECT ( <privilege method list> )` **before** `SELECT [ <column list> ]`.
+- The `FINAL|NEW|OLD TABLE` alternative **before** the plain table alternative.
+- The 6.26 navigation parser **before** `pRoutineInvocation` and
+  `pColumnReferenceExpr`, tried Compound → Logical → Physical.
+- 6.37's interval alternative **before**, and inside the same `attempt` as, the
+  plain parenthesized `pExpression` branch.
+- The NESTED branch before the regular-column branch in `pJsonTableColumn`.
+
+### Do not reuse a parser whose grammar does not cover the slot
+
+`INSERT` must keep `pQualifiedNameExpr` for its target: 14.11 `<insertion target>`
+is a plain `<table name>` with no `ONLY` form, so `pTargetTable` would wrongly
+accept `INSERT INTO ONLY (t) …`. Likewise `pPartitionBy` is column references
+only.
+
+The omitted DML target relies on `SET` and `WHERE` being reserved words —
+`pTargetTable` fails cleanly on them. Do not "fix" a missing table name by
+accepting `pIdentifierRaw`, which would parse `UPDATE SET …` with `SET` as the
+table.
+
+## Reserved words and keywords
+
+### `pRoutineInvocation` only accepts reserved *function* keywords
 
-`Expression = { Kind; Pos }` is a record, so *constructing* an expected `Expression` (e.g. inside `Assert.Equal`) requires `Pos = { Line = ...; Column = ... }`, and the parsed value's real `Pos` will never equal a hand-written one. Prefer **pattern matching** (which ignores `Pos`) over `Assert.Equal` on values containing `Expression`s. These tests bind lists to variables and match them separately rather than comparing whole records.
+`pReservedFunctionName` is a whitelist (`COUNT`, `ROW_NUMBER`,
+`PERCENTILE_CONT`, `ABS`, …) plus non-reserved/delimited identifiers. Therefore:
 
-## Record type inference ambiguity again: the `MutatedSet` `List.fold`
+- Reserved words that start a dedicated construct (`EXISTS`, `UNIQUE`,
+  `JSON_EXISTS`, `PERIOD`, `VALUE_OF`) must stay off the whitelist, and their
+  dedicated parsers must be listed **before** `pRoutineInvocation` in
+  `pValueExpressionPrimary`.
+- **Adding a reserved-name built-in requires adding it to `functionKeywords`**,
+  or `SELECT ABS(x)` / `SELECT ROW_NUMBER() OVER (…)` fail with "reserved word".
+  Non-reserved names (`foo(...)`) are unaffected.
+
+### `pIdentifierRaw` is too permissive for closed enumerations
+
+Item names that are reserved words (`NUMBER`, `ROW_COUNT`, `DATA`, …) cannot use
+`pIdentifier`, but `pIdentifierRaw` also accepts `ALL`, `SELECT`, …. Use an
+explicit `choice [ pKeyword "…" ]` enumeration (diagnostics/descriptor item names,
+`<language name>`, `<parameter style>`).
 
-Building the mutated target in `pSetClause` (`DmlParser.fs`) with `List.fold (fun acc name -> { Kind = FieldReference(acc, name); Pos = acc.Pos }) first rest` hits the same `Expression`-vs-`Statement` ambiguity as `pFetch` — both records have `Kind`/`Pos` fields, and bidirectional inference pins the fold's `'State` to `Statement`, producing "expected StatementKind but here has ExpressionKind" / "expected Statement but here has Expression". Fix: annotate both the result and the lambda params:
+### Non-reserved keywords need explicit handling
 
-```fsharp
-let target: Expression =
-    List.fold
-        (fun (acc: Expression) (name: Expression) ->
-            { Kind = FieldReference(acc, name); Pos = acc.Pos })
-        first
-        (List.take (rest.Length - 1) rest)
-```
+`TYPE`, `UNDER`, `OVERRIDING`, `INSTANCE`, `CONSTRUCTOR`, `INSTANTIABLE`,
+`FINAL`, `OPTIONS`, `DERIVED`, `GENERATED`, `DESCRIBE`, `PRIVATE`, `FULFILL`,
+`FINISH`, `SECURITY`, `DISPATCH`, `GENERAL`, `IMPLEMENTATION`, `DEFINER`,
+`INVOKER`, `TRANSFORM`, `STYLE`, `LOCATOR`, `PRESERVE`, `TEMPORARY`, `EXTENDED`,
+`ATTRIBUTES` are **not** reserved. Consequences:
 
-## `MergeInsert` values is a single `Expression list`, not list-of-lists
+- A `<typed table element>` cannot be dispatched on its first token —
+  `<column options>` is only recognisable once the mandatory `WITH OPTIONS` has
+  been consumed, so every alternative needs `attempt`.
+- `DESCRIPTOR` must be tried before `<data type>` in `<parameter type>`,
+  otherwise `(d DESCRIPTOR)` parses as a parameter of UDT type `DESCRIPTOR`.
+- `INSTANCE`/`CONSTRUCTOR` must be `attempt`ed in `pMethodKind` so they can still
+  be identifiers elsewhere.
 
-`MergeAction.MergeInsert`'s third field is one `VALUES (...)` row — a single `Expression list`. A test pattern `[ [ { Kind = Default } ] ]` (list-of-lists, copied from the top-level `INSERT` VALUES shape) fails with "expected Expression but here has ''a list". Use `[ { Kind = Default } ]` and `[ { Kind = Literal(Number 1m) } ]` (see the MERGE OVERRIDING tests in `DmlTests.fs`).
+`LOG` **is** reserved, so `INSERT INTO log …` fails — use another table name in
+tests. `METHOD`, `REF`, `OUT`, `SYSTEM_TIME`, `VALUE_OF`, `DESCRIBE`, `START`,
+`STATIC`, `GROUP`, `PARAMETER`, `SQL`, `EXTERNAL`, `DEFAULT` are reserved too.
 
-## Order the `UPDATE` set-clause branches: MultipleSet → MutatedSet → SingleSet
+### `<scope option>` is a 5.4 rule, `<semicolon>` a 5.1 rule
 
-All three branches of `pSetClause` could match the start of the input (`(` for MultipleSet; an identifier for both MutatedSet and SingleSet). MutatedSet must be tried *before* SingleSet: SingleSet uses `pIdentifierExpr` (a single identifier), so `SET a.b = c` would consume `a` and fail at `.`. `<|>` backtracks on failure, but if SingleSet is last there is nothing after it — the whole UPDATE fails. Correct order: MultipleSet, MutatedSet, SingleSet (see `pSetClause` in `DmlParser.fs`).
+`RuleNumberingTests` matches a citation against the clauses that mention the name,
+so `<scope option>` must cite 5.4 (not 20.15/20.17) and `<semicolon>` must cite
+5.1 (not 5.2).
 
-## `pWhereClause` is defined in two modules
+## Grammar-specific traps
 
-Both `QueryParser.fs` (line 467) and `DmlParser.fs` define a module-level `pWhereClause` with different shapes. `QueryParser`'s is `WHERE <expression>`; `DmlParser`'s returns `(cursor option, search condition option)` to support `WHERE CURRENT OF`. They do not clash (separate modules), but when reading code, know which one you're looking at.
+### `pExpression` includes boolean operators
 
-## `pOverride` must be defined before both `INSERT` and `MERGE`
+In slots where `AND` must not be consumed as a boolean operator, use a
+boolean-free parser: `<point in time>` / `FOR PORTION OF` use the 6.35 datetime
+parser, and the JSON argument slots use `pValueExpressionNoBoolean`
+(`opp.ExpressionParser` without boolean operators). That parser is a forward ref
+because the JSON parsers are defined before `opp` is built.
 
-`pOverride` is hoisted to module level in `DmlParser.fs` and used by both `pInsertStatement` and `pMergeStatement`, so it must appear at the top of the module (F# define-before-use). The USER/SYSTEM alternative parenthesizes the second branch: `(pKeyword "USER" >>% true <|> (pKeyword "SYSTEM" >>% false))` — `>>%` and `<|>` share precedence, so without the inner parens the `<|>` would bind differently (see the earlier `>>%`/`<|>` gotcha).
+### `pDataType` accepts any identifier as a user-defined type
 
-## `EXECUTE IMMEDIATE` must be tried before `EXECUTE <name>`
+Any identifier is a valid UDT name, so `NESTED PATH '$.items'` would be read as a
+column named `NESTED` of type `PATH`. The UDT branch ends with
+`.>>? notFollowedBy pIdentifier` so a name immediately followed by another
+identifier is rejected; the NESTED branch is also tried first.
 
-Because `IMMEDIATE` is not a reserved word, `pExecuteStatement` (`EXECUTE <name>`) would greedily consume `IMMEDIATE` as the statement name in `EXECUTE IMMEDIATE ...`. Place `pExecuteImmediateStatement` at the head of the `pDynamic` `choice`.
+### Recursive/ambiguous expression forms
 
-## `GET DIAGNOSTICS x = ALL` must be tried before the statement-information form
+- `JSON_ARRAY(NULL ON NULL)` — `sepBy pExpression ","` greedily consumes `NULL`,
+  leaving `ON NULL` unconsumed. Guard each element with
+  `pExpression .>>? notFollowedBy (attempt (pKeyword "ON" >>. pKeyword "NULL"))`.
+- `pExplicitRowValueConstructor` (7.1) needs `attempt` so `(a)` can fall through
+  to the plain parenthesized expression branch.
+- 6.44 `SET ( … )` and `pMultisetValueExpression` are mutually recursive; the
+  latter is a forward ref wired after `pValueExpressionPrimary`.
+- `pIntervalSign` must not swallow the `-` of `->`: guard with
+  `notFollowedBy (pchar '>')`.
+- `<collection type>` suffixes must be folded (`pDataTypeElement .>>. many (…)
+  |> List.fold`), never parsed self-referentially — `pDataType ARRAY …` is left
+  recursive and recurses forever.
+- `containsStandaloneQuantifiedSubquery` has a `| _ -> false` catch-all, so a new
+  `ExpressionKind` case that can hold an `Expression` will silently escape the
+  standalone-`ANY` rejection. **Add a branch for every new case** — the compiler
+  will not warn you.
 
-`x = ALL` is the all-information form, while the statement-information form expects a `<statement information item name>` on the right of `=`. That item name is now a closed `pKeyword` enumeration which excludes `ALL`, so the two forms are no longer ambiguous — but `pGetDiagnosticsStatement` still lists CONDITION → ALL → statement-information (each branch `attempt`ed) so a partially consumed `ALL` cannot shadow the all-information form.
+### `Condition` is an `Expression`, not an `ExpressionKind`
 
-## `SELECT INTO` must be tried before `pQuery`
+`RowPatternDefinition.Condition` and similar fields hold records with `Kind`+`Pos`,
+so test patterns must wrap them: `Condition = { Kind = … }`.
 
-`SELECT ... INTO ...` also matches `pQuery` (a normal `SELECT`), leaving `INTO` unconsumed and failing at eof. In the `pStatementRef.Value` `choice`, place `pCursor` before `pDml`.
+### `pWhereClause` exists in two modules
 
-## `pWhereClause` exists in two modules
+`QueryParser.fs` defines `WHERE <expression>`; `DmlParser.fs` defines one returning
+`(cursor, search condition)` for `WHERE CURRENT OF`. They do not clash, but
+`CursorParser.fs` must open only `QueryParser` and not `DmlParser`.
 
-`QueryParser.fs` and `DmlParser.fs` define a module-level `pWhereClause` with different signatures. The cursor parsers (`CursorParser.fs`) must open only `QueryParser` and must NOT open `DmlParser`.
+### `LockingClause` must live inside the recursive type group
 
-## `LockingClause` must live inside the recursive AST type group
+`LockingClause.ForUpdate` carries `Expression list option`, and `Expression` is
+defined inside the `and`-chain starting at `DataType`. A standalone `type
+LockingClause = …` before the group fails with FS0039.
 
-`<updatability clause>` is `FOR UPDATE [ OF <column name list> ]`, so `LockingClause.ForUpdate` carries `Expression list option`. `Expression` is defined inside the big recursive type group that starts at `type DataType` (`Ast.fs`), so a standalone `type LockingClause = ...` placed *before* the group cannot reference it (FS0039). Define it as `and LockingClause = ...` inside the group.
+## Test-writing pitfalls
 
-- **Trade-off:** The type moved out of the "plain DU" section near the top of `Ast.fs`. `QueryParser.pLockingClause` is otherwise unchanged.
+### The `parse` helpers append `;` and need a type annotation
 
-## `opt (attempt (...))` is required around the `OF` column list
+Every test file's helper is
+`let parse (sql: string) = SqlParser.parse (sql.TrimEnd() + ";")`. The
+`(sql: string)` annotation is required (FS0072 on `.TrimEnd()`). A test that calls
+`SqlParser.parse` directly must append the semicolon itself, or it can pass for
+the wrong reason.
 
-For `FOR UPDATE OF a, b`, a bare `opt (pKeyword "OF" >>. sepBy1 ...)` does not backtrack the consumed `OF`, so `FOR UPDATE OF` (no columns) or a following failure loses the whole clause. Wrap the `OF` group in `attempt`.
+Use `SqlParser.parse` for directly executable statements and
+`SqlParser.parseStatement` for cursors / dynamic SQL / positioned DML — the two
+entry points accept different statement sets.
 
-## `DECLARE LOCAL TEMPORARY TABLE` must be tried before `DECLARE <cursor name>`
+### Prefer pattern matching over `Assert.Equal` on `Expression`s
 
-Both statements start with `DECLARE`. `pDeclareCursorStatement` parses `LOCAL` as the cursor name and then fails on the missing `CURSOR` keyword. In `pCursor`, `attempt pTemporaryTableDeclarationStatement` precedes `attempt pDeclareCursorStatement`.
+`Expression` is a record with a `Pos` field, so constructing an expected value
+requires a hand-written `Pos` that will never match the parsed one. Match the
+pattern (which ignores `Pos`) or assert on individual fields.
 
-## `WITH HOLD` / `WITH RETURN` share the `WITH` prefix
+### Validate numbering with the right regex
 
-`<cursor holdability>` and `<cursor returnability>` are both `WITH...` / `WITHOUT...`. `pCursorHoldability`'s `WITH HOLD` branch consumes `WITH` before failing on `HOLD`, so `opt (attempt pCursorHoldability)` must wrap the whole parser; otherwise `WITH RETURN` would be swallowed. The same applies to `pCursorReturnability`.
-
-## `LOCATOR` / `PRESERVE` / `TEMPORARY` are not reserved words
-
-`pKeyword` matches any keyword, reserved or not, so `FREE LOCATOR`, `ON COMMIT PRESERVE ROWS` and `DECLARE LOCAL TEMPORARY TABLE` all parse. Those words are non-reserved, so they could also be identifiers elsewhere; statement dispatch relies on the leading reserved words `FREE` / `HOLD` / `DECLARE`.
-
-## `pIdentifierRaw` must not be used for closed-enumeration item names
-
-Diagnostics / descriptor item names (`NUMBER` / `ROW_COUNT` / `COUNT` / `DATA` / `MESSAGE_TEXT` etc.) are reserved words, so they cannot be parsed with `pIdentifier` — but `pIdentifierRaw` is too permissive (it also accepts `ALL`, `SELECT`, ...). Use an explicit `choice [ pKeyword "..." ... ]` enumeration instead, as `pStatementInfoItemName` / `pConditionInfoItemName` (DiagnosticsParser) and `pHeaderItemName` / `pDescriptorItemName` / `pCopyDescriptorOptions` (DynamicParser) now do. Note the grammar distinguishes `<header item name>` (`COUNT`, `KEY_TYPE`, ...) from `<descriptor item name>` (`DATA`, `INDICATOR`, ...): the `<get/set header information>` forms use the former, the `VALUE` item forms the latter.
-
-## `notFollowedBy` makes the failure fatal when the inner parser succeeds — wrap in `attempt` inside `opt`
-
-`notFollowedBy p` marks the failure as **fatal** when `p` succeeds. `opt` does not catch fatal errors, so `opt (pIdentifierExpr >>= ... notFollowedBy ...)` fails the entire `opt` and never reaches the following `opt pWindowFrame`. Wrap with `attempt` to convert the fatal error into an ordinary failure (see `pExistingWindowName`).
-
-## `pDataType` accepts any identifier as a user-defined type
-
-`pDataTypeElementRef.Value` includes a `pSchemaQualifiedName` branch that maps to `UserDefinedType`, so any identifier is a valid UDT name. Without a guard, `NESTED PATH '$.items'` is misread as a regular column (name `NESTED`, type `PATH`). The UDT branch now uses `pSchemaQualifiedName .>>? notFollowedBy pIdentifier`, so a name immediately followed by another identifier is rejected; `pJsonTableColumn` still tries the NESTED branch before the regular-column branch (`QueryParser.fs`).
-
-## `OUT` is a reserved word — `MATCH_RECOGNIZE (...) AS out` is correctly rejected
-
-`MATCH_RECOGNIZE (...) AS out` fails because §5.2 makes `OUT` reserved and 7.6 defines `<row pattern output name>` as `<correlation name>` → `<identifier>`. The rejection is required by the grammar, not a gap; use a non-reserved name (e.g. `out_t`) or a delimited identifier.
-
-## `VALUE_OF(x)` without `AT` is rejected
-
-`VALUE_OF` is a reserved word that is deliberately not in `pRoutineInvocation`'s `functionKeywords` whitelist, so `VALUE_OF(x)` (no `AT`) fails instead of falling through to a generic function call. Invalid-syntax tests can use `VALUE_OF(x AT 5)` for the error path.
-
-## `RowPatternDefinition.Condition` is an `Expression` record
-
-The `Condition` field of `RowPatternDefinition` is an `Expression` record (`{ Kind; Pos }`), not an `ExpressionKind`. Test patterns must wrap it as `Condition = { Kind = ... }` (see the `DEFINE A AS a > 0` validation tests).
-
-## `pValueExpressionNoBoolean` must be a forward ref when JSON parsers use it
-
-6.28 `<value expression>` — the JSON parsers (`pJsonApiCommon`, `pJsonArgument`, `pJsonNameAndValue`, `pJsonValueBehavior`) must reject boolean operators, so they use `pValueExpressionNoBoolean` rather than `pExpression`. That parser is `opp.ExpressionParser`, but the JSON parsers are defined *before* the `OperatorPrecedenceParser` (`opp`) is built. Fix: declare `pValueExpressionNoBoolean` at the top of `ExpressionParser` with `createParserForwardedToRef` and wire `pValueExpressionNoBooleanRef.Value <- opp.ExpressionParser` only after `opp` has all its operators (the same forward-ref pattern as `pExpression`). Reverting it to `let pValueExpressionNoBoolean = opp.ExpressionParser` fails with "value not defined" because `opp` does not exist yet at that point.
-
-## `<constraint characteristics>` must not swallow a following `COLLATE`
-
-10.8 — a domain constraint is `[ <constraint name definition> ] CHECK ( ... ) [ <constraint characteristics> ]` and the enclosing `<domain definition>` ends with `[ <collate clause> ]`. The parser must leave `COLLATE` unconsumed so the domain can parse it. `pConstraintCharacteristics`'s second alternative requires `[ NOT ] DEFERRABLE` before the optional `<constraint check time>`, so a bare `NOT DEFERRABLE COLLATE en_us` parses the deferrability and stops cleanly. Do **not** guard the branch with `notFollowedBy (pKeyword "COLLATE")`: that makes a valid `NOT DEFERRABLE` fail fatally (via `attempt` backtracking) and rejects `CREATE DOMAIN ... NOT DEFERRABLE COLLATE ...`. The clause is optional overall, so the parser ends with a `preturn` empty result.
-
-## A `>>.`-chain returns the *last* keyword's string
-
-11.30 `<drop system versioning clause>` — `pKeyword` returns `Parser<string, unit>`, and the `>>.`-family is left-associative at equal precedence, so `pKeyword "DROP" >>. pKeyword "SYSTEM" >>. pKeyword "VERSIONING" .>>. pDropBehavior` groups as `((DROP >>. SYSTEM) >>. VERSIONING) .>>. pDropBehavior` and yields `string * bool` (the string is `"VERSIONING"`). The compiler then reports `DropSystemVersioning` as "expects `bool` but was given `string * bool`". Fix: discard the last keyword with `>>.` instead of `.>>.` — `pKeyword "DROP" >>. pKeyword "SYSTEM" >>. pKeyword "VERSIONING" >>. pDropBehavior` (see `pAlterTableStatement` in `DdlParser.fs`).
-
-## An optional-looking sub-rule must not match empty input
-
-11.20 `<alter identity column specification>` — the rule is `<set identity column generation clause> [ <alter identity column option>... ] | <alter identity column option>...`. Transcribing the first alternative as `opt pSetIdentityColumnGeneration .>>. many pAlterIdentityColumnOption` makes the parser succeed on empty input, because `opt` and `many` both allow zero matches. That silently shadows every later `<alter column action>` alternative (`ALTER COLUMN c` alone would "succeed" with an empty specification). Fix: transcribe the two alternatives literally — `attempt (pSetIdentityColumnGeneration .>>. many option) <|> (many1 option)` — so at least one element must match.
-
-## `RESTART` / `EXPRESSION` / `IDENTITY` / `GENERATED` / `ENFORCED` are not reserved words
-
-5.2 `<reserved word>` — only `PERIOD`, `SCOPE`, `SYSTEM`, `SYSTEM_TIME`, `VERSIONING`, `IDENTITY`, and `COLUMN` are reserved among the keywords the new `ALTER TABLE` actions use. Consequences:
-
-- `ALTER TABLE t ALTER COLUMN c DROP EXPRESSION` is safe *at the column-action level*, because that level has no `DROP <column name>` alternative to consume `EXPRESSION` as a name. At the table level the same string would be eaten by the generic `DROP [ COLUMN ] <identifier>` branch, so any new `DROP <keyword>` action must be listed *before* that branch.
-- `DROP IDENTITY` / `DROP SCOPE` / `DROP PERIOD` are unambiguous because `IDENTITY`, `SCOPE`, and `PERIOD` *are* reserved, so `pIdentifierExpr` refuses them.
-- `SET GENERATED { ALWAYS | BY DEFAULT }` is likewise unambiguous (`GENERATED` is not reserved, but no earlier alternative matches `SET GENERATED`).
-
-## `pSequenceOption` is assembled from sub-rule parsers
-
-11.72/11.73 — `<sequence generator option>` is `<sequence generator data type option> | <common sequence generator options>`, and `<common sequence generator options>` is start-with plus `<basic sequence generator option>`. The parser therefore composes `pSequenceGeneratorStartWithOption`, `pBasicSequenceGeneratorOption`, and `pAlterSequenceGeneratorRestartOption` rather than listing every keyword in one `choice`. All of them must still be defined *before* `pColumnDefinition` (and therefore before `pAlterTableStatement`), because `pIdentitySpec` and the 11.20 option parser reference them.
-
-## `pConstraintEnforcement` must live near `pDropBehavior`, not inside `pConstraintCharacteristics`
-
-10.8 `<constraint enforcement>` was originally a local `pEnforced` inside `pConstraintCharacteristics`. 11.25 `ALTER CONSTRAINT <name> [ NOT ] ENFORCED` needs the same parser, but `pAlterTableStatement` appears *earlier* in `DdlParser.fs` than `pConstraintCharacteristics`, so a local binding is not visible. Hoist it to module level next to `pDropBehavior` and let `pConstraintCharacteristics` alias it (`let pEnforced = pConstraintEnforcement`).
-
-## `PERIOD FOR SYSTEM_TIME` needs the `SYSTEM_TIME` token, not `SYSTEM` + `_TIME`
-
-11.3/11.27 `<system time period specification> ::= PERIOD FOR SYSTEM_TIME` — `SYSTEM_TIME` is a single reserved word (Lexer.fs), so `pKeyword "SYSTEM_TIME"` matches it. Writing `pKeyword "SYSTEM" >>. pKeyword "_TIME"` fails, and so does treating the underscore as a separator.
-
-## The static `DECLARE CURSOR` parser is tried before the dynamic one
-
-14.1 `DECLARE <cursor name> <cursor properties> FOR <cursor specification>` and 20.15 `DECLARE <cursor name> <cursor properties> FOR <statement name>` share a prefix. `pCursor` (CursorParser) is dispatched **before** `pDynamic` in `SqlParser.fs`, so `pDeclareCursorStatement` is attempted first; a statement name (`s1`, `?`, `'x'`, `GLOBAL ?`) makes `pQuery` fail, the `attempt` backtracks, and `pDynamic` then reaches `pDynamicDeclareCursorStatement`. No extra disambiguation is needed, but the order matters — putting the dynamic form first would make `DECLARE c CURSOR FOR <query>` fail instead.
-
-## `DESCRIPTOR` / `EXTENDED` / `ATTRIBUTES` are not reserved words
-
-Only `ALLOCATE`, `PROCEDURE`, `GLOBAL`, `LOCAL` and `PTF` are reserved (Lexer.fs). `DESCRIPTOR` is therefore also a valid identifier, which is why the `<parameter default>` slot needs `attempt pDescriptorValueConstructor <|> pExpression`: without `attempt`, a default written as the identifier `DESCRIPTOR` would consume the keyword and then fail on the missing `(`.
-
-## `ALLOCATE` dispatch: 20.17 must precede 20.18
-
-`ALLOCATE <extended cursor name> <cursor properties> FOR <extended statement name>` (20.17) and `ALLOCATE <cursor name> [ CURSOR ] FOR PROCEDURE <specific routine designator>` (20.18) share the `ALLOCATE <name>` prefix. Trying 20.17 first is safe because `PROCEDURE` is reserved: for `ALLOCATE c CURSOR FOR PROCEDURE p`, the extended-statement-name branch cannot match `PROCEDURE`, so 20.17 fails cleanly and 20.18 succeeds. `ALLOCATE [ SQL ] DESCRIPTOR ...` (20.2) is tried before both and requires the `DESCRIPTOR` keyword.
-
-## `<scope option>` is defined by 5.4, not 20.17
-
-`<scope option> ::= GLOBAL | LOCAL` is a heading-only-adjacent rule in §5.4 (Names and identifiers), so `RuleNumberingTests` rejects a `// 20.15/20.17 <scope option>` citation — the allowed clauses are the ones that *mention* the name (5.4 and 20.26). Cite it as `// 5.4 <scope option>`.
-
-## `->` must be matched inside the term parser, not registered as a precedence operator
-
-The `->` dereference operator starts with `-`, which the operator-precedence parser already registers as both a prefix and an infix operator. Adding `->` to `opp` would force the operator table to disambiguate it against unary/binary minus. Instead `pDereferenceReference` is an alternative of the `many (attempt pDereferenceReference <|> pMethodOrFieldReference)` postfix on `pValueExpressionPrimary`, so `-` is consumed before the precedence parser runs. `pstring "->"` is atomic, so `a - b` still leaves the `-` for `opp`.
-
-## `RegexArgument.Using` is a `string option`, not an `Expression`
-
-`RegexArgument.Using` holds `<char length units>` (a keyword such as `CHARACTERS`), so it is `string option` produced by `pIdentifierRaw` — matching the existing `Substring`/`Position`/`Trim` representation. Assigning an `Expression` there fails with `The type 'Expression' does not match the type 'string'`. `RegexArgument` is a record, so an incorrect field type surfaces at the record construction rather than at the field's use site.
-
-## `RegexPosition`'s start is an option even though the rule names a `<regex position start or after>`
-
-6.30 `<regex position expression> ::= POSITION_REGEX ( [ <regex position start or after> ] <XQuery pattern> ... )` — the `START`/`AFTER` prefix is optional, so `RegexPosition` carries `RegexStart option`. Declaring it as a bare `RegexStart` makes `pStart` (which is already `opt (...))` fail to type-check.
-
-## A keyword `choice` beats `>>%` + `<|>` for multi-option keywords
-
-`pKeyword "A" >>% X <|> (pKeyword "B" >>% Y)` is fine, but `pKeyword "A" >>% X <|> pKeyword "B" >>% Y` parses as `((pKeyword "A" >>% X) <|> pKeyword "B") >>% Y`, because `>>%` and `<|>` share a precedence and are left-associative. Write the alternatives as a `choice [ ... ]` list, or parenthesise each `>>%` operand.
-
-## `RunningOrFinal` / `FirstOrLast` / `PrevOrNext` case names collide with existing ones
-
-`Final` clashes with `ResultOption.Final` and `TypeOption.Final`; `First`/`Last`/`Next` clash with `Direction.First`/`Direction.Last`/`Direction.Next`. Pattern matches normally resolve through the scrutinee's type, but constructions need qualification: `RunningOrFinal.Final`, `FirstOrLast.First`, `PrevOrNext.Next`.
-
-## The 6.26 navigation parser must be `attempt`ed and tried Compound → Logical → Physical
-
-`PREV`/`NEXT`/`FIRST`/`LAST` are not reserved. Without `attempt`, a navigation parse that had already consumed the keyword and then failed on the missing `(` would leak into the enclosing `pValueExpressionPrimary` choice and break `SELECT first FROM t`. Trying `Compound` first is what gives `PREV(FIRST(x), 2)` its flat shape — with `Physical` first, `FIRST(x)` is consumed as the physical operand and the AST nests instead.
-
-## The 6.35 / 6.43 postfixes need `attempt` inside `many`
-
-`pTimeZoneSuffix` starts with `AT` and `pMultisetSetOperatorSuffix` with `MULTISET`, and both then require more input. Inside `many (pPredicate ... <|> ... <|> attempt pTimeZoneSuffix)`, a branch that consumes `AT`/`MULTISET` and *then* fails would abort the entire `many` rather than stopping it, so both must be wrapped in `attempt`.
-
-## `containsStandaloneQuantifiedSubquery` has a `| _ -> false` catch-all
-
-A new `ExpressionKind` case compiles without a validation branch, so a standalone `ANY (SELECT ...)` nested inside a new node (for example `RUNNING SUM(ANY (SELECT ...))`) silently escapes the rejection installed in `pExpressionRef`. Add a branch for every new case that can hold an `Expression` — the compiler will not remind you.
-
-## `SET ( ... )` and `<multiset value expression>` are mutually recursive
-
-6.44 `SET ( <multiset value expression> )` is itself a `<value expression primary>`, while `<multiset value expression>` is built from `pValueExpressionPrimary`. `pMultisetValueExpression` is therefore declared as a forward ref next to `pExpressionRef` and wired *after* `pValueExpressionPrimary` (via `pMultisetValueExpressionRef.Value <- ...`). Use the forwarding **parser** (`pMultisetValueExpression`), never `pMultisetValueExpressionRef.Value`, in a combinator — reading `.Value` at module-initialisation time captures FParsec's dummy parser.
-
-## Collection-type suffixes must be folded, not parsed once
-
-`<collection type>` is a postfix chain over `<data type>`, so `Types.pCollectionType` is `pDataTypeElement .>>. many (ARRAY … | MULTISET) |> List.fold`. Writing the same rule self-referentially (`pDataType ARRAY …`) makes `pDataType` left-recursive and recurses forever on the same position. The element parser must stay collection-free (`pDataTypeElement`) and only the *left* operand of the postfix may nest.
-
-## The 6.37 interval alternative must precede, and be an `attempt` sibling of, the parenthesized `pExpression` branch
-
-`(ts1 - ts2) DAY TO SECOND` and `(ts1 - ts2)` share a prefix, and the plain parenthesized branch of `pValueExpressionPrimary` is itself a prefix of the interval form. `attempt pIntervalValueExpression` must therefore be listed **before** `between "(" ")" pExpression`, and it must reject a non-`Subtract` inner expression with `fail` *inside* the `attempt` so the fallback still runs. Placed after, the generic branch would consume `(ts1 - ts2)` and strand the qualifier; without `attempt`, the `fail` would abort the whole `choice` instead of falling through.
-
-## `TABLE ( <query> )` is reachable from an expression only
-
-`pTableValueConstructorByQuery` (6.45) is an alternative of `pValueExpressionPrimary`, so `SELECT TABLE (SELECT ...)` yields `TableQuery`. `QueryParser.pTablePrimary` has its own `TABLE ( <value expression> )` branch for `<collection derived table>` and consumes `TABLE` *before* calling `pExpression`, so that branch never sees `pTableValueConstructorByQuery` and `FROM TABLE (arr) AS t` keeps behaving exactly as before.
-
-## The `.` postfix loop must be backtracking
-
-7.16 — `pValueExpressionPrimary` ends with `many (attempt pDereferenceReference <|> attempt pMethodOrFieldReference)`. `pMethodOrFieldReference` starts with `.` and then requires an identifier, so on `(a + b).*` it consumed `.` and failed on `*`; without `attempt` that failure aborts the whole primary instead of leaving the `.` for the enclosing parser (`<all fields reference>`'s `<period> <asterisk>`).
-
-## `pExplicitRowValueConstructor` needs `attempt` to let `(a)` through
-
-7.1 — the parenthesized form is `pExpression .>>. many1 ("," >>. pExpression)`, i.e. two or more elements. Without `attempt`, `(a)` would consume `(` and `a` and then fail on the missing `,`, aborting this alternative instead of falling through to the plain parenthesized `<value expression>` branch. `ROW ( … )` uses `sepBy1`, so a one-element list is fine there.
-
-## `>>.` silently discards a result — the `BETWEEN` symmetry bug
-
-7.6 — in `pKeyword "BETWEEN" >>. opt (<symmetry>) >>. pPointInTime …` the second `>>.` drops the value the `opt` just produced, so the parser compiles while the qualifier is never seen (the previous code bound the pattern `fun (lo, hi)` and looked correct). Use `.>>.` after `opt` when the value must survive: `>>. opt (…) .>>. pPointInTime`.
-
-## `|>> List.fold f` is not a left fold
-
-`List.fold` takes the folder, the initial state **and** the list, so `p |>> List.fold (fun acc x -> …)` type-checks as a partial application and yields a function, not an `Expression`. Bind the pair and fold explicitly: `|>> fun (first, rest) -> rest |> List.fold folder first`.
-
-## `pIntervalSign` must not swallow `->`
-
-6.37 — `<interval factor> ::= [ <sign> ] <interval primary>`, but the dereference operator (6.20/6.21) also starts with `-`. Guard the minus alternative with `notFollowedBy (pchar '>')`; otherwise a `-` followed by `>` makes the sign branch consume `-` and fail fatally instead of yielding `None`.
-
-## `<interval primary>` is transparent without a qualifier
-
-6.37 — `pIntervalPrimary` returns the inner `<value expression primary>` unchanged when no `<interval qualifier>` follows, so `IntervalPrimary` only appears for forms like `? DAY` and `INTERVAL '1' DAY` (a `<literal>`) keeps its AST shape. That transparence is also what lets the early `pIntervalValueExpression` reference the `pDatetimeValueExpression` **forward ref** without a cycle.
-
-## `<interval term>` needs two different operand parsers (6.37)
-
-`<interval term>`'s `*`/`/` right operand is `<factor>` (6.29) — `[ <sign> ] <numeric primary>` — not the `<interval factor>` used on the left. `chainl1` cannot vary the operand after an operator, so `pIntervalTerm` is `pIntervalFactor .>>. many (attempt (pMulOp .>>. pNumericFactor))` folded with `List.fold`. Because `<numeric primary>` is approximated by `<value expression primary>`, the 4th alternative (`<term> * <interval factor>`) still parses; only the `[ <interval qualifier> ]` suffix is rejected on the right, so `INTERVAL '1' DAY * ? DAY` now fails while `INTERVAL '1' DAY * 2` and `? DAY` (as a `<factor>`) keep working.
-
-## `INSERT` must keep using `pQualifiedNameExpr` for its target
-
-14.11 `<insertion target> ::= <table name>` has no `ONLY` form, unlike 14.8/14.9/14.13/14.14 `<target table>`. Only `UPDATE` / `DELETE` / `MERGE` use `DmlParser.pTargetTable`; wiring it into `INSERT` as well would accept `INSERT INTO ONLY (t) …`.
-
-## The DML `ONLY` flag fields are named per record
-
-14.8/14.9/14.13/14.14 — `pTargetTable` returns `Expression * bool`, and the flag is stored as `UpdateStatement.TableIsOnly`, `DeleteStatement.TableIsOnly` and `MergeStatement.TargetIsOnly` (the merge record's name field is `Target`, not `Table`). Pattern-matching on `Table` still compiles without mentioning the flag, which is why no existing test needed updating.
-
-## Union-case name clashes introduced by the §11 work
-
-Moving `ColumnConstraintKind` from `DdlParser.fs` into `Ast.fs` widened its scope from a single module to the whole namespace. Its `Null` case then clashed with `Literal.Null`, so `pKeyword "NULL" >>% Null |>> Literal` in `ExpressionParser.fs` resolved `Null` to `ColumnConstraintKind.Null` and typed `Literal` as `ColumnConstraintKind -> …`. 11.4 has no bare-`NULL` column constraint, so the case was **dropped** rather than qualifying every existing `Literal Null` use site. `ColumnConstraintKind.PrimaryKey` / `Unique` / `Check` also clash with `TableConstraint.PrimaryKey` / `Unique` / `Check` — always qualify.
-
-## `pConstraintCharacteristics` must precede `<column constraint definition>`
-
-10.8's `<constraint characteristics>` is used by 11.4 (`<column constraint definition>`), 11.6 (`<table constraint definition>`), 11.34 (`<domain constraint>`) and 11.47 (`<assertion definition>`). It and `pConstraintEnforcement` now sit at the very top of `DdlParser.fs`; when hoisting, the old definition near `pDomainConstraint` must be deleted or the name shadows the new one.
-
-## `attempt` is required around `<column constraint definition>`
-
-`many (attempt pColumnConstraint)` — when the following table element is a table-level `CONSTRAINT <name> PRIMARY KEY (...)`, the column-constraint parser consumes `CONSTRAINT <name>` and then fails on `PRIMARY KEY`. Without the outer `attempt` the failure is fatal and the whole `<table element list>` fails.
-
-## `<table element>` needs `Choice4Of4`
-
-F# provides `Choice1Of4`…`Choice4Of4`. The four-way choice keeps `<column definition>`, `<table period definition>`, `<table constraint definition>` and `<like clause>` distinguishable; nesting two `Choice` levels of the same arity would not.
-
-## `<scope clause>` lives in `Types.fs`, not `DdlParser.fs`
-
-`pScopeClause` (6.1 `<scope clause> ::= SCOPE <table name>`) is needed by `<reference type>` (6.1), `<column option list>` (11.3) and `<add column scope clause>` (11.17). `SqlParser.fsproj` compiles `Types.fs` before `DdlParser.fs`, and `DdlParser` opens `SqlParser.Types`, so `Types.fs` is the only home all three can reach — do not move it next to the 11.3 parsers.
-
-## Productions shared by 11.3 and 11.32 must be module-level in `DdlParser.fs`
-
-`pReferenceGeneration` and `pSelfReferencingColumn` were first written inside `pCreateTableStatement`, but 11.32's `<view element>` needs the same production. They are now declared above `pCreateTableStatement`. `pCreateTableStatement`'s other `let` bindings stay local on purpose — a binding that only 11.3 uses cannot be reached from `pCreateViewStatement` either way, so hoist deliberately.
-
-## `OPTIONS` is not a reserved word — `<column options>` is recognised by `WITH OPTIONS`
-
-`pRegularIdentifier` rejects only the entries of `Lexer.reservedWords`, and `OPTIONS`, `DERIVED`, `GENERATED` and `UNDER` are not in it. So a `<typed table element>` cannot be dispatched on its first token: `<column options>` is recognised only once the mandatory `WITH OPTIONS` has been consumed. `<self-referencing column specification>` (`REF IS`) and `<table constraint definition>` (`CONSTRAINT` / `PRIMARY` / `UNIQUE` / `FOREIGN` / `CHECK`) do start with reserved words and fail cleanly on an identifier — but every alternative still needs `attempt`, because the `<column options>` branch consumes the column name before failing on a missing `WITH`.
-
-## `<view column option>` has a mandatory `<scope clause>`
-
-11.32's `<view column option> ::= <column name> WITH OPTIONS <scope clause>` has no optional brackets, unlike 11.3's `<column option list> ::= [ <scope clause> ] [ <default clause> ] [ <column constraint definition>... ]`. `ViewColumnOptions.Scope` is therefore an `Expression`, not an `Expression option`, and `CREATE VIEW v OF my_type (a WITH OPTIONS DEFAULT 5) AS ...` is rejected (with an error pointing at `AS`, since the `<view element list>` is simply not consumed).
-
-## `.>>.` produces nested 2-tuples — destructure `((a, b), c)`
-
-`pTypedTableClause` is `… .>>. opt pTypedTableElementList`, so the result is `(Expression * Expression option) * TypedTableElement list option`, not a flat 3-tuple: write `fun ((typ, supertable), typedElements) -> …`. The same applies to `Choice2Of2` in 11.32's `pViewSpecification`.
-
-## `DESCRIPTOR` is not a reserved word (11.60)
-
-`pParameterType` must try `<generic table parameter type>` / `<descriptor parameter type>` **before** `<data type>`, otherwise `pDataType`'s `<path-resolved user-defined type name>` branch consumes `DESCRIPTOR` and `(d DESCRIPTOR)` parses as a parameter named `d` whose type is a UDT called `DESCRIPTOR`. `TABLE` is reserved, so it is unaffected.
-
-## `pKeyword "SYSTEM"` does not match `SYSTEM_TIME`
-
-`pKeyword` refuses a keyword immediately followed by `_`, so the new `WITH SYSTEM VERSIONING` suffix cannot swallow the `SYSTEM_TIME` of `PERIOD FOR SYSTEM_TIME`. The same property is what keeps `PERIOD FOR SYSTEM_TIME` and `PERIOD FOR <name>` disjoint.
-
-## `<with or without data>` is now required (11.3)
-
-`CREATE TABLE t AS SELECT ...` without `WITH DATA` / `WITH NO DATA` used to parse and yielded `WithData = None`. It is now rejected per the grammar, so with `AsQuery = Some` the `WithData` field is always `Some` — tests asserting `WithData = None` had to be updated.
-
-## Test-only: functions cannot appear in F# patterns
-
-`Parameters = [ { ParameterType = dataTypeParam Integer } ]` does not compile — a record pattern may only contain literals and constructors, not function applications. Bind the value (`Parameters = [ param ]`) and assert with `Assert.Equal(...)`, or match the DU case directly (`match param.ParameterType with | DataTypeParameter(Integer, true) -> …`).
-
-## The omitted DML target relies on `SET` / `WHERE` being reserved words
-
-`pOptionalDmlTarget` is `(attempt pTargetTable |>> DmlTarget.TableTarget) <|> preturn DmlTarget.OmittedTarget`. The `OmittedTarget` branch is only reachable because `pQualifiedNameExpr` rejects reserved words, so `pTargetTable` fails cleanly on the `SET` of `UPDATE SET ...` and on the `WHERE` of `DELETE WHERE ...`. Do not "fix" a missing table name by accepting raw identifiers — `pIdentifierRaw` would make `UPDATE SET ...` parse `SET` as a table name.
-
-## An `|>>` projection cannot fail — validate with `>>=` and `fail`
-
-`pUpdateStatement` / `pDeleteStatement` used `|>> fun … -> …`. Rejecting `OmittedTarget` together with a `<portion of>`, alias or search condition needs `>>=` instead, because `fail` must run on the parsed values; `pOmittedTargetGuard` returns `preturn ()` so `>>.` sequences it in front of the statement value.
-
-## `|>>` binds looser than `<|>` — parenthesise the constructor branch
-
-`attempt pTargetTable |>> DmlTarget.TableTarget <|> preturn DmlTarget.OmittedTarget` parses as `attempt pTargetTable |>> (DmlTarget.TableTarget <|> preturn …)` and does not type-check. Write `(attempt pTargetTable |>> DmlTarget.TableTarget) <|> preturn DmlTarget.OmittedTarget`.
-
-## `CursorParser.fs` is compiled before `DynamicParser.fs`
-
-`pUsingClause` (20.11) and `pIntoClause` (20.12) had to move from `DynamicParser.fs` into `CursorParser.fs`, because `pOpenStatement` / `pFetchStatement` need them and `SqlParser.fsproj` compiles `CursorParser.fs` first. `DynamicParser.fs` now opens `SqlParser.CursorParser`. The `pUsingDescriptor` used by `DESCRIBE` stays in `DynamicParser.fs` and is a different parser — it returns the descriptor name (`Expression`), not a `UsingClause`.
-
-## `<semicolon>` is cited as 5.1, not 5.2
-
-In `sql-2016-grammar.txt` the `<semicolon> ::= ;` production sits under the `5.1 <SQL terminal character>` heading (`5.2 <token>` comes later in the file). `RuleNumberingTests` matches a citation against the clauses that actually mention the name, so `// 5.2 <semicolon>` fails and `// 5.1 <semicolon>` is correct.
-
-## Test-only: the `parse` helpers append `;` and pick the right entry point
-
-Every test file's `parse` / `parseFails` / `parseExpr` helper is `let parse (sql: string) = SqlParser.parse (sql.TrimEnd() + ";")`. The explicit `string` annotation is required — without it F# cannot infer the receiver of `.TrimEnd()` (FS0072). A test that calls `SqlParser.parse` directly must append the semicolon itself, otherwise it can pass for the wrong reason: `OFFSET without ROW or ROWS fails verification` would still succeed if the `OFFSET` rule itself broke.
-
-Because 22.1 is now enforced, `SqlParser.parse` accepts only `<directly executable statement>`s, so the helpers in `CursorTests` / `DynamicTests` / `DiagnosticsTests` / `ControlTests` use `SqlParser.parseStatement` (13.4) instead, and `DmlTests` keeps a second `parseStatement` / `parseStatementFails` pair for the positioned 20.25 / 20.27 forms. Use `parse` when the test is about a directly executable statement; use `parseStatement` otherwise.
-
-## New terminal-character parsers need an explicit type annotation (5.1)
-
-`let pLeftBrace = pchar '{'` does not compile: F#'s value restriction rejects the inferred generic type (`val pLeftBrace: Parser<char,'_a>`, because `pchar` returns a `Parser<char,'u>`). Annotate the binding, exactly as `pQuestionMark` does:
-
-```fsharp
-// 5.1 <left brace> ::= {
-let pLeftBrace: Parser<char, unit> = pchar '{'
-```
-
-The `pstring`-based terminals need `Parser<string, unit>` (`pLeftBraceMinus` / `pRightMinusBrace`, §5.2). This only bites when the parser is bound to a name — writing `token (pstring "{")` inline determines the type at the use site, which is why the row pattern parser did not need the annotation before the 5.1 block was extracted.
-
-## The PTF branch must precede the generic statement branch in `pRoutineBody` (11.60)
-
-`<polymorphic table function body>` starts with `DESCRIBE WITH ...`, and `DESCRIBE` is a reserved word that also starts the dynamic `<describe statement>` (20.10, `DynamicParser.pDescribeStatement`). `pRoutineBody` is a `choice`, so trying the generic `pRoutineBodyStatementRef` branch first would let `DESCRIBE` be consumed there. Keep `attempt (pPolymorphicTableFunctionBody |>> …)` as the **first** alternative.
-
-`PRIVATE` / `FULFILL` / `FINISH` are non-reserved words, but no statement parser accepts them as a leading token, so they need no special handling.
-
-## Reserved vs non-reserved: the new 11.60 keywords
-
-`INSTANCE`, `CONSTRUCTOR`, `PRIVATE`, `DATA`, `FULFILL`, `FINISH`, `SECURITY`, `DISPATCH`, `GENERAL`, `IMPLEMENTATION`, `DEFINER`, `INVOKER`, `TRANSFORM`, `STYLE` are **non-reserved**; `DESCRIBE`, `START`, `STATIC`, `METHOD`, `GROUP`, `PARAMETER`, `SQL`, `EXTERNAL`, `DEFAULT` are **reserved**. That is why `pMethodKind` (`Types.fs`) wraps every alternative in `attempt` — `INSTANCE` and `CONSTRUCTOR` would otherwise be consumable as identifiers — and why `pLanguageName` can use bare `attempt`ed `pKeyword`s for the one-letter names `M` and `C` (`pKeyword` already refuses to match when an identifier character follows, so `C` does not match `COBOL` and `M` does not match `MUMPS`).
-
-`EXTERNAL SECURITY DEFINER` reuses the `EXTERNAL` keyword of `<external body reference>` itself, but the extras follow the `EXTERNAL` token, so the trailing `opt pExternalSecurityClause` sees the second `EXTERNAL`. `EXTERNAL NAME x` and `EXTERNAL SECURITY …` cannot be confused.
-
-## `|>>` swallows `>>=` into the lambda body — parenthesise the projection
-
-Building a routine record and then validating it needs `>>=`, but
-
-```fsharp
-        |>> fun (((name, parameters), characteristics), body) ->
-            { Name = name; … }
-        >>= validateRoutine
-```
-
-parses as `|>> (fun … -> { … } >>= validateRoutine)` — the lambda body extends as far as possible, so `>>=` is applied to the *record*, not to the parser (`Type mismatch. Expecting 'CreateRoutine -> …' but given '… -> CharStream<unit> -> Reply<…>'`). Parenthesise the lambda:
-
-```fsharp
-        |>> (fun (((name, parameters), characteristics), body) -> { … })
-        >>= validateRoutine
-        |>> CreateProcedure
-```
-
-Note the order: `CreateProcedure` / `CreateFunction` are `StatementKind` cases, so build the `CreateRoutine` **record**, run `validateRoutine`, and only then wrap it — `(CreateProcedure { … }) >>= validateRoutine` cannot type-check.
-
-## Nested record patterns need same-column alignment — destructure instead
-
-In F#, newline-separated fields in a record pattern must all start at the same column (FS0010 otherwise), and a list inside a pattern must stay on one line. Deeply nested patterns such as
-
-```fsharp
-    | CreateProcedure { Body =
-                           ExternalRoutine { ParameterStyle = Some "GENERAL"
-                                             TransformGroup = None } } -> ()
-```
-
-are painful to keep aligned once one more nesting level is added (`ExternalRoutine {` starts one column further right). Prefer binding the payload and asserting on the fields:
-
-```fsharp
-    | CreateProcedure { Body = ExternalRoutine ext } ->
-        Assert.Equal(Some "GENERAL", ext.ParameterStyle)
-        Assert.True(Option.isNone ext.TransformGroup)
-```
+`RuleNumberingTests` extracts citations with `(\d+\.\d+)\s*<([^<>]+)>`. Capturing
+`(\s*<…>)` and stripping with `Substring(1, len-2)` drops the closing `>` and
+silently skips every citation, so the test passes vacuously.
