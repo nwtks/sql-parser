@@ -400,3 +400,39 @@ Only `ALLOCATE`, `PROCEDURE`, `GLOBAL`, `LOCAL` and `PTF` are reserved (Lexer.fs
 ## `<scope option>` is defined by 5.4, not 20.17
 
 `<scope option> ::= GLOBAL | LOCAL` is a heading-only-adjacent rule in §5.4 (Names and identifiers), so `RuleNumberingTests` rejects a `// 20.15/20.17 <scope option>` citation — the allowed clauses are the ones that *mention* the name (5.4 and 20.26). Cite it as `// 5.4 <scope option>`.
+
+## `->` must be matched inside the term parser, not registered as a precedence operator
+
+The `->` dereference operator starts with `-`, which the operator-precedence parser already registers as both a prefix and an infix operator. Adding `->` to `opp` would force the operator table to disambiguate it against unary/binary minus. Instead `pDereferenceReference` is an alternative of the `many (attempt pDereferenceReference <|> pMethodOrFieldReference)` postfix on `pValueExpressionPrimary`, so `-` is consumed before the precedence parser runs. `pstring "->"` is atomic, so `a - b` still leaves the `-` for `opp`.
+
+## `RegexArgument.Using` is a `string option`, not an `Expression`
+
+`RegexArgument.Using` holds `<char length units>` (a keyword such as `CHARACTERS`), so it is `string option` produced by `pIdentifierRaw` — matching the existing `Substring`/`Position`/`Trim` representation. Assigning an `Expression` there fails with `The type 'Expression' does not match the type 'string'`. `RegexArgument` is a record, so an incorrect field type surfaces at the record construction rather than at the field's use site.
+
+## `RegexPosition`'s start is an option even though the rule names a `<regex position start or after>`
+
+6.30 `<regex position expression> ::= POSITION_REGEX ( [ <regex position start or after> ] <XQuery pattern> ... )` — the `START`/`AFTER` prefix is optional, so `RegexPosition` carries `RegexStart option`. Declaring it as a bare `RegexStart` makes `pStart` (which is already `opt (...))` fail to type-check.
+
+## A keyword `choice` beats `>>%` + `<|>` for multi-option keywords
+
+`pKeyword "A" >>% X <|> (pKeyword "B" >>% Y)` is fine, but `pKeyword "A" >>% X <|> pKeyword "B" >>% Y` parses as `((pKeyword "A" >>% X) <|> pKeyword "B") >>% Y`, because `>>%` and `<|>` share a precedence and are left-associative. Write the alternatives as a `choice [ ... ]` list, or parenthesise each `>>%` operand.
+
+## `RunningOrFinal` / `FirstOrLast` / `PrevOrNext` case names collide with existing ones
+
+`Final` clashes with `ResultOption.Final` and `TypeOption.Final`; `First`/`Last`/`Next` clash with `Direction.First`/`Direction.Last`/`Direction.Next`. Pattern matches normally resolve through the scrutinee's type, but constructions need qualification: `RunningOrFinal.Final`, `FirstOrLast.First`, `PrevOrNext.Next`.
+
+## The 6.26 navigation parser must be `attempt`ed and tried Compound → Logical → Physical
+
+`PREV`/`NEXT`/`FIRST`/`LAST` are not reserved. Without `attempt`, a navigation parse that had already consumed the keyword and then failed on the missing `(` would leak into the enclosing `pValueExpressionPrimary` choice and break `SELECT first FROM t`. Trying `Compound` first is what gives `PREV(FIRST(x), 2)` its flat shape — with `Physical` first, `FIRST(x)` is consumed as the physical operand and the AST nests instead.
+
+## The 6.35 / 6.43 postfixes need `attempt` inside `many`
+
+`pTimeZoneSuffix` starts with `AT` and `pMultisetSetOperatorSuffix` with `MULTISET`, and both then require more input. Inside `many (pPredicate ... <|> ... <|> attempt pTimeZoneSuffix)`, a branch that consumes `AT`/`MULTISET` and *then* fails would abort the entire `many` rather than stopping it, so both must be wrapped in `attempt`.
+
+## `containsStandaloneQuantifiedSubquery` has a `| _ -> false` catch-all
+
+A new `ExpressionKind` case compiles without a validation branch, so a standalone `ANY (SELECT ...)` nested inside a new node (for example `RUNNING SUM(ANY (SELECT ...))`) silently escapes the rejection installed in `pExpressionRef`. Add a branch for every new case that can hold an `Expression` — the compiler will not remind you.
+
+## `SET ( ... )` and `<multiset value expression>` are mutually recursive
+
+6.44 `SET ( <multiset value expression> )` is itself a `<value expression primary>`, while `<multiset value expression>` is built from `pValueExpressionPrimary`. `pMultisetValueExpression` is therefore declared as a forward ref next to `pExpressionRef` and wired *after* `pValueExpressionPrimary` (via `pMultisetValueExpressionRef.Value <- ...`). Use the forwarding **parser** (`pMultisetValueExpression`), never `pMultisetValueExpressionRef.Value`, in a combinator — reading `.Value` at module-initialisation time captures FParsec's dummy parser.

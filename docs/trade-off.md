@@ -489,9 +489,9 @@ Positioned `DELETE`/`UPDATE` (`WHERE CURRENT OF <cursor>`) and the searched form
 
 ## Method invocation / static method / `NEW` / field reference as expression cases
 
-`ExpressionKind` gained `MethodInvocation of Expression * Expression * Expression list` (receiver, method name, args), `StaticMethodInvocation of Expression * Expression * Expression list` (type name, method name, args), `NewSpecification of Expression * Expression list` (type, args), and `FieldReference of Expression * Expression` (receiver, field name). `pValueExpressionPrimary` parses a base expression then applies `many pMethodOrFieldReference` (`.name(args)` → `MethodInvocation`, `.name` → `FieldReference`), folding left.
+`ExpressionKind` gained `MethodInvocation of Expression * Expression * Expression list` (receiver, method name, args), `StaticMethodInvocation of Expression * Expression * Expression list` (type name, method name, args), `NewSpecification of Expression * Expression list` (type, args), and `FieldReference of Expression * Expression` (receiver, field name). `pValueExpressionPrimary` parses a base expression then applies `many (attempt pDereferenceReference <|> pMethodOrFieldReference)` (`.name(args)` → `MethodInvocation`, `.name` → `FieldReference`, `-> name[args]` → `Dereference`), folding left.
 
-- **Trade-off:** `FieldReference` keeps the field name as an `Expression` (not a `string`) for consistency with the rest of the AST. `pStaticMethodInvocation` (`type::method(args)`) and `pNewSpecification` (`NEW type(args)`) are tried *before* `pRoutineInvocation` and `pColumnReferenceExpr` in `pValueExpressionPrimary` so `NEW`/`::` are not consumed as identifiers. The generalized invocation `(expr AS type).method()` and the `->` dereference operator are **not** implemented.
+- **Trade-off:** `FieldReference` keeps the field name as an `Expression` (not a `string`) for consistency with the rest of the AST. `pStaticMethodInvocation` (`type::method(args)`) and `pNewSpecification` (`NEW type(args)`) are tried *before* `pRoutineInvocation` and `pColumnReferenceExpr` in `pValueExpressionPrimary` so `NEW`/`::` are not consumed as identifiers. The generalized invocation and the `->` dereference operator were added later — see the `<dereference operation>` and generalized-method-invocation entries below.
 
 ## `pColumnReferenceExpr` rewritten to avoid `sepBy1` double-parse
 
@@ -508,6 +508,79 @@ The original `pColumnReferenceExpr` used `sepBy1 pIdentifier (attempt (token "."
 ## `REF(type)` data type
 
 `<reference type> ::= REF ( <data type> ) [ SCOPE <table name> ]`. `DataType` gained `ReferenceType of DataType * Expression option` (the `SCOPE` name). It is added to `pDataTypeElementRef.Value` *before* `pIdentifierExpr |>> UserDefinedType`, so `REF(...)` is not consumed as a user-defined type name.
+
+## `<dereference operation>` / `<attribute or method reference>` / `<method reference>` (6.20–6.22)
+
+`ExpressionKind` gained `Dereference of Expression * Expression * Expression list option`. `pValueExpressionPrimary` applies `many (attempt pDereferenceReference <|> pMethodOrFieldReference)`, where `pDereferenceReference` parses `<right arrow> <qualified identifier> [ <SQL argument list> ]`. The dereference operator is matched *inside the term parser*, so the operator-precedence parser's prefix/infix `-` never sees the leading `-` of `->`.
+
+- **Trade-off:** One AST case covers all three rules: the `Expression list option` is `None` for 6.21 (attribute access) and `Some args` for 6.22 (method reference). Telling 6.21 from 6.22 needs name resolution, which a parser cannot do.
+- **Trade-off:** `FieldReference`/`MethodInvocation` (the `.` forms) are deliberately not reused: `->` dereferences a reference while `.` navigates a value, so keeping the cases apart preserves the distinction the grammar draws.
+
+## Generalized method invocation (6.17)
+
+`ExpressionKind` gained `GeneralizedInvocation of Expression * DataType * Expression * Expression list option` for `( <value expression primary> AS <data type> ) <period> <method name> [ <SQL argument list> ]`. It is tried before the plain parenthesized-expression alternative in `pValueExpressionPrimary`.
+
+- **Trade-off:** The operand is parsed with `pExpression` (an existing forward ref) so the parser can be defined before `pValueExpressionPrimary` without yet another forward reference. That makes the operand slot slightly more permissive than the grammar (`( <arithmetic expression> AS t ).m()` is accepted).
+- **Trade-off:** The optional `<SQL argument list>` stays an option, so the bare `(x AS t).m` form is still distinguishable from `(x AS t).m()`.
+
+## `SPECIFICTYPE` (6.32) is an attempt branch of `pMethodOrFieldReference`
+
+6.32 `<specific type method> ::= <user-defined type value expression> <period> SPECIFICTYPE [ ( ) ]` cannot be routed through `pIdentifierExpr`, because `SPECIFICTYPE` is a reserved word (Lexer.fs). `pSpecificTypeMethod` is therefore `attempt`ed first inside `pMethodOrFieldReference`, and the trailing `()` is recorded as a `bool` on `SpecificTypeMethod`.
+
+## Numeric / string function catalogue (6.30, 6.32, 6.38, 6.41, 6.44)
+
+The reserved built-in keywords that used to fall through to the generic `pRoutineInvocation` now have dedicated parsers and AST cases:
+
+| Rule | AST |
+|------|-----|
+| 6.30 `<length expression>` | `LengthExpression of LengthFunction * Expression * string option` |
+| 6.30 `<numeric value function>` | `NumericValueFunction of NumericFunction * Expression list` |
+| 6.30 `<regex occurrences function>` / `<regex position expression>` | `RegexOccurrences` / `RegexPosition of RegexStart option * RegexArgument` |
+| 6.32 `<regular expression substring function>` | `SubstringSimilar` |
+| 6.32 `<fold>` / `<transcoding>` / `<character transliteration>` | `Fold` / `Transcoding` / `CharacterTransliteration` |
+| 6.32 `<regex substring function>` / `<regex transliteration>` | `RegexSubstring` / `RegexTransliterate` |
+| 6.32 `<normalize function>` / `<classifier function>` | `NormalizeFunction` / `Classifier` |
+| 6.41 `<trim array function>` / 6.44 `<multiset set function>` | `TrimArray` / `MultisetSetFunction` |
+
+- **Trade-off:** 6.30 `<absolute value expression>` and 6.38 `<interval absolute value function>` are both spelled `ABS ( <expression> )`, so they share a single `NumericValueFunction(NumericFunction.AbsoluteValue, _)` case with a dual citation. The interval and numeric forms cannot be told apart without type information.
+- **Trade-off:** The four regex functions share one `RegexArgument` record and one `pRegexArgument` parser that accepts the *union* of their optional clauses (`WITH`, `FROM`, `USING`, `OCCURRENCE`, `GROUP`) in `TRANSLATE_REGEX` order. Each individual rule permits fewer clauses than the parser accepts; the extra slots are parsed and retained rather than rejected.
+- **Trade-off:** `<char length units>` is a `string option` (`pIdentifierRaw`), matching the existing `Substring`/`Position` representation. `OCTET_LENGTH` therefore also accepts a `USING` clause that 6.30 does not allow, because all three length functions share one parser body.
+- **Trade-off:** `<normalize function result length>` is parsed as an `Expression`, so `NORMALIZE(x, NFC, CHARACTER_LENGTH(10))` nests a `LengthExpression` there instead of a dedicated length-specification type. A dedicated type would carry no information a consumer could act on.
+- **Trade-off:** Zero- and one-argument built-ins are all modelled as `NumericValueFunction` with an `Expression list`, so arity is enforced by the parser rather than by the type.
+- **Trade-off:** The 6.32 `<binary value function>` alternatives (binary `SUBSTRING`/`TRIM`/`OVERLAY`) are syntactically identical to the character forms and are served by the existing `Substring`/`Trim`/`Overlay` cases; only the citation was added.
+
+## `functionKeywords` trimmed to the shapes that have no dedicated parser
+
+The 10.4 reserved-function whitelist used to list every built-in name, so `ABS`, `SET`, `TRIM_ARRAY`, `CHAR_LENGTH`, `UPPER`, `NORMALIZE`, the `*_REGEX` family, the trigonometric/exponential set and `GROUPING` all parsed as generic `FunctionCall`s. Now that each has a dedicated parser those entries are removed; what remains is `<aggregate function>`, `<inverse distribution function type>` and `<window function type>`.
+
+- **Trade-off:** This is a deliberate behaviour change. A malformed call such as `ABS(a, b)` or `TRIM_ARRAY(x)` is now rejected instead of degrading to a `FunctionCall`, which is what the grammar requires. Add a name back to the whitelist only when the built-in has no dedicated parser.
+
+## `RUNNING` / `FINAL` and `GROUPING` (6.9)
+
+`ExpressionKind` gained `SetFunction of RunningOrFinal option * Expression` and `Grouping of Expression list`. `pSetFunctionSpecification` parses the prefix and then requires the following `FunctionCall` name to be a member of `aggregateFunctionKeywords` (now the single source of truth shared with the 10.4 whitelist); otherwise it `fail`s, so `FINAL my_routine(x)` is rejected while `FINAL SUM(x)` is accepted.
+
+- **Trade-off:** `SetFunction` wraps the aggregate's `FunctionCall` instead of adding a seventh field to `FunctionCall`. A new field would have changed every existing pattern match on that case for a modifier that only means anything in row-pattern contexts.
+- **Trade-off:** `pRunningOrFinal` is defined once and shared with 6.26's `<running or final>`.
+
+## `<row pattern navigation operation>` (6.26) takes over `PREV`/`NEXT`/`FIRST`/`LAST`
+
+`pRowPatternNavigationOperation` is `attempt`ed before `pRoutineInvocation` *and* before `pColumnReferenceExpr`, and produces `ExpressionKind.RowPatternNavigation of RowPatternNavigation` (`Logical` / `Physical` / `Compound`). The three forms are tried Compound → Logical → Physical, so `PREV(FIRST(x), 2)` gets the flat compound shape instead of a logical nested inside a physical.
+
+- **Trade-off:** `PREV`, `NEXT`, `FIRST` and `LAST` are *not* reserved words, so `first(a)` now parses as navigation rather than as a call to a user-defined routine named `first`. A bare `first` is unaffected (navigation requires `(`), so `SELECT first FROM t` still yields `Identifier "FIRST"`. This is accepted as the spec-aligned reading: the four names are non-reserved and no built-in uses them.
+- **Trade-off:** The offsets are parsed with `pSimpleValueSpecification` (6.4), matching `<logical offset>`/`<physical offset>`, rather than with a full `<value expression>`.
+
+## `MULTISET UNION` / `INTERSECT` / `EXCEPT` (6.43) as a postfix
+
+`ExpressionKind` gained `MultisetSetOperation of MultisetSetOperator * bool option * Expression * Expression` (`bool option` = `Some true` ALL / `Some false` DISTINCT / `None` unspecified). It is applied as a left-folded postfix in `pBooleanTest` alongside the predicates and `<array element reference>`, and also as the self-contained `pMultisetValueExpression` used by 6.44 `SET ( ... )` — reached through a forward ref, because `SET(...)` is itself a `<value expression primary>`.
+
+- **Trade-off:** Because the layer is a postfix on whatever the operator-precedence parser produced, the *left* operand may be any `<value expression>` rather than strictly a `<multiset term>`. The right operand *is* a `<multiset term>`, which is what makes `MULTISET INTERSECT` bind tighter than `MULTISET UNION`/`MULTISET EXCEPT`; repeated `MULTISET INTERSECT` consequently groups to the right (harmless for an idempotent operation).
+- **Trade-off:** `<array concatenation>` (6.40) needs no new case — `||` is already `BinaryOp(Concatenate, _, _)`.
+
+## `<empty specification>` (6.5) needs no new AST case
+
+`<empty specification> ::= ARRAY <left bracket or trigraph> <right bracket or trigraph> | MULTISET <left bracket or trigraph> <right bracket or trigraph>`. It is already produced by the 6.42/6.45 enumeration constructors, because `sepBy` accepts zero elements: `ARRAY[]` is `ArrayConstructor []` and `MULTISET[]` is `MultisetConstructor []`. The rules are now cited on those parsers and covered by tests.
+
+- **Trade-off:** 6.45 keeps a recorded gap: its third alternative, `<table value constructor by query>` (`TABLE ( <query expression> )`), is a §7.3 construct reachable through query expressions, not through an expression primary, so it is not modelled as a multiset constructor.
 
 - **Trade-off:** `REF` is a reserved word, so `pKeyword "REF"` disambiguates cleanly. The `SCOPE` name is an `Expression option` (None = no scope).
 

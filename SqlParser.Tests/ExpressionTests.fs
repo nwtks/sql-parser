@@ -127,6 +127,235 @@ let ``OVERLAY PLACING verification`` () =
     | res -> Assert.Fail(sprintf "Expected Overlay, got %A" res)
 
 [<Fact>]
+let ``CHARACTER length expressions verification`` () =
+    match parse "SELECT CHAR_LENGTH(name)" with
+    | LengthExpression(LengthFunction.CharLength, { Kind = Identifier "NAME" }, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected CHAR_LENGTH, got %A" res)
+
+    match parse "SELECT CHARACTER_LENGTH(name USING CHARACTERS)" with
+    | LengthExpression(LengthFunction.CharacterLength, { Kind = Identifier "NAME" }, Some "CHARACTERS") -> ()
+    | res -> Assert.Fail(sprintf "Expected CHARACTER_LENGTH USING, got %A" res)
+
+    match parse "SELECT OCTET_LENGTH(name)" with
+    | LengthExpression(LengthFunction.OctetLength, { Kind = Identifier "NAME" }, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected OCTET_LENGTH, got %A" res)
+
+[<Fact>]
+let ``ABS absolute value verification`` () =
+    match parse "SELECT ABS(x)" with
+    | NumericValueFunction(NumericFunction.AbsoluteValue, [ { Kind = Identifier "X" } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected ABS, got %A" res)
+
+    // 6.38 <interval absolute value function>
+    match parse "SELECT ABS(INTERVAL '1' DAY)" with
+    | NumericValueFunction(NumericFunction.AbsoluteValue, [ { Kind = Literal(Interval _) } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected ABS(interval), got %A" res)
+
+[<Fact>]
+let ``Numeric value function catalog verification`` () =
+    let cases =
+        [ "SELECT CARDINALITY(c)", NumericFunction.Cardinality
+          "SELECT ARRAY_MAX_CARDINALITY(a)", NumericFunction.ArrayMaxCardinality
+          "SELECT SIN(x)", NumericFunction.Sin
+          "SELECT COS(x)", NumericFunction.Cos
+          "SELECT TAN(x)", NumericFunction.Tan
+          "SELECT SINH(x)", NumericFunction.Sinh
+          "SELECT COSH(x)", NumericFunction.Cosh
+          "SELECT TANH(x)", NumericFunction.Tanh
+          "SELECT ASIN(x)", NumericFunction.Asin
+          "SELECT ACOS(x)", NumericFunction.Acos
+          "SELECT ATAN(x)", NumericFunction.Atan
+          "SELECT LOG10(x)", NumericFunction.CommonLogarithm
+          "SELECT LN(x)", NumericFunction.NaturalLogarithm
+          "SELECT EXP(x)", NumericFunction.Exponential
+          "SELECT SQRT(x)", NumericFunction.SquareRoot
+          "SELECT FLOOR(x)", NumericFunction.Floor
+          "SELECT CEIL(x)", NumericFunction.Ceiling
+          "SELECT CEILING(x)", NumericFunction.Ceiling ]
+
+    for sql, expected in cases do
+        match parse sql with
+        | NumericValueFunction(fn, [ { Kind = Identifier "X" } ])
+        | NumericValueFunction(fn, [ { Kind = Identifier "A" } ])
+        | NumericValueFunction(fn, [ { Kind = Identifier "C" } ]) -> Assert.Equal(expected, fn)
+        | res -> Assert.Fail(sprintf "Expected NumericValueFunction %A for %s, got %A" expected sql res)
+
+[<Fact>]
+let ``Multi argument numeric value functions verification`` () =
+    match parse "SELECT MOD(a, b)" with
+    | NumericValueFunction(NumericFunction.Modulus, [ { Kind = Identifier "A" }; { Kind = Identifier "B" } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected MOD, got %A" res)
+
+    match parse "SELECT POWER(a, b)" with
+    | NumericValueFunction(NumericFunction.Power, [ { Kind = Identifier "A" }; { Kind = Identifier "B" } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected POWER, got %A" res)
+
+    match parse "SELECT LOG(b, x)" with
+    | NumericValueFunction(NumericFunction.GeneralLogarithm, [ { Kind = Identifier "B" }; { Kind = Identifier "X" } ]) ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected LOG, got %A" res)
+
+    match parse "SELECT WIDTH_BUCKET(a, b, c, d)" with
+    | NumericValueFunction(NumericFunction.WidthBucket, [ _; _; _; _ ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected WIDTH_BUCKET, got %A" res)
+
+    match parse "SELECT MATCH_NUMBER()" with
+    | NumericValueFunction(NumericFunction.MatchNumber, []) -> ()
+    | res -> Assert.Fail(sprintf "Expected MATCH_NUMBER, got %A" res)
+
+[<Fact>]
+let ``Regex functions verification`` () =
+    match parse "SELECT OCCURRENCES_REGEX('a' IN s)" with
+    | RegexOccurrences arg ->
+        match arg.Pattern with
+        | { Kind = Literal(String "a") } -> ()
+        | res -> Assert.Fail(sprintf "Expected pattern 'a', got %A" res)
+
+        match arg.Subject with
+        | { Kind = Identifier "S" } -> ()
+        | res -> Assert.Fail(sprintf "Expected subject s, got %A" res)
+
+        Assert.Equal(None, arg.Flag)
+        Assert.Equal(None, arg.Occurrence)
+    | res -> Assert.Fail(sprintf "Expected RegexOccurrences, got %A" res)
+
+    match parse "SELECT SUBSTRING_REGEX('a' FLAG 'i' IN s FROM 2 OCCURRENCE 3 GROUP 1)" with
+    | RegexSubstring arg ->
+        match arg.Flag with
+        | Some { Kind = Literal(String "i") } -> ()
+        | res -> Assert.Fail(sprintf "Expected flag 'i', got %A" res)
+
+        match arg.Occurrence with
+        | Some(RegexOccurrenceNumber { Kind = Literal(Number 3m) }) -> ()
+        | res -> Assert.Fail(sprintf "Expected OCCURRENCE 3, got %A" res)
+
+        match arg.CaptureGroup with
+        | Some { Kind = Literal(Number 1m) } -> ()
+        | res -> Assert.Fail(sprintf "Expected GROUP 1, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected RegexSubstring, got %A" res)
+
+    match parse "SELECT TRANSLATE_REGEX('a' IN s WITH 'b' OCCURRENCE ALL)" with
+    | RegexTransliterate arg ->
+        match arg.Replacement with
+        | Some { Kind = Literal(String "b") } -> ()
+        | res -> Assert.Fail(sprintf "Expected replacement 'b', got %A" res)
+
+        Assert.Equal(Some RegexOccurrenceAll, arg.Occurrence)
+    | res -> Assert.Fail(sprintf "Expected RegexTransliterate, got %A" res)
+
+[<Fact>]
+let ``POSITION_REGEX start verification`` () =
+    match parse "SELECT POSITION_REGEX('a' IN s)" with
+    | RegexPosition(None, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected RegexPosition without start, got %A" res)
+
+    match parse "SELECT POSITION_REGEX(START 'a' IN s)" with
+    | RegexPosition(Some RegexStartOfString, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected RegexPosition START, got %A" res)
+
+    match parse "SELECT POSITION_REGEX(AFTER 'a' IN s)" with
+    | RegexPosition(Some RegexAfterMatch, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected RegexPosition AFTER, got %A" res)
+
+[<Fact>]
+let ``SUBSTRING SIMILAR ESCAPE verification`` () =
+    match parse "SELECT SUBSTRING(src SIMILAR 'a*' ESCAPE '!')" with
+    | SubstringSimilar({ Kind = Identifier "SRC" }, { Kind = Literal(String "a*") }, { Kind = Literal(String "!") }) ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected SubstringSimilar, got %A" res)
+
+[<Fact>]
+let ``UPPER and LOWER fold verification`` () =
+    match parse "SELECT UPPER(name)" with
+    | Fold(FoldFunction.FoldUpper, { Kind = Identifier "NAME" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected UPPER fold, got %A" res)
+
+    match parse "SELECT LOWER(name)" with
+    | Fold(FoldFunction.FoldLower, { Kind = Identifier "NAME" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected LOWER fold, got %A" res)
+
+[<Fact>]
+let ``CONVERT and TRANSLATE transcoding verification`` () =
+    match parse "SELECT CONVERT(name USING utf8)" with
+    | Transcoding({ Kind = Identifier "NAME" }, { Kind = Identifier "UTF8" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected Transcoding, got %A" res)
+
+    match parse "SELECT TRANSLATE(name USING latin)" with
+    | CharacterTransliteration({ Kind = Identifier "NAME" }, { Kind = Identifier "LATIN" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected CharacterTransliteration, got %A" res)
+
+[<Fact>]
+let ``NORMALIZE function verification`` () =
+    match parse "SELECT NORMALIZE(name)" with
+    | NormalizeFunction({ Kind = Identifier "NAME" }, None, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected NORMALIZE, got %A" res)
+
+    match parse "SELECT NORMALIZE(name, NFC, CHARACTER_LENGTH(10))" with
+    | NormalizeFunction({ Kind = Identifier "NAME" },
+                        Some Nfc,
+                        Some { Kind = LengthExpression(LengthFunction.CharacterLength, _, _) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected NORMALIZE with form and length, got %A" res)
+
+[<Fact>]
+let ``CLASSIFIER function verification`` () =
+    match parse "SELECT CLASSIFIER()" with
+    | Classifier None -> ()
+    | res -> Assert.Fail(sprintf "Expected Classifier, got %A" res)
+
+    match parse "SELECT CLASSIFIER(A)" with
+    | Classifier(Some { Kind = Identifier "A" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected Classifier(A), got %A" res)
+
+[<Fact>]
+let ``TRIM_ARRAY function verification`` () =
+    match parse "SELECT TRIM_ARRAY(arr, 2)" with
+    | TrimArray({ Kind = Identifier "ARR" }, { Kind = Literal(Number 2m) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected TrimArray, got %A" res)
+
+[<Fact>]
+let ``SET multiset set function verification`` () =
+    match parse "SELECT SET(m)" with
+    | MultisetSetFunction { Kind = Identifier "M" } -> ()
+    | res -> Assert.Fail(sprintf "Expected MultisetSetFunction, got %A" res)
+
+    match parse "SELECT SET(m1 MULTISET UNION m2)" with
+    | MultisetSetFunction { Kind = MultisetSetOperation(MultisetUnion, None, _, _) } -> ()
+    | res -> Assert.Fail(sprintf "Expected MultisetSetFunction with union, got %A" res)
+
+[<Fact>]
+let ``GROUPING operation verification`` () =
+    match parse "SELECT GROUPING(a)" with
+    | Grouping [ { Kind = Identifier "A" } ] -> ()
+    | res -> Assert.Fail(sprintf "Expected Grouping, got %A" res)
+
+    match parse "SELECT GROUPING(a, b)" with
+    | Grouping [ { Kind = Identifier "A" }; { Kind = Identifier "B" } ] -> ()
+    | res -> Assert.Fail(sprintf "Expected Grouping(a, b), got %A" res)
+
+[<Fact>]
+let ``RUNNING and FINAL set function verification`` () =
+    match parse "SELECT RUNNING SUM(x)" with
+    | SetFunction(Some RunningOrFinal.Running,
+                  { Kind = FunctionCall({ Kind = Identifier "SUM" },
+                                        false,
+                                        [ { Kind = Identifier "X" } ],
+                                        None,
+                                        None,
+                                        None) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected RUNNING SUM, got %A" res)
+
+    match parse "SELECT FINAL COUNT(*)" with
+    | SetFunction(Some RunningOrFinal.Final, { Kind = FunctionCall({ Kind = Identifier "COUNT" }, _, _, _, _, _) }) ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected FINAL COUNT, got %A" res)
+
+[<Fact>]
+let ``Reserved function name cannot be called with an unexpected shape`` () =
+    parseFails "SELECT ABS(1, 2)"
+    parseFails "SELECT TRIM_ARRAY(1)"
+    parseFails "SELECT SET()"
+
+[<Fact>]
 let ``Datetime value functions verification`` () =
     match parse "SELECT CURRENT_DATE" with
     | CurrentDate -> ()
@@ -139,6 +368,20 @@ let ``Datetime value functions verification`` () =
     match parse "SELECT LOCALTIME" with
     | LocalTime None -> ()
     | res -> Assert.Fail(sprintf "Expected LocalTime, got %A" res)
+
+[<Fact>]
+let ``AT TIME ZONE and AT LOCAL verification`` () =
+    match parse "SELECT x AT LOCAL" with
+    | AtTimeZone({ Kind = Identifier "X" }, TimeZoneSpecifier.TimeZoneLocal) -> ()
+    | res -> Assert.Fail(sprintf "Expected AT LOCAL, got %A" res)
+
+    match parse "SELECT x AT TIME ZONE y" with
+    | AtTimeZone({ Kind = Identifier "X" }, TimeZoneSpecifier.TimeZoneOffset { Kind = Identifier "Y" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected AT TIME ZONE, got %A" res)
+
+    match parse "SELECT x AT TIME ZONE INTERVAL '1' HOUR" with
+    | AtTimeZone({ Kind = Identifier "X" }, TimeZoneSpecifier.TimeZoneOffset { Kind = Literal(Interval _) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected AT TIME ZONE interval, got %A" res)
 
 [<Fact>]
 let ``NEXT VALUE FOR verification`` () =
@@ -190,6 +433,23 @@ let ``Method invocation on parenthesized expression verification`` () =
     | res -> Assert.Fail(sprintf "Expected MethodInvocation on parenthesized, got %A" res)
 
 [<Fact>]
+let ``Generalized method invocation verification`` () =
+    match parse "SELECT (x AS mytype).m()" with
+    | GeneralizedInvocation({ Kind = Identifier "X" },
+                            UserDefinedType { Kind = Identifier "MYTYPE" },
+                            { Kind = Identifier "M" },
+                            Some []) -> ()
+    | res -> Assert.Fail(sprintf "Expected GeneralizedInvocation, got %A" res)
+
+    match parse "SELECT (x AS mytype).m(1)" with
+    | GeneralizedInvocation(_, _, { Kind = Identifier "M" }, Some [ { Kind = Literal(Number 1m) } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected GeneralizedInvocation with args, got %A" res)
+
+    match parse "SELECT (x AS mytype).m" with
+    | GeneralizedInvocation(_, _, { Kind = Identifier "M" }, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected GeneralizedInvocation without args, got %A" res)
+
+[<Fact>]
 let ``Static method invocation verification`` () =
     match parse "SELECT my_type::prune(x)" with
     | StaticMethodInvocation({ Kind = Identifier "MY_TYPE" },
@@ -203,6 +463,16 @@ let ``NEW specification verification`` () =
     | NewSpecification({ Kind = Identifier "MY_TYPE" }, [ { Kind = Literal(Number 1m) }; { Kind = Literal(Number 2m) } ]) ->
         ()
     | res -> Assert.Fail(sprintf "Expected NewSpecification, got %A" res)
+
+[<Fact>]
+let ``SPECIFICTYPE method verification`` () =
+    match parse "SELECT x.SPECIFICTYPE" with
+    | SpecificTypeMethod({ Kind = Identifier "X" }, false) -> ()
+    | res -> Assert.Fail(sprintf "Expected SpecificTypeMethod, got %A" res)
+
+    match parse "SELECT x.SPECIFICTYPE()" with
+    | SpecificTypeMethod({ Kind = Identifier "X" }, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected SpecificTypeMethod with parens, got %A" res)
 
 [<Fact>]
 let ``Field reference verification`` () =
@@ -227,6 +497,20 @@ let ``Method invocation on last chain segment verification`` () =
     | res -> Assert.Fail(sprintf "Expected MethodInvocation on last segment, got %A" res)
 
     parseFails "SELECT 1 + DEFAULT"
+
+[<Fact>]
+let ``Dereference operation verification`` () =
+    match parse "SELECT x -> attr" with
+    | Dereference({ Kind = Identifier "X" }, { Kind = Identifier "ATTR" }, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected Dereference attribute, got %A" res)
+
+    match parse "SELECT x -> m(1)" with
+    | Dereference({ Kind = Identifier "X" }, { Kind = Identifier "M" }, Some [ { Kind = Literal(Number 1m) } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected Dereference method, got %A" res)
+
+    match parse "SELECT a.b -> c" with
+    | Dereference({ Kind = ColumnReference [ "A"; "B" ] }, { Kind = Identifier "C" }, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected Dereference on column reference, got %A" res)
 
 [<Fact>]
 let ``FILTER clause verification`` () =
@@ -353,6 +637,42 @@ let ``MULTISET value constructor verification`` () =
     match parse "SELECT MULTISET(SELECT id FROM t)" with
     | MultisetQuery _ -> ()
     | res -> Assert.Fail(sprintf "Expected MultisetQuery, got %A" res)
+
+[<Fact>]
+let ``Empty collection specification verification`` () =
+    match parse "SELECT ARRAY[]" with
+    | ArrayConstructor [] -> ()
+    | res -> Assert.Fail(sprintf "Expected ArrayConstructor [], got %A" res)
+
+    match parse "SELECT MULTISET[]" with
+    | MultisetConstructor [] -> ()
+    | res -> Assert.Fail(sprintf "Expected MultisetConstructor [], got %A" res)
+
+    match parse "SELECT ARRAY[1]" with
+    | ArrayConstructor [ { Kind = Literal(Number 1m) } ] -> ()
+    | res -> Assert.Fail(sprintf "Expected ArrayConstructor [1], got %A" res)
+
+[<Fact>]
+let ``MULTISET set operations verification`` () =
+    match parse "SELECT m1 MULTISET UNION ALL m2" with
+    | MultisetSetOperation(MultisetUnion, Some true, { Kind = Identifier "M1" }, { Kind = Identifier "M2" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected MULTISET UNION ALL, got %A" res)
+
+    match parse "SELECT m1 MULTISET EXCEPT DISTINCT m2" with
+    | MultisetSetOperation(MultisetExcept, Some false, _, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected MULTISET EXCEPT DISTINCT, got %A" res)
+
+    match parse "SELECT m1 MULTISET INTERSECT m2" with
+    | MultisetSetOperation(MultisetIntersect, None, _, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected MULTISET INTERSECT, got %A" res)
+
+    // MULTISET INTERSECT binds tighter than MULTISET UNION
+    match parse "SELECT m1 MULTISET UNION m2 MULTISET INTERSECT m3" with
+    | MultisetSetOperation(MultisetUnion,
+                           None,
+                           { Kind = Identifier "M1" },
+                           { Kind = MultisetSetOperation(MultisetIntersect, None, _, _) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected INTERSECT to bind tighter, got %A" res)
 
 [<Fact>]
 let ``Array element reference verification`` () =
@@ -609,6 +929,58 @@ let ``JSON API passing clause verification`` () =
                 None,
                 None) -> ()
     | res -> Assert.Fail(sprintf "Expected JsonValue PASSING, got %A" res)
+
+[<Fact>]
+let ``Row pattern navigation verification`` () =
+    match parse "SELECT FIRST(x)" with
+    | RowPatternNavigation(RowPatternNavigation.Logical(None, FirstOrLast.First, { Kind = Identifier "X" }, None)) -> ()
+    | res -> Assert.Fail(sprintf "Expected FIRST(x), got %A" res)
+
+    match parse "SELECT LAST(x, 1)" with
+    | RowPatternNavigation(RowPatternNavigation.Logical(None, FirstOrLast.Last, _, Some { Kind = Literal(Number 1m) })) ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected LAST(x, 1), got %A" res)
+
+    match parse "SELECT RUNNING FIRST(x)" with
+    | RowPatternNavigation(RowPatternNavigation.Logical(Some RunningOrFinal.Running, FirstOrLast.First, _, None)) -> ()
+    | res -> Assert.Fail(sprintf "Expected RUNNING FIRST(x), got %A" res)
+
+    match parse "SELECT FINAL LAST(x)" with
+    | RowPatternNavigation(RowPatternNavigation.Logical(Some RunningOrFinal.Final, FirstOrLast.Last, _, None)) -> ()
+    | res -> Assert.Fail(sprintf "Expected FINAL LAST(x), got %A" res)
+
+    match parse "SELECT PREV(x)" with
+    | RowPatternNavigation(RowPatternNavigation.Physical(PrevOrNext.Prev, { Kind = Identifier "X" }, None)) -> ()
+    | res -> Assert.Fail(sprintf "Expected PREV(x), got %A" res)
+
+    match parse "SELECT NEXT(x, 2)" with
+    | RowPatternNavigation(RowPatternNavigation.Physical(PrevOrNext.Next, _, Some { Kind = Literal(Number 2m) })) -> ()
+    | res -> Assert.Fail(sprintf "Expected NEXT(x, 2), got %A" res)
+
+    match parse "SELECT PREV(FIRST(x), 2)" with
+    | RowPatternNavigation(RowPatternNavigation.Compound(PrevOrNext.Prev,
+                                                         None,
+                                                         FirstOrLast.First,
+                                                         _,
+                                                         None,
+                                                         Some { Kind = Literal(Number 2m) })) -> ()
+    | res -> Assert.Fail(sprintf "Expected PREV(FIRST(x), 2), got %A" res)
+
+    match parse "SELECT NEXT(RUNNING LAST(x, 1), 2)" with
+    | RowPatternNavigation(RowPatternNavigation.Compound(PrevOrNext.Next,
+                                                         Some RunningOrFinal.Running,
+                                                         FirstOrLast.Last,
+                                                         _,
+                                                         Some { Kind = Literal(Number 1m) },
+                                                         Some { Kind = Literal(Number 2m) })) -> ()
+    | res -> Assert.Fail(sprintf "Expected compound navigation, got %A" res)
+
+[<Fact>]
+let ``Navigation keywords are still usable as identifiers`` () =
+    Assert.Equal(Identifier "FIRST", parse "SELECT first FROM t")
+    Assert.Equal(Identifier "NEXT", parse "SELECT next FROM t")
+    Assert.Equal(Identifier "PREV", parse "SELECT prev FROM t")
+    Assert.Equal(Identifier "LAST", parse "SELECT last FROM t")
 
 [<Fact>]
 let ``Nested row number function verification`` () =

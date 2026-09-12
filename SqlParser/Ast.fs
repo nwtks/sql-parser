@@ -316,9 +316,152 @@ and ExpressionKind =
     // 6.11 <nested window function> ::= <nested row number function> | <value_of expression at row>
     | NestedRowNumber of RowMarker
     | ValueOf of Expression * RowMarkerExpression * Expression option
+    // 6.9 <set function specification> ::= [ <running or final> ] <aggregate function> | <grouping operation>
+    | SetFunction of RunningOrFinal option * Expression
+    | Grouping of Expression list
+    // 6.17 <generalized invocation> ::= ( <value expression primary> AS <data type> ) <period> <method name> [ <SQL argument list> ]
+    | GeneralizedInvocation of Expression * DataType * Expression * Expression list option
+    // 6.20 <attribute or method reference> / 6.21 <dereference operation> / 6.22 <method reference>
+    //   <value expression primary> <dereference operator> <qualified identifier> [ <SQL argument list> ]
+    //   (no argument list = 6.21 attribute access, argument list = 6.22 method reference)
+    | Dereference of Expression * Expression * Expression list option
+    // 6.26 <row pattern navigation operation>
+    | RowPatternNavigation of RowPatternNavigation
+    // 6.30 <length expression> ::= <char length expression> | <octet length expression>
+    | LengthExpression of LengthFunction * Expression * string option
+    // 6.30 <numeric value function> — the built-ins of the shape <name> ( <args> )
+    | NumericValueFunction of NumericFunction * Expression list
+    // 6.30 <regex occurrences function> / <regex position expression>
+    | RegexOccurrences of RegexArgument
+    | RegexPosition of RegexStart option * RegexArgument
+    // 6.32 <regular expression substring function> ::= SUBSTRING ( <src> SIMILAR <pattern> ESCAPE <escape> )
+    | SubstringSimilar of Expression * Expression * Expression
+    // 6.32 <fold> ::= { UPPER | LOWER } ( <character value expression> )
+    | Fold of FoldFunction * Expression
+    // 6.32 <transcoding> ::= CONVERT ( <character value expression> USING <transcoding name> )
+    | Transcoding of Expression * Expression
+    // 6.32 <character transliteration> ::= TRANSLATE ( <character value expression> USING <transliteration name> )
+    | CharacterTransliteration of Expression * Expression
+    // 6.32 <regex substring function> / <regex transliteration>
+    | RegexSubstring of RegexArgument
+    | RegexTransliterate of RegexArgument
+    // 6.32 <normalize function> ::= NORMALIZE ( <character value expression> [ , <normal form> [ , <result length> ] ] )
+    | NormalizeFunction of Expression * NormalForm option * Expression option
+    // 6.32 <specific type method> ::= <user-defined type value expression> <period> SPECIFICTYPE [ ( ) ]
+    | SpecificTypeMethod of Expression * bool
+    // 6.32 <classifier function> ::= CLASSIFIER ( [ <row pattern variable name> ] )
+    | Classifier of Expression option
+    // 6.35 <time zone> ::= AT <time zone specifier>
+    | AtTimeZone of Expression * TimeZoneSpecifier
+    // 6.41 <trim array function> ::= TRIM_ARRAY ( <array value expression> , <numeric value expression> )
+    | TrimArray of Expression * Expression
+    // 6.43 <multiset value expression> ::= ... MULTISET { UNION | INTERSECT | EXCEPT } [ ALL | DISTINCT ] ...
+    | MultisetSetOperation of MultisetSetOperator * bool option * Expression * Expression
+    // 6.44 <multiset set function> ::= SET ( <multiset value expression> )
+    | MultisetSetFunction of Expression
 
 // 6.28 <value expression> — wrapper carrying source position
 and Expression = { Kind: ExpressionKind; Pos: Position }
+
+// 6.9 / 6.26 <running or final> ::= RUNNING | FINAL
+// (qualify as RunningOrFinal.Running / RunningOrFinal.Final — the bare case names
+//  clash with ResultOption.Final and TypeOption.Final)
+and RunningOrFinal =
+    | Running
+    | Final
+
+// 6.30 <length expression> ::= <char length expression> | <octet length expression>
+and LengthFunction =
+    | CharLength
+    | CharacterLength
+    | OctetLength
+
+// 6.30 <numeric value function> — the built-ins of the shape <name> ( <args> )
+and NumericFunction =
+    | Cardinality
+    | ArrayMaxCardinality
+    | AbsoluteValue
+    | Modulus
+    | Sin
+    | Cos
+    | Tan
+    | Sinh
+    | Cosh
+    | Tanh
+    | Asin
+    | Acos
+    | Atan
+    | GeneralLogarithm
+    | CommonLogarithm
+    | NaturalLogarithm
+    | Exponential
+    | Power
+    | SquareRoot
+    | Floor
+    | Ceiling
+    | WidthBucket
+    | MatchNumber
+
+// 6.30 <regex occurrences function> / <regex position expression>
+// 6.32 <regex substring function> / <regex transliteration>
+// — all four share the shape
+//   <pattern> [ FLAG <flag> ] IN <subject> [ WITH <replacement> ] [ FROM <start> ]
+//   [ USING <char length units> ] [ OCCURRENCE <occurrence> ] [ GROUP <capture group> ]
+// `<WITH>` and `<GROUP>`/`<OCCURRENCE>` are not part of every one of the four rules;
+// the shared parser accepts the superset (see docs/trade-off.md).
+and RegexArgument =
+    { Pattern: Expression
+      Flag: Expression option
+      Subject: Expression
+      Replacement: Expression option
+      From: Expression option
+      Using: string option
+      Occurrence: RegexOccurrence option
+      CaptureGroup: Expression option }
+
+// 6.30 <regex occurrence> ::= <numeric value expression>
+// 6.32 <regex transliteration occurrence> ::= <regex occurrence> | ALL
+and RegexOccurrence =
+    | RegexOccurrenceNumber of Expression
+    | RegexOccurrenceAll
+
+// 6.30 <regex position start or after> ::= START | AFTER
+and RegexStart =
+    | RegexStartOfString
+    | RegexAfterMatch
+
+// 6.32 <fold> ::= { UPPER | LOWER } ( <character value expression> )
+and FoldFunction =
+    | FoldUpper
+    | FoldLower
+
+// 6.35 <time zone specifier> ::= LOCAL | TIME ZONE <interval primary>
+and TimeZoneSpecifier =
+    | TimeZoneLocal
+    | TimeZoneOffset of Expression
+
+// 6.26 <row pattern navigation operation> ::= <logical> | <physical> | <compound>
+and RowPatternNavigation =
+    | Logical of RunningOrFinal option * FirstOrLast * Expression * Expression option
+    | Physical of PrevOrNext * Expression * Expression option
+    | Compound of PrevOrNext * RunningOrFinal option * FirstOrLast * Expression * Expression option * Expression option
+
+// 6.26 <first or last> ::= FIRST | LAST
+// (qualify as FirstOrLast.First / FirstOrLast.Last — Direction already owns those names)
+and FirstOrLast =
+    | First
+    | Last
+
+// 6.26 <prev or next> ::= PREV | NEXT
+and PrevOrNext =
+    | Prev
+    | Next
+
+// 6.43 <multiset value expression> — <set operator> of the multiset form
+and MultisetSetOperator =
+    | MultisetUnion
+    | MultisetIntersect
+    | MultisetExcept
 
 // 8.12 <normal form> ::= NFC | NFD | NFKC | NFKD
 and NormalForm =
