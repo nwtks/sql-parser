@@ -480,3 +480,35 @@ A new `ExpressionKind` case compiles without a validation branch, so a standalon
 ## The DML `ONLY` flag fields are named per record
 
 14.8/14.9/14.13/14.14 — `pTargetTable` returns `Expression * bool`, and the flag is stored as `UpdateStatement.TableIsOnly`, `DeleteStatement.TableIsOnly` and `MergeStatement.TargetIsOnly` (the merge record's name field is `Target`, not `Table`). Pattern-matching on `Table` still compiles without mentioning the flag, which is why no existing test needed updating.
+
+## Union-case name clashes introduced by the §11 work
+
+Moving `ColumnConstraintKind` from `DdlParser.fs` into `Ast.fs` widened its scope from a single module to the whole namespace. Its `Null` case then clashed with `Literal.Null`, so `pKeyword "NULL" >>% Null |>> Literal` in `ExpressionParser.fs` resolved `Null` to `ColumnConstraintKind.Null` and typed `Literal` as `ColumnConstraintKind -> …`. 11.4 has no bare-`NULL` column constraint, so the case was **dropped** rather than qualifying every existing `Literal Null` use site. `ColumnConstraintKind.PrimaryKey` / `Unique` / `Check` also clash with `TableConstraint.PrimaryKey` / `Unique` / `Check` — always qualify.
+
+## `pConstraintCharacteristics` must precede `<column constraint definition>`
+
+10.8's `<constraint characteristics>` is used by 11.4 (`<column constraint definition>`), 11.6 (`<table constraint definition>`), 11.34 (`<domain constraint>`) and 11.47 (`<assertion definition>`). It and `pConstraintEnforcement` now sit at the very top of `DdlParser.fs`; when hoisting, the old definition near `pDomainConstraint` must be deleted or the name shadows the new one.
+
+## `attempt` is required around `<column constraint definition>`
+
+`many (attempt pColumnConstraint)` — when the following table element is a table-level `CONSTRAINT <name> PRIMARY KEY (...)`, the column-constraint parser consumes `CONSTRAINT <name>` and then fails on `PRIMARY KEY`. Without the outer `attempt` the failure is fatal and the whole `<table element list>` fails.
+
+## `<table element>` needs `Choice4Of4`
+
+F# provides `Choice1Of4`…`Choice4Of4`. The four-way choice keeps `<column definition>`, `<table period definition>`, `<table constraint definition>` and `<like clause>` distinguishable; nesting two `Choice` levels of the same arity would not.
+
+## `DESCRIPTOR` is not a reserved word (11.60)
+
+`pParameterType` must try `<generic table parameter type>` / `<descriptor parameter type>` **before** `<data type>`, otherwise `pDataType`'s `<path-resolved user-defined type name>` branch consumes `DESCRIPTOR` and `(d DESCRIPTOR)` parses as a parameter named `d` whose type is a UDT called `DESCRIPTOR`. `TABLE` is reserved, so it is unaffected.
+
+## `pKeyword "SYSTEM"` does not match `SYSTEM_TIME`
+
+`pKeyword` refuses a keyword immediately followed by `_`, so the new `WITH SYSTEM VERSIONING` suffix cannot swallow the `SYSTEM_TIME` of `PERIOD FOR SYSTEM_TIME`. The same property is what keeps `PERIOD FOR SYSTEM_TIME` and `PERIOD FOR <name>` disjoint.
+
+## `<with or without data>` is now required (11.3)
+
+`CREATE TABLE t AS SELECT ...` without `WITH DATA` / `WITH NO DATA` used to parse and yielded `WithData = None`. It is now rejected per the grammar, so with `AsQuery = Some` the `WithData` field is always `Some` — tests asserting `WithData = None` had to be updated.
+
+## Test-only: functions cannot appear in F# patterns
+
+`Parameters = [ { ParameterType = dataTypeParam Integer } ]` does not compile — a record pattern may only contain literals and constructors, not function applications. Bind the value (`Parameters = [ param ]`) and assert with `Assert.Equal(...)`, or match the DU case directly (`match param.ParameterType with | DataTypeParameter(Integer, true) -> …`).

@@ -33,13 +33,22 @@ A SQL parser implemented in F# using [FParsec](https://www.quanttec.com/fparsec/
 - Routine parameter defaults accept `DESCRIPTOR ( <column name> [ <data type> ] , ... )`.
 
 ### 🏗️ Data Definition (DDL)
-- `CREATE TABLE` (column constraints like `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, `CHECK`, `REFERENCES`, and table-level constraints: `PRIMARY KEY (...)`, `UNIQUE (...)`, `FOREIGN KEY (...) REFERENCES ... [ON UPDATE/DELETE ...]`, `CHECK (...)`).
-- `CREATE INDEX` (including `UNIQUE`).
-- `CREATE VIEW`.
-- `CREATE ROLE` / `DROP ROLE`.
-- `DROP` (Table, Index, View, Role).
+- `CREATE TABLE` — `<table scope>` (`GLOBAL`/`LOCAL TEMPORARY`), typed tables (`OF <udt> [UNDER <supertable>]`), `<like clause>` (`LIKE <table> [INCLUDING|EXCLUDING IDENTITY|DEFAULTS|GENERATED]`), table period elements (`PERIOD FOR SYSTEM_TIME | <name> (begin, end)`), `WITH SYSTEM VERSIONING`, `ON COMMIT PRESERVE|DELETE ROWS`, and `<as subquery clause>` (`AS <query> WITH [NO] DATA`).
+- Column definitions: data types and domain names; `<default clause>` restricted to the grammar's `<default option>` (`<literal>`, datetime value functions, `USER`/`CURRENT_USER`/…, `NULL`, `ARRAY[]`/`MULTISET[]`); `GENERATED {ALWAYS|BY DEFAULT} AS IDENTITY [(options)]`; generated columns (`GENERATED ALWAYS AS (expr)`); `GENERATED ALWAYS AS ROW START|END`; `CONSTRAINT <name> <column constraint> [<constraint characteristics>]`; and a column `COLLATE` clause.
+- Table constraints: `PRIMARY KEY (...)`, `UNIQUE (...)`, `FOREIGN KEY (...) REFERENCES ... [ON UPDATE|ON DELETE ...]`, `CHECK (...)` — each with an optional `CONSTRAINT <name>` and `[<constraint characteristics>]` (`INITIALLY DEFERRED|IMMEDIATE`, `[NOT] DEFERRABLE`, `[NOT] ENFORCED`).
+- `CREATE VIEW` — `CREATE [RECURSIVE] VIEW`, view column list, `OF <udt> [UNDER <table>]`, and `WITH [CASCADED|LOCAL] CHECK OPTION`.
+- `CREATE SCHEMA` (character set / path, nested schema elements), `CREATE DOMAIN` / `ALTER DOMAIN` / `DROP DOMAIN`, `CREATE CHARACTER SET`, `CREATE COLLATION`, `CREATE TRANSLATION` / `DROP TRANSLATION`, `CREATE ASSERTION` / `DROP ASSERTION`.
+- `CREATE CAST` / `DROP CAST`, `CREATE ORDERING` / `DROP ORDERING`, `CREATE TRANSFORM` / `ALTER TRANSFORM` / `DROP TRANSFORM`, `CREATE TYPE` / `ALTER TYPE` / `DROP TYPE` (with attributes, methods, `REF`/`CAST` options).
+- `CREATE SEQUENCE` / `ALTER SEQUENCE` / `DROP SEQUENCE`; `CREATE PROCEDURE` / `CREATE FUNCTION` (parameter modes, `AS LOCATOR`, `TABLE`/`DESCRIPTOR` parameter types, `<returns table type>`, `<result cast>`, routine characteristics), `ALTER ROUTINE`, `DROP ROUTINE`; `CREATE TRIGGER` / `DROP TRIGGER`.
 - `ALTER TABLE` — the full `<alter table action>` set: `ADD [COLUMN]`, `DROP [COLUMN] ... CASCADE|RESTRICT`, `ALTER [COLUMN]` (`SET`/`DROP DEFAULT`, `SET`/`DROP NOT NULL`, `ADD`/`DROP SCOPE`, `SET DATA TYPE`, `SET GENERATED ...`, `RESTART`/`SET <sequence option>`, `DROP IDENTITY`, `DROP EXPRESSION`), `ADD`/`ALTER`/`DROP CONSTRAINT`, `ADD`/`DROP PERIOD FOR ...`, and `ADD`/`DROP SYSTEM VERSIONING`.
-- `GRANT` / `REVOKE` (privileges and roles, including `ALL PRIVILEGES`, `WITH GRANT OPTION`, `WITH ADMIN OPTION`).
+- `DROP` (schema, table, view, domain, collation, character set, translation, assertion, cast, ordering, transform, routine, trigger, type) with `<drop behavior>`.
+- `GRANT` / `REVOKE` (privileges and roles, including `ALL PRIVILEGES`, `SELECT (method list)`, `WITH GRANT OPTION`, `WITH ADMIN OPTION`).
+
+### 🧩 Dynamic SQL, Diagnostics, Connections & Sessions
+- Dynamic SQL: `PREPARE` / `EXECUTE` / `EXECUTE IMMEDIATE` / `DEALLOCATE PREPARE`, `DESCRIBE`, descriptor statements (`ALLOCATE` / `DEALLOCATE` / `GET` / `SET` / `COPY DESCRIPTOR`), and the dynamic cursor statements.
+- `GET DIAGNOSTICS`.
+- `CONNECT` / `SET CONNECTION` / `DISCONNECT`.
+- Session management: `SET SESSION CHARACTERISTICS`, `SET SESSION AUTHORIZATION`, `SET ROLE`, `SET TIME ZONE`, `SET CATALOG`, `SET SCHEMA`, `SET NAMES`, `SET PATH`, `SET TRANSFORM GROUP`, `SET SESSION COLLATION`.
 
 ### 🔐 Transactions
 - `START TRANSACTION` (with transaction modes like `ISOLATION LEVEL`, `READ ONLY`/`READ WRITE`).
@@ -66,9 +75,9 @@ open SqlParser
 let sql = "SELECT name, SUM(salary) OVER (PARTITION BY dept) FROM employees WHERE active = TRUE"
 
 match SqlParser.parse sql with
-| Choice1Of2 stmt ->
+| Ok stmt ->
     printfn "Successfully parsed statement of kind: %A" stmt.Kind
-| Choice2Of2 (ParseError(msg, pos)) ->
+| Error (ParseError(msg, pos)) ->
     printfn "Parse error: %s at line %d, col %d" msg pos.Line pos.Column
 ```
 
@@ -80,8 +89,15 @@ match SqlParser.parse sql with
 - `ExpressionParser.fs`: Handles operator precedence and expression parsing.
 - `QueryParser.fs`: Main logic for `SELECT` queries and set operations.
 - `DmlParser.fs`: Parsers for `INSERT`, `UPDATE`, `DELETE`, `MERGE`.
-- `CursorParser.fs`: Parsers for cursor declarations, `OPEN`/`FETCH`/`CLOSE`, cursor `SELECT ... INTO`, temporary table declarations, and locator statements.
 - `DdlParser.fs`: Parsers for schema modification statements (including `GRANT`/`REVOKE`/role).
+- `TypeParser.fs`: Parsers for `CREATE`/`ALTER TYPE` and their attributes/methods.
+- `RoutineParser.fs`: Parsers for `CREATE PROCEDURE`/`FUNCTION`/`TRIGGER`, `ALTER ROUTINE`.
+- `ControlParser.fs`: Parsers for `CALL` and `RETURN`.
+- `CursorParser.fs`: Parsers for cursor declarations, `OPEN`/`FETCH`/`CLOSE`, cursor `SELECT ... INTO`, temporary table declarations, and locator statements.
+- `DynamicParser.fs`: Parsers for dynamic SQL (`PREPARE`, `EXECUTE`, descriptors, dynamic cursors).
+- `DiagnosticsParser.fs`: Parser for `GET DIAGNOSTICS`.
+- `ConnectionParser.fs`: Parsers for `CONNECT`, `SET CONNECTION`, `DISCONNECT`.
+- `SessionParser.fs`: Parsers for session-management statements (`SET SESSION`, `SET ROLE`, `SET SCHEMA`, …).
 - `TransactionParser.fs`: Parsers for transaction statements.
 - `SqlParser.fs`: Main entry point and `WITH` clause handling.
 

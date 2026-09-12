@@ -729,3 +729,62 @@ The third alternative of `<multiset value constructor>` is `<table value constru
 
 - **Trade-off:** `Query` is reused for the subquery and the node is a distinct case rather than `MultisetQuery`, because 6.45 lists it as a constructor by query independently of the `MULTISET` keyword.
 - **Trade-off:** The node is only reachable from an expression. The `<table reference>` position (`FROM ...`, 7.6) is handled by `QueryParser.pTablePrimary`, whose own `TABLE ( <value expression> )` branch for `<collection derived table>` consumes `TABLE` before calling `pExpression`; that path is unaffected and does not consult the new parser. Note that in `sql-2016-grammar.txt` the 7.3 `<table value constructor>` production is `VALUES`-only, so a `TABLE ( <query> )` table reference is not required by the design document.
+
+## `<specific routine designator>` (10.6) is a record
+
+`pSpecificRoutineDesignator` used to yield a bare `Expression`, so `<routine type>`, the `<data type list>` of a `<member name>` and the trailing `[ FOR <schema-resolved user-defined type name> ]` were all discarded. It now produces `SpecificRoutineDesignator { IsSpecific; RoutineType; Name; DataTypeList; ForType }`, and every caller carries the record: `PrivilegeSelectTarget.PrivilegeMethods`, `OrderingCategory.Relative` / `Map`, `TransformElement.ToSql` / `FromSql`, `StatementKind.CreateCast`, `StatementKind.CreateTransliteration`, `AlterRoutineStatement.Routine` and `AllocateReceivedCursorStatement.Routine`. 11.45's `<transliteration source>` also uses the designator now, so `FROM SPECIFIC FUNCTION f` parses.
+
+- **Trade-off:** Retyping seven AST positions is a wide change, but it makes the designator round-trippable. `IsSpecific` distinguishes the `SPECIFIC <routine type> <specific name>` alternative; `DataTypeList = Some []` means the parenthesised `<data type list>` is present but empty and `None` means it is absent.
+- **Trade-off:** `RoutineType` is an `option` because a bare `<schema qualified routine name>` is still accepted (`CREATE CAST (INT AS BIGINT) WITH f` gives `None`). Note that `ALTER ROUTINE add` yields `Some RoutineType.Routine, Name = "add"` — `ROUTINE` is consumed as the `<routine type>`. Requiring a `<routine type>` would break `ALTER ROUTINE` / `GRANT ... ON FUNCTION`.
+- **Kept separate:** `pRoutineDesignatorWithType` (an `Expression`) is still what `pObjectName` uses for `GRANT ... ON FUNCTION f`, because 12.3's `<object name>` carries a plain name rather than a designator.
+
+## Strict `<default option>` (11.5) for every `<default clause>`
+
+`CREATE TABLE ... DEFAULT`, `ALTER TABLE ... SET DEFAULT`, `CREATE DOMAIN ... DEFAULT` and `ALTER DOMAIN ... SET DEFAULT` now share `pDefaultOption`, a closed parser for `<literal>`, `<datetime value function>`, `USER`, `CURRENT_USER`, `CURRENT_ROLE`, `SESSION_USER`, `SYSTEM_USER`, `CURRENT_CATALOG`, `CURRENT_SCHEMA`, `CURRENT_PATH` and `<implicitly typed value specification>` (`NULL`, `ARRAY[]` / `MULTISET[]`). `pSignedNumericLiteral` is tried separately because `pLiteralExpr` only accepts the unsigned form.
+
+- **Trade-off:** `pGeneralValueSpecification` was deliberately **not** reused — it also accepts `VALUE`, `?` / `:name` and `COLLATION FOR (...)`, none of which are `<default option>`s. The cost is that `DEFAULT (1 + 2)`, `DEFAULT a + b` and `DEFAULT ?` are now rejected (they used to parse as arbitrary expressions), because `<default option>` has no general value expression.
+
+## `<column definition>` (11.4) models its single optional clause explicitly
+
+The `[ <default clause> | <identity column specification> | <generation clause> | <system time period start column specification> | <system time period end column specification> ]` slot is one `opt` over a `Choice`, so at most one alternative is accepted. The four are modelled by `ColumnGeneration = IdentityColumn | GeneratedColumn | SystemTimePeriodColumn`, and `ColumnDefinition` gained `Generation`, `SystemTimePeriod`, `Collation` (10.7) and `Constraints`.
+
+- **Trade-off:** Previously `GENERATED ALWAYS AS IDENTITY` was an `opt` before the constraint list and `DEFAULT` was parsed *as a column constraint*, so `c INT GENERATED ALWAYS AS IDENTITY DEFAULT 5` was accepted. Making the slot a single choice rejects it, matching 11.4 where `<default clause>` and `<identity column specification>` are alternatives.
+- **Trade-off:** A bare `NULL` was dropped from `ColumnConstraintKind`: 11.4's `<column constraint>` is only `NOT NULL | <unique specification> | <references specification> | <check constraint definition>`, so `c INT NULL` is rejected. This also removed an F# union-case clash with `Literal.Null` (see `docs/gotchas.md`); the alternative was qualifying every existing `Literal Null` use site.
+- **Kept:** `IsNullable`, `IsPrimaryKey`, `IsUnique`, `References` and `Check` stay on `ColumnDefinition` as convenience accessors derived from `Constraints`, so existing consumers keep compiling. They are redundant with `Constraints` by design; `IsNullable` can now only be `Some false` (a `NOT NULL` constraint) or `None`.
+
+## `<column constraint definition>` and `<table constraint definition>` carry name + characteristics (11.4 / 11.6)
+
+`ColumnConstraint { Name; Kind; Characteristics }` and `TableConstraintDefinition { Constraint; Characteristics }` model `[ <constraint name definition> ] <…> [ <constraint characteristics> ]`. `CreateTableStatement.Constraints`, `AlterTableAction.AddConstraint` and `TemporaryTableDeclarationStatement.Constraints` all hold `TableConstraintDefinition`, and `pTableConstraint` returns it directly.
+
+- **Trade-off:** Wrapping `TableConstraint` (rather than adding a third tuple element to each of its cases) keeps `TableConstraint.PrimaryKey` / `Unique` / `ForeignKey` / `Check` intact, so 11.24 `ADD <table constraint definition>` composes unchanged; the cost is that consumers destructure `.Constraint`.
+- **Trade-off:** `pConstraintCharacteristics` and `pConstraintEnforcement` were hoisted to the top of `DdlParser.fs` so 11.4 can reuse them, and the old duplicate near `pDomainConstraint` was removed. `ConstraintCharacteristics` is in the same recursive `and` group as `ColumnDefinition` in `Ast.fs`, so no type reordering was needed.
+
+## `CREATE TABLE` contents source (11.3): `UNDER`, `LIKE`, period elements, `SYSTEM VERSIONING`, `ON COMMIT`
+
+`CreateTableStatement` gained `Under`, `Like`, `Periods`, `WithSystemVersioning` and `OnCommit`. `<table element>` is now `Choice<ColumnDefinition, TablePeriodDefinition, TableConstraintDefinition, (Expression * LikeOption list)>`, so columns, periods, constraints and a `<like clause>` share the element list.
+
+- **Trade-off:** `pTimePeriodSpecification` / `pTablePeriodDefinition` moved above `pCreateTableStatement` so `<table period definition>` can be a table element; `pAddSystemTimePeriodColumnList` (11.27) stayed put because it only depends on `pColumnDefinition`.
+- **Trade-off:** `WITH SYSTEM VERSIONING` and `ON COMMIT ... ROWS` are `attempt`ed suffixes, because `WITH` also starts `<with or without data>` and `ON` is a join keyword.
+- **Trade-off:** The `<like option>` keywords are `INCLUDING` / `EXCLUDING` + `IDENTITY` / `DEFAULTS` / `GENERATED`. Only `IDENTITY` is reserved; `LIKE` is reserved, so `pColumnDefinition` can never swallow a `<like clause>`.
+- **Not modelled:** `<typed table element list>` (`OF <UDT> ( <table element>... )`) and `<view element list>` (11.32) remain unsupported.
+
+## `<with or without data>` is mandatory (11.3)
+
+`<as subquery clause> ::= [ ( <column name list> ) ] AS <table subquery> <with or without data>` — the grammar's `<with or without data>` has no brackets, so `pAsSubquery` now requires `WITH DATA` or `WITH NO DATA`, and `CreateTableStatement.WithData` is always `Some` when `AsQuery` is `Some`.
+
+- **Trade-off:** Most dialects allow the clause to be omitted, so this is deliberate grammar-faithful strictness (the same choice as the 11.23/11.26 `<drop behavior>`); `CREATE TABLE t AS SELECT 1` no longer parses.
+
+## `CREATE [ RECURSIVE ] VIEW` and the `<subview clause>` (11.32)
+
+`CreateViewStatement` gained `IsRecursive` and `Under`, and `pViewSpecification`'s referenceable branch is `OF <path-resolved user-defined type name> [ UNDER <table name> ]`.
+
+- **Trade-off:** `RECURSIVE` is a reserved word, so `opt (pKeyword "RECURSIVE")` cannot collide with a view named `recursive`.
+
+## `<parameter type>` and `<returns type>` (11.60)
+
+`ParameterDeclaration.DataType` became `ParameterType = DataTypeParameter of DataType * bool | GenericTableParameter of PassThroughOption option * GenericTableSemantics option | DescriptorParameter`, and `CreateRoutine.Returns` became `ReturnsType option` (`ReturnsData of ReturnsDataType | ReturnsTable of TableFunctionColumn list option | ReturnsOnlyPassThrough`), so `<returns table type>`, `<result cast>` and `<locator indication>` are representable. `pParameterDeclaration` tries `<parameter mode> <name> <parameter type>` first and backtracks, which is what makes `IN mytype` (an anonymous parameter whose type is a UDT) parse.
+
+- **Trade-off:** `<generic table parameter type>` / `<descriptor parameter type>` are tried **before** `<data type>` even though the grammar lists `<data type>` first, because `DESCRIPTOR` is a non-reserved word and `pDataType`'s user-defined-type branch would otherwise consume `d DESCRIPTOR` as a parameter named `d` of UDT type `DESCRIPTOR`. `TABLE` is reserved, so only `DESCRIPTOR` is affected.
+- **Trade-off:** `<returns data type> [ <result cast> ]` is one record because `<result cast>` is a suffix of the data type rather than an alternative of `<returns type>`; `CastFrom` is `(DataType * bool) option`, where the bool is the `<result cast from type>`'s `AS LOCATOR`.
+- **Not modelled:** `<method specification designator>` (`CREATE METHOD ...`), `<dispatch clause>` (`STATIC DISPATCH`), `<rights clause>` (`SQL SECURITY INVOKER | DEFINER`), the `<external body reference>` extras (`<parameter style clause>`, `<transform group specification>`, `<external security clause>`), `<polymorphic table function body>` and `<descriptor argument>`.
+- **Not tightened:** `<parameter default>` still accepts a general `pExpression` alongside `<descriptor value constructor>`; the grammar's `<contextually typed value specification>` alternative would need the same treatment as `<default option>`.

@@ -1059,7 +1059,46 @@ and IdentitySpec =
     { IsAlways: bool
       Options: SequenceOption list }
 
-// 11.4 <column definition> ::= <column name> <data type> [ <default clause> ] [ <column constraint definition>... ] [ <collate clause> ]
+// 11.4 <column constraint> ::= NOT NULL | <unique specification>
+//     | <references specification> | <check constraint definition>
+// (the <default clause> is not a column constraint — it is a separate clause of
+//  <column definition>, so it is modelled by ColumnDefinition.DefaultValue instead;
+//  a bare NULL is also not a <column constraint> in SQL-2016)
+and ColumnConstraintKind =
+    | NotNull
+    | PrimaryKey
+    | Unique
+    | References of ForeignKeyConstraint
+    | Check of Expression
+
+// 11.4 <column constraint definition> ::=
+//     [ <constraint name definition> ] <column constraint> [ <constraint characteristics> ]
+and ColumnConstraint =
+    { Name: Expression option
+      Kind: ColumnConstraintKind
+      Characteristics: ConstraintCharacteristics }
+
+// 11.4 <system time period start column specification> ::= GENERATED ALWAYS AS ROW START
+// 11.4 <system time period end column specification>   ::= GENERATED ALWAYS AS ROW END
+and SystemTimePeriodKind =
+    | RowStart
+    | RowEnd
+
+// 11.4 the single optional clause that may follow the column's data type:
+//     <default clause> | <identity column specification> | <generation clause>
+//     | <system time period start column specification> | <system time period end column specification>
+and ColumnGeneration =
+    | IdentityColumn of IdentitySpec
+    // 11.4 <generation clause> ::= GENERATED ALWAYS AS ( <value expression> )
+    | GeneratedColumn of Expression
+    | SystemTimePeriodColumn of SystemTimePeriodKind
+
+// 11.4 <column definition> ::= <column name> [ <data type or domain name> ]
+//       [ <default clause> | <identity column specification> | <generation clause>
+//       | <system time period start column specification> | <system time period end column specification> ]
+//       [ <column constraint definition>... ] [ <collate clause> ]
+// IsNullable / IsPrimaryKey / IsUnique / References / Check are convenience accessors
+// derived from Constraints (the <column constraint definition> list).
 and ColumnDefinition =
     { Name: Expression
       DataType: DataType
@@ -1069,7 +1108,14 @@ and ColumnDefinition =
       IsUnique: bool
       References: ForeignKeyConstraint option
       Check: Expression option
-      Identity: IdentitySpec option }
+      Identity: IdentitySpec option
+      // 11.4 <generation clause>
+      Generation: Expression option
+      // 11.4 <system time period start|end column specification>
+      SystemTimePeriod: SystemTimePeriodKind option
+      // 10.7 <collate clause> ::= COLLATE <collation name>
+      Collation: Expression option
+      Constraints: ColumnConstraint list }
 
 // 11.6 <table constraint definition> ::= [ <constraint name definition> ] <table constraint>
 // 11.6 <table constraint> ::= <unique constraint definition> | <referential constraint definition> | <check constraint definition>
@@ -1079,28 +1125,66 @@ and TableConstraint =
     | ForeignKey of ForeignKeyConstraint
     | Check of Expression option * Expression
 
-// 11.3 <table definition> ::= CREATE [ <table scope> ] TABLE <table name> <table contents source> [ <typed table clause> ]
+// 11.6 <table constraint definition> ::=
+//     [ <constraint name definition> ] <table constraint> [ <constraint characteristics> ]
+and TableConstraintDefinition =
+    { Constraint: TableConstraint
+      Characteristics: ConstraintCharacteristics }
+
+// 11.3 <like option> ::= <identity option> | <column default option> | <generation option>
+// 11.3 <identity option> ::= INCLUDING IDENTITY | EXCLUDING IDENTITY
+// 11.3 <column default option> ::= INCLUDING DEFAULTS | EXCLUDING DEFAULTS
+// 11.3 <generation option> ::= INCLUDING GENERATED | EXCLUDING GENERATED
+and LikeOption =
+    | IncludingIdentity
+    | ExcludingIdentity
+    | IncludingDefaults
+    | ExcludingDefaults
+    | IncludingGenerated
+    | ExcludingGenerated
+
+// 11.3 <table definition> ::= CREATE [ <table scope> ] TABLE <table name> <table contents source>
+//       [ WITH <system versioning clause> ] [ ON COMMIT <table commit action> ROWS ]
+// 11.3 <table contents source> ::= <table element list> | <typed table clause> | <as subquery clause>
 and CreateTableStatement =
     { Table: Expression
       TableScope: TableScope option
       Columns: ColumnDefinition list
-      Constraints: TableConstraint list
+      Constraints: TableConstraintDefinition list
       AsQuery: Query option
       AsColumns: Expression list option
+      // <with or without data>: None = the <as subquery clause> is absent,
+      // Some true = WITH DATA, Some false = WITH NO DATA
       WithData: bool option
-      // 11.3 <typed table clause> ::= OF <UDT name> [ UNDER <supertable> ]
-      OfType: Expression option }
+      // 11.3 <typed table clause> ::= OF <UDT name> [ <subtable clause> ]
+      OfType: Expression option
+      // 11.3 <subtable clause> ::= UNDER <supertable clause>
+      Under: Expression option
+      // 11.3 <table element> also allows <like clause> ::= LIKE <table name> [ <like option>... ]
+      Like: (Expression * LikeOption list) option
+      // 11.3 <system versioning clause> ::= SYSTEM VERSIONING
+      WithSystemVersioning: bool
+      // 11.3 ON COMMIT <table commit action> ROWS
+      OnCommit: TableCommitAction option
+      // 11.3 <table element> also allows <table period definition>
+      Periods: TablePeriodDefinition list }
 
-// 11.32 <view definition> ::= CREATE VIEW <table name> [ <view column list> ] [ <referenceable view specification> ] AS <query expression> [ <view check option> ]
+// 11.32 <view definition> ::= CREATE [ RECURSIVE ] VIEW <table name> <view specification>
+//       AS <query expression> [ WITH [ <levels clause> ] CHECK OPTION ]
 and CreateViewStatement =
     { Name: Expression
+      // 11.32 CREATE [ RECURSIVE ] VIEW
+      IsRecursive: bool
       Columns: Expression list option
       Query: Query
       // 11.32 WITH [ CASCADED | LOCAL ] CHECK OPTION
       // (Some true = CASCADED, Some false = LOCAL, None = absent)
       CheckOption: bool option
-      // 11.32 <referenceable view specification> ::= OF <UDT name> [ UNDER <supertable> ]
-      OfType: Expression option }
+      // 11.32 <referenceable view specification> ::=
+      //     OF <path-resolved user-defined type name> [ <subview clause> ] [ <view element list> ]
+      OfType: Expression option
+      // 11.32 <subview clause> ::= UNDER <table name>
+      Under: Expression option }
 
 // 11.31 <drop table statement> / 11.33 <drop view statement> / 11.50 <drop trigger statement> etc. — unified DROP
 and DropStatement =
@@ -1174,7 +1258,8 @@ and AlterTableAction =
     // 11.23 <drop column definition> ::= DROP [ COLUMN ] <column name> <drop behavior> — true = CASCADE
     | DropColumn of Expression * bool
     | AlterColumn of Expression * ColumnAlteration
-    | AddConstraint of TableConstraint
+    // 11.24 <add table constraint definition> ::= ADD <table constraint definition>
+    | AddConstraint of TableConstraintDefinition
     // 11.25 <alter table constraint definition> ::= ALTER CONSTRAINT <constraint name> <constraint enforcement>
     // true = ENFORCED, false = NOT ENFORCED
     | AlterConstraint of Expression * bool
@@ -1197,12 +1282,36 @@ and AlterTableStatement =
     { Table: Expression
       Action: AlterTableAction }
 
+// 10.6 <routine type> ::= ROUTINE | FUNCTION | PROCEDURE
+//     | [ INSTANCE | STATIC | CONSTRUCTOR ] METHOD
+and RoutineType =
+    | Routine
+    | Function
+    | Procedure
+    | Method of MethodKind option
+
+// 10.6 <specific routine designator> ::=
+//       SPECIFIC <routine type> <specific name>
+//     | <routine type> <member name> [ FOR <schema-resolved user-defined type name> ]
+// 10.6 <member name> ::= <member name alternatives> [ <data type list> ]
+// 10.6 <data type list> ::= ( [ <data type> [ { <comma> <data type> }... ] ] )
+// IsSpecific: true for the SPECIFIC alternative.
+// RoutineType: None when the <routine type> is absent — the implementation also
+//   accepts a bare <schema qualified routine name> (e.g. `ALTER ROUTINE add`).
+// DataTypeList: None = the optional <data type list> is absent, Some [] = `( )`.
+and SpecificRoutineDesignator =
+    { IsSpecific: bool
+      RoutineType: RoutineType option
+      Name: Expression
+      DataTypeList: DataType list option
+      ForType: Expression option }
+
 // 12.3 <action> SELECT form: bare SELECT | SELECT ( <privilege column list> )
 // | SELECT ( <privilege method list> ). The column-list and method-list forms are
 // distinguished in the AST (grammar rules <privilege column list> vs <privilege method list>).
 and PrivilegeSelectTarget =
     | PrivilegeColumns of Expression list
-    | PrivilegeMethods of Expression list
+    | PrivilegeMethods of SpecificRoutineDesignator list
 
 // 12.3 <action> / <privileges> — SELECT | INSERT | UPDATE | DELETE | REFERENCES | USAGE | TRIGGER | UNDER | EXECUTE
 and PrivilegeAction =
@@ -1295,10 +1404,13 @@ and DomainAlteration =
     | AddConstraint of DomainConstraint
     | DropConstraint of Expression
 
-// 11.65 <ordering category> ::= RELATIVE WITH <relative ordering> | MAP WITH <map ordering> | STATE [ WITH <state ordering> ]
+// 11.65 <ordering category> ::= RELATIVE WITH <relative function specification>
+//     | MAP WITH <map function specification> | STATE [ <specific name> ]
+// (<relative function specification> / <map function specification> are
+//  <specific routine designator>s — see 10.6)
 and OrderingCategory =
-    | Relative of Expression
-    | Map of Expression
+    | Relative of SpecificRoutineDesignator
+    | Map of SpecificRoutineDesignator
     | State of Expression option
 
 // 11.65 <ordering form> ::= EQUALS ONLY BY <ordering category> | ORDER FULL BY <ordering category>
@@ -1306,10 +1418,11 @@ and OrderingForm =
     | EqualsOnlyBy of OrderingCategory
     | OrderFullBy of OrderingCategory
 
-// 11.67 <transform element> ::= TO SQL WITH <to sql> | FROM SQL WITH <from sql>
+// 11.67 <transform element> ::= TO SQL WITH <specific routine designator>
+//     | FROM SQL WITH <specific routine designator>
 and TransformElement =
-    | ToSql of Expression
-    | FromSql of Expression
+    | ToSql of SpecificRoutineDesignator
+    | FromSql of SpecificRoutineDesignator
 
 // 11.67 <transform group> ::= <group name> <transform element> [ <transform element> ]
 and TransformGroup =
@@ -1342,11 +1455,58 @@ and ParameterMode =
     | Out
     | InOut
 
-// 11.60 <SQL parameter declaration>
+// 11.60 <pass through option> ::= PASS THROUGH | NO PASS THROUGH
+and PassThroughOption =
+    | PassThrough
+    | NoPassThrough
+
+// 11.60 <generic table pruning> ::= PRUNE ON EMPTY | KEEP ON EMPTY
+and GenericTablePruning =
+    | PruneOnEmpty
+    | KeepOnEmpty
+
+// 11.60 <generic table semantics> ::= WITH ROW SEMANTICS
+//     | WITH SET SEMANTICS [ <generic table pruning> ]
+and GenericTableSemantics =
+    | RowSemantics
+    | SetSemantics of GenericTablePruning option
+
+// 11.60 <parameter type> ::= <data type> [ <locator indication> ]
+//     | <generic table parameter type>
+//     | <descriptor parameter type>
+// 11.60 <generic table parameter type> ::= TABLE [ <pass through option> ] [ <generic table semantics> ]
+// 11.60 <descriptor parameter type> ::= DESCRIPTOR
+// The bool carried by DataTypeParameter is true when <locator indication> (AS LOCATOR) is present.
+and ParameterType =
+    | DataTypeParameter of DataType * bool
+    | GenericTableParameter of PassThroughOption option * GenericTableSemantics option
+    | DescriptorParameter
+
+// 11.60 <table function column list element> ::= <column name> <data type>
+and TableFunctionColumn =
+    { Name: Expression; DataType: DataType }
+
+// 11.60 <returns data type> ::= <data type> [ <locator indication> ]
+// 11.60 <result cast> ::= CAST FROM <result cast from type>
+and ReturnsDataType =
+    { DataType: DataType
+      AsLocator: bool
+      CastFrom: (DataType * bool) option }
+
+// 11.60 <returns type> ::= <returns data type> [ <result cast> ] | <returns table type>
+// 11.60 <returns table type> ::= TABLE [ <table function column list> ] | ONLY PASS THROUGH
+// ReturnsTable None = `RETURNS TABLE` without a <table function column list>.
+and ReturnsType =
+    | ReturnsData of ReturnsDataType
+    | ReturnsTable of TableFunctionColumn list option
+    | ReturnsOnlyPassThrough
+
+// 11.60 <SQL parameter declaration> ::= [ <parameter mode> ] [ <SQL parameter name> ]
+//     <parameter type> [ RESULT ] [ DEFAULT <parameter default> ]
 and ParameterDeclaration =
     { Mode: ParameterMode option
       Name: Expression option
-      DataType: DataType
+      ParameterType: ParameterType
       IsResult: bool
       Default: Expression option }
 
@@ -1379,13 +1539,14 @@ and RoutineBody =
 and CreateRoutine =
     { Name: Expression
       Parameters: ParameterDeclaration list
-      Returns: DataType option
+      // 11.60 <returns clause> — None for a procedure
+      Returns: ReturnsType option
       Characteristics: RoutineCharacteristic list
       Body: RoutineBody }
 
 // 11.61 <alter routine statement>
 and AlterRoutineStatement =
-    { Routine: Expression
+    { Routine: SpecificRoutineDesignator
       Characteristics: RoutineCharacteristic list }
 
 // 11.49 <trigger action time> ::= BEFORE | AFTER | INSTEAD OF
@@ -1548,7 +1709,7 @@ and TableCommitAction =
 and TemporaryTableDeclarationStatement =
     { Name: Expression
       Columns: ColumnDefinition list
-      Constraints: TableConstraint list
+      Constraints: TableConstraintDefinition list
       OnCommit: TableCommitAction option }
 
 // 5.4 <scope option> ::= GLOBAL | LOCAL
@@ -1579,7 +1740,7 @@ and AllocateExtendedDynamicCursorStatement =
 //     FOR PROCEDURE <specific routine designator>
 and AllocateReceivedCursorStatement =
     { Name: Expression
-      Routine: Expression }
+      Routine: SpecificRoutineDesignator }
 
 // 14.5 <fetch orientation>
 and FetchOrientation =
@@ -1699,11 +1860,11 @@ and StatementKind =
     // 11.41 <character set definition> ::= CREATE CHARACTER SET ...
     | CreateCharacterSet of Expression * Expression * Expression option
     // 11.45 <transliteration definition> ::= CREATE TRANSLITERATION ...
-    | CreateTransliteration of Expression * Expression * Expression * Expression
+    | CreateTransliteration of Expression * Expression * Expression * SpecificRoutineDesignator
     // 11.47 <assertion definition> ::= CREATE ASSERTION ...
     | CreateAssertion of Expression * Expression * ConstraintCharacteristics
     // 11.63 <user-defined cast definition> ::= CREATE CAST ...
-    | CreateCast of DataType * DataType * Expression * bool
+    | CreateCast of DataType * DataType * SpecificRoutineDesignator * bool
     // 11.65 <user-defined ordering definition> ::= CREATE ORDERING ...
     | CreateOrdering of Expression * OrderingForm
     // 11.67 <transform definition> ::= CREATE TRANSFORM ...

@@ -227,7 +227,7 @@ let ``ALLOCATE EXTENDED DYNAMIC CURSOR with dynamic names verification`` () =
 let ``ALLOCATE RECEIVED CURSOR verification`` () =
     match parse "ALLOCATE c CURSOR FOR PROCEDURE p" with
     | AllocateReceivedCursor ar ->
-        match ar.Name.Kind, ar.Routine.Kind with
+        match ar.Name.Kind, ar.Routine.Name.Kind with
         | Identifier "C", Identifier "P" -> ()
         | _ -> Assert.Fail(sprintf "Unexpected AllocateReceivedCursor %A" ar)
     | res -> Assert.Fail(sprintf "Expected AllocateReceivedCursor, got %A" res)
@@ -245,8 +245,8 @@ let ``ALLOCATE RECEIVED CURSOR without CURSOR keyword verification`` () =
 let ``ALLOCATE RECEIVED CURSOR with specific routine designator verification`` () =
     match parse "ALLOCATE c CURSOR FOR PROCEDURE SPECIFIC FUNCTION f_spec" with
     | AllocateReceivedCursor ar ->
-        match ar.Name.Kind, ar.Routine.Kind with
-        | Identifier "C", Identifier "F_SPEC" -> ()
+        match ar.Name.Kind, ar.Routine.IsSpecific, ar.Routine.RoutineType, ar.Routine.Name.Kind with
+        | Identifier "C", true, Some RoutineType.Function, Identifier "F_SPEC" -> ()
         | _ -> Assert.Fail(sprintf "Unexpected AllocateReceivedCursor SPECIFIC %A" ar)
     | res -> Assert.Fail(sprintf "Expected AllocateReceivedCursor SPECIFIC, got %A" res)
 

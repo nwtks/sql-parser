@@ -214,7 +214,8 @@ let ``Temporary table declaration without ON COMMIT verification`` () =
 let ``Temporary table declaration with table constraint verification`` () =
     match parse "DECLARE LOCAL TEMPORARY TABLE t (a INT, PRIMARY KEY (a)) ON COMMIT DELETE ROWS" with
     | DeclareTemporaryTable { Columns = [ _ ]
-                              Constraints = [ PrimaryKey(None, [ { Kind = Identifier "A" } ]) ]
+                              Constraints = [ { Constraint = TableConstraint.PrimaryKey(None,
+                                                                                        [ { Kind = Identifier "A" } ]) } ]
                               OnCommit = Some DeleteOnCommit } -> ()
     | res -> Assert.Fail(sprintf "Expected DeclareTemporaryTable, got %A" res)
 

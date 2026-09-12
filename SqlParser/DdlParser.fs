@@ -6,14 +6,58 @@ open SqlParser.ExpressionParser
 open SqlParser.Types
 
 module DdlParser =
-    type ColumnConstraintKind =
-        | NotNull
-        | Null
-        | PrimaryKey
-        | Unique
-        | References of ForeignKeyConstraint
-        | Check of Expression
-        | Default of Expression
+    // 10.8 <constraint enforcement> ::= [ NOT ] ENFORCED   (true = ENFORCED, false = NOT ENFORCED)
+    // Also used by 11.25 <alter table constraint definition>, and by the
+    // <column constraint definition> (11.4) / <table constraint definition> (11.6).
+    // It is defined at the top of the module so both can reuse it.
+    let pConstraintEnforcement: Parser<bool, unit> =
+        attempt (pKeyword "NOT" >>. pKeyword "ENFORCED" >>% false)
+        <|> (pKeyword "ENFORCED" >>% true)
+
+    // 10.8 <constraint characteristics> ::=
+    //     <constraint check time> [ [ NOT ] DEFERRABLE ] [ <constraint enforcement> ]
+    //   | [ [ NOT ] DEFERRABLE ] <constraint check time> [ <constraint enforcement> ]
+    //   | <constraint enforcement>
+    let pConstraintCharacteristics: Parser<ConstraintCharacteristics, unit> =
+        // 10.8 <constraint check time> ::= INITIALLY DEFERRED | INITIALLY IMMEDIATE
+        // NOTE: both alternatives are parenthesized — `<|>` binds tighter than `>>.`/`>>%`,
+        // so an unparenthesized `INITIALLY >>. DEFERRED >>% true <|> (...)` would group as
+        // `INITIALLY >>. (DEFERRED >>% (true <|> ...))` and never try IMMEDIATE.
+        let pCheckTime: Parser<bool, unit> =
+            attempt (pKeyword "INITIALLY" >>. pKeyword "DEFERRED" >>% true)
+            <|> (pKeyword "INITIALLY" >>. pKeyword "IMMEDIATE" >>% false)
+
+        // 10.8 <constraint deferrability> ::= [ NOT ] DEFERRABLE
+        let pDeferrable: Parser<bool, unit> =
+            attempt (pKeyword "NOT" >>. pKeyword "DEFERRABLE" >>% false)
+            <|> (pKeyword "DEFERRABLE" >>% true)
+
+        // 10.8 <constraint enforcement> ::= [ NOT ] ENFORCED — shared with 11.25
+        let pEnforced = pConstraintEnforcement
+
+        let mk (initiallyDeferred: bool option) (deferrable: bool option) (enforced: bool option) =
+            { InitiallyDeferred = initiallyDeferred
+              Deferrable = deferrable
+              Enforced = enforced }
+
+        choice
+            [ // <check time> [ <deferrability> ] [ <enforcement> ]
+              attempt (
+                  pCheckTime .>>. opt pDeferrable .>>. opt pEnforced
+                  |>> fun ((ct, d), e) -> mk (Some ct) d e
+              )
+              // [ <deferrability> ] [ <check time> ] [ <enforcement> ]
+              // — only the deferrability is required, so a bare `[ NOT ] DEFERRABLE`
+              // is valid and any following keyword (e.g. a domain's COLLATE clause)
+              // is left for the enclosing production.
+              attempt (
+                  pDeferrable .>>. opt pCheckTime .>>. opt pEnforced
+                  |>> fun ((d, ct), e) -> mk ct (Some d) e
+              )
+              // <enforcement> alone
+              attempt (pEnforced |>> fun e -> mk None None (Some e))
+              // <constraint characteristics> is optional in its enclosing production
+              preturn (mk None None None) ]
 
     // 11.8 <referential action> ::= CASCADE | SET NULL | SET DEFAULT | RESTRICT | NO ACTION
     let pReferentialAction =
@@ -39,34 +83,84 @@ module DdlParser =
         )
         |>> fun acts -> List.tryPick fst acts, List.tryPick snd acts
 
-    // 11.4 <column constraint definition> — NOT NULL | NULL | PRIMARY KEY | UNIQUE | REFERENCES <table> | CHECK ( <search condition> ) | DEFAULT <value expression>
+    // 11.4 <column constraint definition> ::=
+    //     [ <constraint name definition> ] <column constraint> [ <constraint characteristics> ]
+    // 11.4 <column constraint> ::= NOT NULL | <unique specification>
+    //     | <references specification> | <check constraint definition>
+    // (the <default clause> is NOT a column constraint — see pDefaultClause below)
     let pColumnConstraint =
-        choice
-            [ pKeyword "NOT" >>. pKeyword "NULL" >>% NotNull
-              pKeyword "NULL" >>% Null
-              pKeyword "PRIMARY" >>. pKeyword "KEY" >>% PrimaryKey
-              pKeyword "UNIQUE" >>% Unique
-              attempt (
-                  pKeyword "REFERENCES" >>. pIdentifierExpr
-                  .>>. opt (
-                      between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
+        let pName = opt (pKeyword "CONSTRAINT" >>. pIdentifierExpr)
+
+        let pKind =
+            choice
+                [ attempt (pKeyword "NOT" >>. pKeyword "NULL" >>% ColumnConstraintKind.NotNull)
+                  attempt (pKeyword "PRIMARY" >>. pKeyword "KEY" >>% ColumnConstraintKind.PrimaryKey)
+                  attempt (pKeyword "UNIQUE" >>% ColumnConstraintKind.Unique)
+                  attempt (
+                      pKeyword "REFERENCES" >>. pIdentifierExpr
+                      .>>. opt (
+                          between
+                              (token (pstring "("))
+                              (token (pstring ")"))
+                              (sepBy1 pIdentifierExpr (token (pstring ",")))
+                      )
+                      .>>. pReferentialTriggeredAction
+                      |>> fun ((table, refCols), (onUpd, onDel)) ->
+                          ColumnConstraintKind.References
+                              { Name = None
+                                Columns = []
+                                Table = table
+                                RefColumns = refCols
+                                OnUpdate = onUpd
+                                OnDelete = onDel }
                   )
-                  .>>. pReferentialTriggeredAction
-                  |>> fun ((table, refCols), (onUpd, onDel)) ->
-                      References
-                          { Name = None
-                            Columns = []
-                            Table = table
-                            RefColumns = refCols
-                            OnUpdate = onUpd
-                            OnDelete = onDel }
-              )
-              attempt (
-                  pKeyword "CHECK"
-                  >>. between (token (pstring "(")) (token (pstring ")")) pExpression
-                  |>> Check
-              )
-              attempt (pKeyword "DEFAULT" >>. pExpression |>> Default) ]
+                  attempt (
+                      pKeyword "CHECK"
+                      >>. between (token (pstring "(")) (token (pstring ")")) pExpression
+                      |>> ColumnConstraintKind.Check
+                  ) ]
+
+        pName .>>. pKind .>>. pConstraintCharacteristics
+        |>> fun ((name, kind), characteristics) ->
+            { Name = name
+              Kind = kind
+              Characteristics = characteristics }
+
+    // 11.5 <default option> ::= <literal> | <datetime value function> | USER
+    //     | CURRENT_USER | CURRENT_ROLE | SESSION_USER | SYSTEM_USER | CURRENT_CATALOG
+    //     | CURRENT_SCHEMA | CURRENT_PATH | <implicitly typed value specification>
+    // NOTE: deliberately NOT `pGeneralValueSpecification` — that also accepts `VALUE`,
+    // `?` / `:name` and `COLLATION FOR (...)`, none of which are <default option>s.
+    let pDefaultOption =
+        // 11.5 <implicitly typed value specification> ::= <null specification> | <empty specification>
+        // (<null specification> is covered by pLiteralExpr; <empty specification> is
+        //  ARRAY[] / MULTISET[] — see 6.42 / 6.45)
+        let pEmptySpecification =
+            attempt (
+                pKeyword "ARRAY" >>. token pLeftBracket .>> token pRightBracket
+                >>% ArrayConstructor []
+            )
+            <|> (pKeyword "MULTISET" >>. token pLeftBracket .>> token pRightBracket
+                 >>% MultisetConstructor [])
+            |> withExprPosition
+
+        choice
+            [ attempt pLiteralExpr
+              // 5.3 <signed numeric literal> — pLiteralExpr only accepts the unsigned form
+              attempt (pSignedNumericLiteral |>> Number |>> Literal |> withExprPosition)
+              attempt pDateTimeValueFunction
+              attempt (pKeyword "USER" >>% User |> withExprPosition)
+              attempt (pKeyword "CURRENT_USER" >>% CurrentUser |> withExprPosition)
+              attempt (pKeyword "CURRENT_ROLE" >>% CurrentRole |> withExprPosition)
+              attempt (pKeyword "SESSION_USER" >>% SessionUser |> withExprPosition)
+              attempt (pKeyword "SYSTEM_USER" >>% SystemUser |> withExprPosition)
+              attempt (pKeyword "CURRENT_CATALOG" >>% CurrentCatalog |> withExprPosition)
+              attempt (pKeyword "CURRENT_SCHEMA" >>% CurrentSchema |> withExprPosition)
+              attempt (pKeyword "CURRENT_PATH" >>% CurrentPath |> withExprPosition)
+              attempt pEmptySpecification ]
+
+    // 11.5 <default clause> ::= DEFAULT <default option>
+    let pDefaultClause = pKeyword "DEFAULT" >>. pDefaultOption
 
     // 11.72 <basic sequence generator option> ::= <sequence generator increment by option>
     //     | <sequence generator maxvalue option> | <sequence generator minvalue option>
@@ -111,47 +205,95 @@ module DdlParser =
             { IsAlways = isAlways
               Options = Option.defaultValue [] opts }
 
-    // 11.4 <column definition> ::= <column name> <data type> [ <default clause> ] [ <column constraint definition>... ] [ <collate clause> ]
+    // 11.4 <generation clause> ::= GENERATED ALWAYS AS ( <value expression> )
+    let pGenerationClause =
+        pKeyword "GENERATED"
+        >>. pKeyword "ALWAYS"
+        >>. pKeyword "AS"
+        >>. between (token (pstring "(")) (token (pstring ")")) pExpression
+        |>> GeneratedColumn
+
+    // 11.4 <system time period start column specification> ::= GENERATED ALWAYS AS ROW START
+    // 11.4 <system time period end column specification>   ::= GENERATED ALWAYS AS ROW END
+    let pSystemTimePeriodColumn =
+        pKeyword "GENERATED"
+        >>. pKeyword "ALWAYS"
+        >>. pKeyword "AS"
+        >>. pKeyword "ROW"
+        >>. (pKeyword "START" >>% SystemTimePeriodKind.RowStart
+             <|> (pKeyword "END" >>% SystemTimePeriodKind.RowEnd))
+        |>> SystemTimePeriodColumn
+
+    // 11.4 the single optional value clause of a <column definition>:
+    //     <default clause> | <identity column specification> | <generation clause>
+    //     | <system time period start column specification> | <system time period end column specification>
+    // All three GENERATED alternatives start with `GENERATED ALWAYS AS`, so each is `attempt`ed.
+    let pColumnGeneration =
+        choice
+            [ attempt (pIdentitySpec |>> IdentityColumn)
+              attempt pGenerationClause
+              attempt pSystemTimePeriodColumn ]
+
+    // 10.7 <collate clause> ::= COLLATE <collation name>
+    let pCollateClause = pKeyword "COLLATE" >>. pQualifiedNameExpr
+
+    // 11.4 <column definition> ::= <column name> [ <data type or domain name> ]
+    //       [ <default clause> | <identity column specification> | <generation clause>
+    //       | <system time period start column specification> | <system time period end column specification> ]
+    //       [ <column constraint definition>... ] [ <collate clause> ]
     let pColumnDefinition =
         pIdentifierExpr
         .>>. pDataType
-        .>>. opt (attempt pIdentitySpec)
-        .>>. many pColumnConstraint
-        |>> fun (((name, typ), identity), cons) ->
+        .>>. opt (
+            attempt (pDefaultClause |>> Choice1Of2)
+            <|> attempt (pColumnGeneration |>> Choice2Of2)
+        )
+        .>>. many (attempt pColumnConstraint)
+        .>>. opt (attempt pCollateClause)
+        |>> fun ((((name, typ), valueClause), constraints), collation) ->
+            let defaultValue, identity, generation, systemTimePeriod =
+                match valueClause with
+                | Some(Choice1Of2 d) -> Some d, None, None, None
+                | Some(Choice2Of2(IdentityColumn spec)) -> None, Some spec, None, None
+                | Some(Choice2Of2(GeneratedColumn expr)) -> None, None, Some expr, None
+                | Some(Choice2Of2(SystemTimePeriodColumn kind)) -> None, None, None, Some kind
+                | None -> None, None, None, None
+
+            let kinds = constraints |> List.map (fun c -> c.Kind)
+
             { Name = name
               DataType = typ
               IsNullable =
-                cons
+                kinds
                 |> List.tryPick (function
-                    | NotNull -> Some false
-                    | Null -> Some true
+                    | ColumnConstraintKind.NotNull -> Some false
                     | _ -> None)
               IsPrimaryKey =
-                cons
+                kinds
                 |> List.exists (function
-                    | PrimaryKey -> true
+                    | ColumnConstraintKind.PrimaryKey -> true
                     | _ -> false)
-              DefaultValue =
-                cons
-                |> List.tryPick (function
-                    | Default e -> Some e
-                    | _ -> None)
+              DefaultValue = defaultValue
               IsUnique =
-                cons
+                kinds
                 |> List.exists (function
-                    | Unique -> true
+                    | ColumnConstraintKind.Unique -> true
                     | _ -> false)
               References =
-                cons
+                kinds
                 |> List.tryPick (function
-                    | References r -> Some r
+                    | ColumnConstraintKind.References r -> Some r
                     | _ -> None)
               Check =
-                cons
+                kinds
                 |> List.tryPick (function
-                    | Check e -> Some e
+                    | ColumnConstraintKind.Check e -> Some e
                     | _ -> None)
-              Identity = identity }
+              Identity = identity
+              Generation = generation
+              SystemTimePeriod = systemTimePeriod
+              Collation = collation
+              Constraints = constraints }
 
     // 11.8 <referential constraint definition> ::= FOREIGN KEY ( <column list> ) REFERENCES <table> [ ( <column list> ) ] [ <referential triggered action> ]
     let pForeignKeyConstraint =
@@ -171,31 +313,39 @@ module DdlParser =
               OnDelete = onDel }
             : ForeignKeyConstraint
 
-    // 11.6 <table constraint definition> ::= [ <constraint name definition> ] <table constraint> — <table constraint> ::= PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK
+    // 11.6 <table constraint definition> ::=
+    //     [ <constraint name definition> ] <table constraint> [ <constraint characteristics> ]
+    // 11.6 <table constraint> ::= PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK
     let pTableConstraint =
         let pName = opt (pKeyword "CONSTRAINT" >>. pIdentifierExpr)
 
         let pColumnList =
             between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
 
-        choice
-            [ attempt (
-                  pName .>> pKeyword "PRIMARY" .>> pKeyword "KEY" .>>. pColumnList
-                  |>> fun (n, cols) -> TableConstraint.PrimaryKey(n, cols)
-              )
-              attempt (
-                  pName .>> pKeyword "UNIQUE" .>>. pColumnList
-                  |>> fun (n, cols) -> TableConstraint.Unique(n, cols)
-              )
-              attempt (
-                  pName .>>. pForeignKeyConstraint
-                  |>> fun (n, fk) -> TableConstraint.ForeignKey { fk with Name = n }
-              )
-              attempt (
-                  pName .>> pKeyword "CHECK"
-                  .>>. between (token (pstring "(")) (token (pstring ")")) pExpression
-                  |>> fun (n, e) -> TableConstraint.Check(n, e)
-              ) ]
+        let pConstraint =
+            choice
+                [ attempt (
+                      pName .>> pKeyword "PRIMARY" .>> pKeyword "KEY" .>>. pColumnList
+                      |>> fun (n, cols) -> TableConstraint.PrimaryKey(n, cols)
+                  )
+                  attempt (
+                      pName .>> pKeyword "UNIQUE" .>>. pColumnList
+                      |>> fun (n, cols) -> TableConstraint.Unique(n, cols)
+                  )
+                  attempt (
+                      pName .>>. pForeignKeyConstraint
+                      |>> fun (n, fk) -> TableConstraint.ForeignKey { fk with Name = n }
+                  )
+                  attempt (
+                      pName .>> pKeyword "CHECK"
+                      .>>. between (token (pstring "(")) (token (pstring ")")) pExpression
+                      |>> fun (n, e) -> TableConstraint.Check(n, e)
+                  ) ]
+
+        pConstraint .>>. pConstraintCharacteristics
+        |>> fun (body, characteristics) ->
+            { Constraint = body
+              Characteristics = characteristics }
 
     // 11.72 <sequence generator definition> ::= CREATE SEQUENCE <sequence generator name> [ <sequence generator options> ]
     let pCreateSequenceStatement =
@@ -209,55 +359,126 @@ module DdlParser =
         .>>. many1 pSequenceOption
         |>> fun (name, opts) -> AlterSequence(name, opts)
 
-    // 11.3 <table definition> ::= CREATE [ <table scope> ] TABLE <table name> <table contents source> [ <typed table clause> ]
-    let pCreateTableStatement =
-        // 11.3 <table element> ::= <column definition> | <table constraint definition>
-        let pTableElement =
-            attempt (pColumnDefinition |>> Choice1Of2) <|> (pTableConstraint |>> Choice2Of2)
+    // 11.3 <system or application time period specification>
+    //     ::= PERIOD FOR SYSTEM_TIME | PERIOD FOR <application time period name>
+    let pTimePeriodSpecification =
+        attempt (
+            pKeyword "PERIOD" >>. pKeyword "FOR" >>. pKeyword "SYSTEM_TIME"
+            >>% TimePeriodSpecification.SystemTimePeriod
+        )
+        <|> (pKeyword "PERIOD" >>. pKeyword "FOR" >>. pIdentifierExpr
+             |>> TimePeriodSpecification.ApplicationTimePeriod)
 
-        // 11.3 <as subquery clause> ::= AS <query expression> [ WITH [ NO ] DATA ]
+    // 11.3 <table period definition> ::= <system or application time period specification>
+    //     <left paren> <period begin column name> <comma> <period end column name> <right paren>
+    let pTablePeriodDefinition =
+        pTimePeriodSpecification
+        .>>. between
+            (token (pstring "("))
+            (token (pstring ")"))
+            (pIdentifierExpr .>>. (token (pstring ",") >>. pIdentifierExpr))
+        |>> fun (specification, (beginColumn, endColumn)) ->
+            { TablePeriodDefinition.Specification = specification
+              BeginColumn = beginColumn
+              EndColumn = endColumn }
+
+    // 11.3 <table definition> ::= CREATE [ <table scope> ] TABLE <table name> <table contents source>
+    //       [ WITH <system versioning clause> ] [ ON COMMIT <table commit action> ROWS ]
+    // 11.3 <table contents source> ::= <table element list> | <typed table clause> | <as subquery clause>
+    let pCreateTableStatement =
+        // 11.3 <like clause> ::= LIKE <table name> [ <like option>... ]
+        // 11.3 <like option> ::= <identity option> | <column default option> | <generation option>
+        let pLikeClause =
+            let pLikeOption =
+                choice
+                    [ attempt (pKeyword "INCLUDING" >>. pKeyword "IDENTITY" >>% LikeOption.IncludingIdentity)
+                      attempt (pKeyword "EXCLUDING" >>. pKeyword "IDENTITY" >>% LikeOption.ExcludingIdentity)
+                      attempt (pKeyword "INCLUDING" >>. pKeyword "DEFAULTS" >>% LikeOption.IncludingDefaults)
+                      attempt (pKeyword "EXCLUDING" >>. pKeyword "DEFAULTS" >>% LikeOption.ExcludingDefaults)
+                      attempt (pKeyword "INCLUDING" >>. pKeyword "GENERATED" >>% LikeOption.IncludingGenerated)
+                      attempt (pKeyword "EXCLUDING" >>. pKeyword "GENERATED" >>% LikeOption.ExcludingGenerated) ]
+
+            pKeyword "LIKE" >>. pQualifiedNameExpr .>>. many pLikeOption
+
+        // 11.3 <table element> ::= <column definition> | <table period definition>
+        //     | <table constraint definition> | <like clause>
+        let pTableElement =
+            choice
+                [ attempt (pColumnDefinition |>> Choice1Of4)
+                  attempt (pTablePeriodDefinition |>> Choice2Of4)
+                  attempt (pTableConstraint |>> Choice3Of4)
+                  attempt (pLikeClause |>> Choice4Of4) ]
+
+        // 11.3 <as subquery clause> ::= [ ( <column name list> ) ] AS <table subquery> <with or without data>
+        // 11.3 <with or without data> ::= WITH NO DATA | WITH DATA
+        // The <with or without data> clause is mandatory (true = WITH DATA) — see docs/trade-off.md.
         let pAsSubquery =
             pKeyword "AS" >>. pQuery
-            .>>. opt (pKeyword "WITH" >>. opt (pKeyword "NO") .>> pKeyword "DATA" |>> Option.isNone)
-            |>> fun (q, withData) -> q, withData
+            .>>. (pKeyword "WITH" >>. opt (pKeyword "NO") .>> pKeyword "DATA" |>> Option.isNone)
 
         // 11.3 <table scope> ::= GLOBAL TEMPORARY | LOCAL TEMPORARY
         let pTableScope =
             attempt (pKeyword "GLOBAL" >>. pKeyword "TEMPORARY" >>% TableScope.Global)
             <|> (pKeyword "LOCAL" >>. pKeyword "TEMPORARY" >>% TableScope.Local)
 
-        // 11.3 <typed table clause> ::= OF <UDT name> [ UNDER <supertable> ]
-        // (the <subtable clause> is parsed and discarded; the <typed table element
-        // list> is not supported — see docs/trade-off.md)
+        // 11.3 <typed table clause> ::= OF <path-resolved user-defined type name>
+        //     [ <subtable clause> ] [ <typed table element list> ]
+        // (<typed table element list> is not supported — see docs/trade-off.md)
         let pTypedTableClause =
             pKeyword "OF" >>. pQualifiedNameExpr
             .>>. opt (pKeyword "UNDER" >>. pQualifiedNameExpr)
-            |>> fun (typ, _sub) -> typ
+
+        // 11.3 <system versioning clause> ::= SYSTEM VERSIONING
+        let pWithSystemVersioning =
+            attempt (pKeyword "WITH" >>. pKeyword "SYSTEM" >>. pKeyword "VERSIONING" >>% true)
+
+        // 11.3 <table commit action> ::= PRESERVE | DELETE
+        let pTableCommitAction =
+            attempt (pKeyword "PRESERVE" >>% TableCommitAction.PreserveOnCommit)
+            <|> (pKeyword "DELETE" >>% TableCommitAction.DeleteOnCommit)
+
+        let pOnCommit =
+            attempt (pKeyword "ON" >>. pKeyword "COMMIT" >>. pTableCommitAction .>> pKeyword "ROWS")
 
         pKeyword "CREATE" >>. opt pTableScope .>> pKeyword "TABLE"
         .>>. pQualifiedNameExpr
         .>>. (attempt (
                   between (token (pstring "(")) (token (pstring ")")) (sepBy1 pTableElement (token (pstring ",")))
-                  |>> fun elems -> elems, None, None, None
+                  |>> fun elems -> elems, None, None, None, None
               )
               <|> attempt (
                   between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
                   .>>. pAsSubquery
-                  |>> fun (cols, (q, withData)) -> [], Some cols, Some(q, withData), None
+                  |>> fun (cols, (q, withData)) -> [], Some cols, Some(q, withData), None, None
               )
-              <|> (pAsSubquery |>> fun (q, withData) -> [], None, Some(q, withData), None)
-              <|> (pTypedTableClause |>> fun typ -> [], None, None, Some typ))
-        |>> fun ((scope, name), (elems, asCols, asQuery, ofType)) ->
+              <|> (pAsSubquery |>> fun (q, withData) -> [], None, Some(q, withData), None, None)
+              <|> (pTypedTableClause
+                   |>> fun (typ, supertable) -> [], None, None, Some typ, supertable))
+        .>>. opt (attempt pWithSystemVersioning)
+        .>>. opt (attempt pOnCommit)
+        |>> fun ((((scope, name), (elems, asCols, asQuery, ofType, under)), withSystemVersioning), onCommit) ->
             let cols =
                 elems
                 |> List.choose (function
-                    | Choice1Of2 c -> Some c
+                    | Choice1Of4 c -> Some c
+                    | _ -> None)
+
+            let periods =
+                elems
+                |> List.choose (function
+                    | Choice2Of4 p -> Some p
                     | _ -> None)
 
             let cons =
                 elems
                 |> List.choose (function
-                    | Choice2Of2 c -> Some c
+                    | Choice3Of4 c -> Some c
+                    | _ -> None)
+
+            let like =
+                elems
+                |> List.tryPick (function
+                    | Choice4Of4 l -> Some l
                     | _ -> None)
 
             { Table = name
@@ -266,8 +487,13 @@ module DdlParser =
               Constraints = cons
               AsQuery = asQuery |> Option.map fst
               AsColumns = asCols
-              WithData = asQuery |> Option.bind snd
-              OfType = ofType }
+              WithData = asQuery |> Option.map snd
+              OfType = ofType
+              Under = under
+              Like = like
+              WithSystemVersioning = Option.defaultValue false withSystemVersioning
+              OnCommit = onCommit
+              Periods = periods }
             |> CreateTable
 
     // 11.32 <levels clause> ::= CASCADED | LOCAL   (default is CASCADED)
@@ -278,36 +504,46 @@ module DdlParser =
         .>> pKeyword "OPTION"
         |>> Option.defaultValue true
 
-    // 11.32 <view definition> ::= CREATE VIEW <table name> [ <view column list> ] [ <referenceable view specification> ] AS <query expression> [ <view check option> ]
+    // 11.32 <view definition> ::= CREATE [ RECURSIVE ] VIEW <table name> <view specification>
+    //       AS <query expression> [ WITH [ <levels clause> ] CHECK OPTION ]
     let pCreateViewStatement =
         // 11.32 <view specification> ::= <regular view specification> | <referenceable view specification>
-        // (regular = column list; referenceable = OF <UDT name> — the <subview clause>
-        // and <view element list> are not captured — see docs/trade-off.md)
+        // 11.32 <regular view specification> ::= [ ( <view column list> ) ]
+        // 11.32 <referenceable view specification> ::= OF <path-resolved user-defined type name>
+        //     [ <subview clause> ] [ <view element list> ]
+        // (<view element list> is not supported — see docs/trade-off.md)
         let pViewSpecification =
             choice
                 [ attempt (
                       between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
                       |>> Choice1Of2
                   )
-                  attempt (pKeyword "OF" >>. pQualifiedNameExpr |>> Choice2Of2) ]
+                  attempt (
+                      pKeyword "OF" >>. pQualifiedNameExpr
+                      .>>. opt (pKeyword "UNDER" >>. pQualifiedNameExpr)
+                      |>> Choice2Of2
+                  ) ]
 
-        pKeyword "CREATE" >>. pKeyword "VIEW" >>. pQualifiedNameExpr
+        pKeyword "CREATE" >>. opt (pKeyword "RECURSIVE" >>% true) .>> pKeyword "VIEW"
+        .>>. pQualifiedNameExpr
         .>>. opt pViewSpecification
         .>> pKeyword "AS"
         .>>. pQuery
         .>>. opt (attempt pCheckOption)
-        |>> fun (((name, spec), query), checkOpt) ->
-            let cols, ofType =
+        |>> fun ((((isRecursive, name), spec), query), checkOpt) ->
+            let cols, ofType, under =
                 match spec with
-                | Some(Choice1Of2 c) -> Some c, None
-                | Some(Choice2Of2 t) -> None, Some t
-                | None -> None, None
+                | Some(Choice1Of2 c) -> Some c, None, None
+                | Some(Choice2Of2(typeName, subview)) -> None, Some typeName, subview
+                | None -> None, None, None
 
             { Name = name
+              IsRecursive = Option.defaultValue false isRecursive
               Columns = cols
               Query = query
               CheckOption = checkOpt
-              OfType = ofType }
+              OfType = ofType
+              Under = under }
             |> CreateView
 
     // 12.2 <grantor> ::= CURRENT_USER | CURRENT_ROLE
@@ -326,33 +562,61 @@ module DdlParser =
     let pPrivilegeColumnList =
         between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
 
-    // 10.6 <specific routine designator> ::= SPECIFIC <routine type> <specific name> | <routine designator>
-    // (simplified: the trailing [ FOR <user-defined type name> ] clause is not captured)
-    let pRoutineType =
+    // 10.6 <routine type> ::= ROUTINE | FUNCTION | PROCEDURE
+    //     | [ INSTANCE | STATIC | CONSTRUCTOR ] METHOD
+    let pRoutineType: Parser<RoutineType, unit> =
         choice
-            [ pKeyword "ROUTINE" >>% ()
-              pKeyword "FUNCTION" >>% ()
-              pKeyword "PROCEDURE" >>% ()
+            [ pKeyword "ROUTINE" >>% RoutineType.Routine
+              pKeyword "FUNCTION" >>% RoutineType.Function
+              pKeyword "PROCEDURE" >>% RoutineType.Procedure
               attempt (
                   opt (
                       choice
-                          [ pKeyword "INSTANCE" >>% ()
-                            pKeyword "STATIC" >>% ()
-                            pKeyword "CONSTRUCTOR" >>% () ]
+                          [ pKeyword "INSTANCE" >>% MethodKind.Instance
+                            pKeyword "STATIC" >>% MethodKind.Static
+                            pKeyword "CONSTRUCTOR" >>% MethodKind.Constructor ]
                   )
-                  >>. pKeyword "METHOD"
-                  >>% ()
+                  .>>. pKeyword "METHOD"
+                  |>> fun (methodKind, _) -> RoutineType.Method methodKind
               ) ]
 
     // 10.6 <routine designator> ::= [ <routine type> ] <qualified identifier>
+    // (<object name> in 12.2 / 12.3 — kept separate from <specific routine designator>
+    //  because <object name> carries a plain name, not a designator)
     let pRoutineDesignatorWithType =
         choice [ attempt (pRoutineType >>. pQualifiedNameExpr); pQualifiedNameExpr ]
 
-    // 10.6 <specific routine designator> ::= SPECIFIC <routine type> <specific name> | <routine designator>
-    let pSpecificRoutineDesignator =
+    // 10.6 <specific routine designator> ::=
+    //       SPECIFIC <routine type> <specific name>
+    //     | <routine type> <member name> [ FOR <schema-resolved user-defined type name> ]
+    // 10.6 <member name> ::= <member name alternatives> [ <data type list> ]
+    // A bare <schema qualified routine name> is also accepted (RoutineType = None) so that
+    // callers such as `ALTER ROUTINE add` keep working — see docs/trade-off.md.
+    let pSpecificRoutineDesignator: Parser<SpecificRoutineDesignator, unit> =
+        // 10.6 <data type list> ::= ( [ <data type> [ { <comma> <data type> }... ] ] )
+        let pDataTypeList =
+            between (token (pstring "(")) (token (pstring ")")) (sepBy pDataType (token (pstring ",")))
+
+        let mk isSpecific routineType name dataTypeList forType =
+            { IsSpecific = isSpecific
+              RoutineType = routineType
+              Name = name
+              DataTypeList = dataTypeList
+              ForType = forType }
+
         choice
-            [ attempt (pKeyword "SPECIFIC" >>. pRoutineType >>. pQualifiedNameExpr)
-              attempt pRoutineDesignatorWithType ]
+            [ attempt (
+                  pKeyword "SPECIFIC" >>. pRoutineType .>>. pQualifiedNameExpr
+                  |>> fun (routineType, name) -> mk true (Some routineType) name None None
+              )
+              attempt (
+                  opt pRoutineType
+                  .>>. pQualifiedNameExpr
+                  .>>. opt (attempt pDataTypeList)
+                  .>>. opt (attempt (pKeyword "FOR" >>. pQualifiedNameExpr))
+                  |>> fun (((routineType, name), dataTypeList), forType) ->
+                      mk false routineType name dataTypeList forType
+              ) ]
 
     // 12.3 <privilege method list> ::= <specific routine designator> [ { , <specific routine designator> }... ]
     let pPrivilegeMethodList = sepBy1 pSpecificRoutineDesignator (token (pstring ","))
@@ -409,12 +673,6 @@ module DdlParser =
 
     // 11.2 <drop behavior> ::= CASCADE | RESTRICT   (true = CASCADE, false = RESTRICT)
     let pDropBehavior = pKeyword "CASCADE" >>% true <|> (pKeyword "RESTRICT" >>% false)
-
-    // 10.8 <constraint enforcement> ::= [ NOT ] ENFORCED   (true = ENFORCED, false = NOT ENFORCED)
-    // Also used by 11.25 <alter table constraint definition>.
-    let pConstraintEnforcement: Parser<bool, unit> =
-        attempt (pKeyword "NOT" >>. pKeyword "ENFORCED" >>% false)
-        <|> (pKeyword "ENFORCED" >>% true)
 
     // 12.2 <grant privilege statement> ::= GRANT <privileges> TO <grantee> [ { , <grantee> }... ]
     //     [ WITH HIERARCHY OPTION ] [ WITH GRANT OPTION ] [ GRANTED BY <grantor> ]
@@ -559,29 +817,6 @@ module DdlParser =
                   attempt (pKeyword "TYPE" >>. pQualifiedNameExpr .>>. pDropBehavior) |>> DropType ]
         |>> Drop
 
-    // 11.3 <system or application time period specification>
-    //     ::= PERIOD FOR SYSTEM_TIME | PERIOD FOR <application time period name>
-    let pTimePeriodSpecification =
-        attempt (
-            pKeyword "PERIOD" >>. pKeyword "FOR" >>. pKeyword "SYSTEM_TIME"
-            >>% TimePeriodSpecification.SystemTimePeriod
-        )
-        <|> (pKeyword "PERIOD" >>. pKeyword "FOR" >>. pIdentifierExpr
-             |>> TimePeriodSpecification.ApplicationTimePeriod)
-
-    // 11.3 <table period definition> ::= <system or application time period specification>
-    //     <left paren> <period begin column name> <comma> <period end column name> <right paren>
-    let pTablePeriodDefinition =
-        pTimePeriodSpecification
-        .>>. between
-            (token (pstring "("))
-            (token (pstring ")"))
-            (pIdentifierExpr .>>. (token (pstring ",") >>. pIdentifierExpr))
-        |>> fun (specification, (beginColumn, endColumn)) ->
-            { TablePeriodDefinition.Specification = specification
-              BeginColumn = beginColumn
-              EndColumn = endColumn }
-
     // 11.27 <add system time period column list>
     //     ::= ADD [ COLUMN ] <column definition 1> ADD [ COLUMN ] <column definition 2>
     // Both columns are required by the grammar, so this parser yields exactly two entries.
@@ -623,10 +858,7 @@ module DdlParser =
 
         let pColumnAction =
             choice
-                [ attempt (
-                      pKeyword "SET" >>. pKeyword "DEFAULT" >>. pExpression
-                      |>> ColumnAlteration.SetDefault
-                  )
+                [ attempt (pKeyword "SET" >>. pDefaultClause |>> ColumnAlteration.SetDefault)
                   attempt (pKeyword "DROP" >>. pKeyword "DEFAULT" >>% ColumnAlteration.DropDefault)
                   attempt (
                       pKeyword "SET" >>. pKeyword "NOT" >>. pKeyword "NULL"
@@ -731,51 +963,6 @@ module DdlParser =
         )
         |>> fun (table, restart) -> Truncate(table, restart)
 
-    // 10.8 <constraint characteristics> ::=
-    //     <constraint check time> [ [ NOT ] DEFERRABLE ] [ <constraint enforcement> ]
-    //   | [ [ NOT ] DEFERRABLE ] <constraint check time> [ <constraint enforcement> ]
-    //   | <constraint enforcement>
-    let pConstraintCharacteristics =
-        // 10.8 <constraint check time> ::= INITIALLY DEFERRED | INITIALLY IMMEDIATE
-        // NOTE: both alternatives are parenthesized — `<|>` binds tighter than `>>.`/`>>%`,
-        // so an unparenthesized `INITIALLY >>. DEFERRED >>% true <|> (...)` would group as
-        // `INITIALLY >>. (DEFERRED >>% (true <|> ...))` and never try IMMEDIATE.
-        let pCheckTime: Parser<bool, unit> =
-            attempt (pKeyword "INITIALLY" >>. pKeyword "DEFERRED" >>% true)
-            <|> (pKeyword "INITIALLY" >>. pKeyword "IMMEDIATE" >>% false)
-
-        // 10.8 <constraint deferrability> ::= [ NOT ] DEFERRABLE
-        let pDeferrable: Parser<bool, unit> =
-            attempt (pKeyword "NOT" >>. pKeyword "DEFERRABLE" >>% false)
-            <|> (pKeyword "DEFERRABLE" >>% true)
-
-        // 10.8 <constraint enforcement> ::= [ NOT ] ENFORCED — shared with 11.25
-        let pEnforced = pConstraintEnforcement
-
-        let mk (initiallyDeferred: bool option) (deferrable: bool option) (enforced: bool option) =
-            { InitiallyDeferred = initiallyDeferred
-              Deferrable = deferrable
-              Enforced = enforced }
-
-        choice
-            [ // <check time> [ <deferrability> ] [ <enforcement> ]
-              attempt (
-                  pCheckTime .>>. opt pDeferrable .>>. opt pEnforced
-                  |>> fun ((ct, d), e) -> mk (Some ct) d e
-              )
-              // [ <deferrability> ] [ <check time> ] [ <enforcement> ]
-              // — only the deferrability is required, so a bare `[ NOT ] DEFERRABLE`
-              // is valid and any following keyword (e.g. a domain's COLLATE clause)
-              // is left for the enclosing production.
-              attempt (
-                  pDeferrable .>>. opt pCheckTime .>>. opt pEnforced
-                  |>> fun ((d, ct), e) -> mk ct (Some d) e
-              )
-              // <enforcement> alone
-              attempt (pEnforced |>> fun e -> mk None None (Some e))
-              // <constraint characteristics> is optional in its enclosing production
-              preturn (mk None None None) ]
-
     // Forward reference to the full DDL statement set; a <schema element> is any
     // DDL statement. Wired to pDdl in SqlParser.fs (which also contains the
     // CREATE SCHEMA parser that consumes these elements).
@@ -840,7 +1027,7 @@ module DdlParser =
         pKeyword "CREATE" >>. pKeyword "DOMAIN" >>. pQualifiedNameExpr
         .>>. opt (pKeyword "AS")
         .>>. pDataType
-        .>>. opt (pKeyword "DEFAULT" >>. pExpression)
+        .>>. opt pDefaultClause
         .>>. many pDomainConstraint
         .>>. opt (pKeyword "COLLATE" >>. pQualifiedNameExpr)
         |>> fun (((((name, _), dataType), def), constraints), collation) ->
@@ -855,10 +1042,7 @@ module DdlParser =
     let pAlterDomainStatement =
         let pAction =
             choice
-                [ attempt (
-                      pKeyword "SET" >>. pKeyword "DEFAULT" >>. pExpression
-                      |>> DomainAlteration.SetDefault
-                  )
+                [ attempt (pKeyword "SET" >>. pDefaultClause |>> DomainAlteration.SetDefault)
                   attempt (pKeyword "DROP" >>. pKeyword "DEFAULT" >>% DomainAlteration.DropDefault)
                   attempt (pKeyword "ADD" >>. pDomainConstraint |>> DomainAlteration.AddConstraint)
                   attempt (
@@ -894,11 +1078,13 @@ module DdlParser =
         |>> fun (((name, cs), existing), pad) -> CreateCollation(name, cs, existing, pad)
 
     // 11.45 <transliteration definition> ::= CREATE TRANSLATION <transliteration name> FOR <source character set> TO <target character set> FROM <transliteration source>
+    // 11.45 <transliteration source> ::= <existing transliteration name> | <transliteration routine>
+    // 11.45 <transliteration routine> ::= <specific routine designator>
     let pCreateTransliterationStatement =
         pKeyword "CREATE" >>. pKeyword "TRANSLATION" >>. pQualifiedNameExpr
         .>>. (pKeyword "FOR" >>. pQualifiedNameExpr)
         .>>. (pKeyword "TO" >>. pQualifiedNameExpr)
-        .>>. (pKeyword "FROM" >>. pQualifiedNameExpr)
+        .>>. (pKeyword "FROM" >>. pSpecificRoutineDesignator)
         |>> fun (((name, source), target), trSource) -> CreateTransliteration(name, source, target, trSource)
 
     // 11.47 <assertion definition> ::= CREATE ASSERTION <constraint name> CHECK ( <search condition> ) [ <constraint characteristics> ]

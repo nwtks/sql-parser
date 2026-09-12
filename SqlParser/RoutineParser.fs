@@ -34,19 +34,78 @@ module RoutineParser =
         |>> DescriptorValueConstructor
         |> withExprPosition
 
-    // 11.60 <SQL parameter declaration> ::= [ <parameter mode> ] [ <SQL parameter name> ] <parameter type> [ RESULT ] [ DEFAULT <parameter default> ]
+    // 11.60 <locator indication> ::= AS LOCATOR
+    let pLocatorIndication = pKeyword "AS" >>. pKeyword "LOCATOR" >>% true
+
+    // 11.60 <pass through option> ::= PASS THROUGH | NO PASS THROUGH
+    let pPassThroughOption =
+        attempt (pKeyword "PASS" >>. pKeyword "THROUGH" >>% PassThroughOption.PassThrough)
+        <|> (pKeyword "NO" >>. pKeyword "PASS" >>. pKeyword "THROUGH"
+             >>% PassThroughOption.NoPassThrough)
+
+    // 11.60 <generic table pruning> ::= PRUNE ON EMPTY | KEEP ON EMPTY
+    let pGenericTablePruning =
+        attempt (
+            pKeyword "PRUNE" >>. pKeyword "ON" >>. pKeyword "EMPTY"
+            >>% GenericTablePruning.PruneOnEmpty
+        )
+        <|> (pKeyword "KEEP" >>. pKeyword "ON" >>. pKeyword "EMPTY"
+             >>% GenericTablePruning.KeepOnEmpty)
+
+    // 11.60 <generic table semantics> ::= WITH ROW SEMANTICS
+    //     | WITH SET SEMANTICS [ <generic table pruning> ]
+    let pGenericTableSemantics =
+        pKeyword "WITH"
+        >>. choice
+                [ attempt (pKeyword "ROW" >>. pKeyword "SEMANTICS" >>% GenericTableSemantics.RowSemantics)
+                  attempt (
+                      pKeyword "SET" >>. pKeyword "SEMANTICS" >>. opt (attempt pGenericTablePruning)
+                      |>> GenericTableSemantics.SetSemantics
+                  ) ]
+
+    // 11.60 <parameter type> ::= <data type> [ <locator indication> ]
+    //     | <generic table parameter type> | <descriptor parameter type>
+    // 11.60 <generic table parameter type> ::= TABLE [ <pass through option> ] [ <generic table semantics> ]
+    // NOTE: the two keyword-led alternatives are tried BEFORE <data type>, because their
+    // leading keywords would otherwise be consumed as a user-defined type name
+    // (TABLE is reserved, but DESCRIPTOR is a non-reserved keyword).
+    let pParameterType =
+        choice
+            [ attempt (
+                  pKeyword "TABLE" >>. opt (attempt pPassThroughOption)
+                  .>>. opt (attempt pGenericTableSemantics)
+                  |>> GenericTableParameter
+              )
+              attempt (pKeyword "DESCRIPTOR" >>% DescriptorParameter)
+              attempt (
+                  pDataType .>>. opt pLocatorIndication
+                  |>> fun (dataType, locator) -> DataTypeParameter(dataType, Option.isSome locator)
+              ) ]
+
+    // 11.60 <SQL parameter declaration> ::= [ <parameter mode> ] [ <SQL parameter name> ]
+    //     <parameter type> [ RESULT ] [ DEFAULT <parameter default> ]
+    // The optional <SQL parameter name> must backtrack: for `IN mytype` the identifier after
+    // the mode could be either the parameter name (followed by a type) or the type itself.
     let pParameterDeclaration =
-        opt pParameterMode
-        .>>. opt pIdentifierExpr
-        .>>. pDataType
-        .>>. opt (pKeyword "RESULT")
-        .>>. opt (pKeyword "DEFAULT" >>. (attempt pDescriptorValueConstructor <|> pExpression))
-        |>> fun ((((mode, name), dataType), isResult), defaultVal) ->
-            { Mode = mode
-              Name = name
-              DataType = dataType
-              IsResult = Option.isSome isResult
-              Default = defaultVal }
+        let pWithName: Parser<ParameterMode option * Expression option * ParameterType, unit> =
+            opt pParameterMode .>>. pIdentifierExpr .>>. pParameterType
+            |>> fun ((mode, name), paramType) -> mode, Some name, paramType
+
+        let pWithoutName: Parser<ParameterMode option * Expression option * ParameterType, unit> =
+            opt pParameterMode .>>. pParameterType
+            |>> fun (mode, paramType) -> mode, None, paramType
+
+        attempt (
+            (attempt pWithName <|> pWithoutName)
+            .>>. opt (pKeyword "RESULT")
+            .>>. opt (pKeyword "DEFAULT" >>. (attempt pDescriptorValueConstructor <|> pExpression))
+            |>> fun (((mode, name, paramType), isResult), defaultVal) ->
+                { Mode = mode
+                  Name = name
+                  ParameterType = paramType
+                  IsResult = Option.isSome isResult
+                  Default = defaultVal }
+        )
 
     // 11.60 <SQL parameter declaration list> ::= ( [ <SQL parameter declaration> [ { , <SQL parameter declaration> }... ] ] )
     let pParameterDeclarationList =
@@ -155,11 +214,50 @@ module RoutineParser =
                   Characteristics = characteristics
                   Body = body }
 
+    // 11.60 <returns clause> ::= RETURNS <returns type>
+    // 11.60 <returns data type> ::= <data type> [ <locator indication> ]
+    // 11.60 <result cast> ::= CAST FROM <result cast from type>
+    // 11.60 <returns table type> ::= TABLE [ <table function column list> ] | ONLY PASS THROUGH
+    // 11.60 <table function column list element> ::= <column name> <data type>
+    let pReturnsType =
+        let pReturnsDataType =
+            pDataType
+            .>>. opt pLocatorIndication
+            .>>. opt (
+                attempt (
+                    pKeyword "CAST" >>. pKeyword "FROM" >>. pDataType .>>. opt pLocatorIndication
+                    |>> fun (dataType, locator) -> dataType, Option.isSome locator
+                )
+            )
+            |>> fun ((dataType, locator), castFrom) ->
+                { ReturnsDataType.DataType = dataType
+                  AsLocator = Option.isSome locator
+                  CastFrom = castFrom }
+
+        let pTableFunctionColumnList =
+            between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (sepBy1
+                    (pIdentifierExpr .>>. pDataType
+                     |>> fun (name, dataType) ->
+                         { TableFunctionColumn.Name = name
+                           DataType = dataType })
+                    (token (pstring ",")))
+
+        choice
+            [ attempt (pReturnsDataType |>> ReturnsData)
+              attempt (pKeyword "TABLE" >>. opt (attempt pTableFunctionColumnList) |>> ReturnsTable)
+              attempt (
+                  pKeyword "ONLY" >>. pKeyword "PASS" >>. pKeyword "THROUGH"
+                  >>% ReturnsOnlyPassThrough
+              ) ]
+
     // 11.60 <schema function> ::= CREATE <SQL-invoked function> — <SQL-invoked function> ::= { <function specification> | <method specification designator> } <routine body>
     let pCreateFunctionStatement =
         pKeyword "CREATE" >>. pKeyword "FUNCTION" >>. pQualifiedNameExpr
         .>>. pParameterDeclarationList
-        .>>. (pKeyword "RETURNS" >>. pDataType)
+        .>>. (pKeyword "RETURNS" >>. pReturnsType)
         .>>. pRoutineCharacteristics
         .>>. pRoutineBody
         |>> fun ((((name, parameters), returns), characteristics), body) ->
