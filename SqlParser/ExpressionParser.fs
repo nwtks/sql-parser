@@ -944,14 +944,14 @@ module ExpressionParser =
               )
               attempt (
                   between
-                      (token (pstring "{"))
-                      (token (pstring "}"))
+                      (token pLeftBrace)
+                      (token pRightBrace)
                       (opt pUnsignedIntegerExpr .>> token (pstring ",") .>>. opt pUnsignedIntegerExpr)
                   .>>. opt (token (pstring "?"))
                   |>> fun ((lo, hi), q) -> RowPatternQuantifier.Brace(lo, hi, Option.isSome q)
               )
               attempt (
-                  between (token (pstring "{")) (token (pstring "}")) pUnsignedIntegerExpr
+                  between (token pLeftBrace) (token pRightBrace) pUnsignedIntegerExpr
                   |>> RowPatternQuantifier.BraceExact
               ) ]
 
@@ -959,11 +959,11 @@ module ExpressionParser =
     let pRowPatternPrimary =
         choice
             [ attempt (
-                  token (pstring "{-") >>. pRowPattern .>> token (pstring "-}")
+                  token pLeftBraceMinus >>. pRowPattern .>> token pRightMinusBrace
                   |>> RowPatternExclude
               )
-              attempt (token (pstring "^") >>% RowPatternAnchorStart)
-              attempt (token (pstring "$") >>% RowPatternAnchorEnd)
+              attempt (token pCircumflex >>% RowPatternAnchorStart)
+              attempt (token pDollarSign >>% RowPatternAnchorEnd)
               attempt (
                   pKeyword "PERMUTE"
                   >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pRowPattern (token (pstring ",")))
@@ -987,7 +987,7 @@ module ExpressionParser =
         many1 pRowPatternFactor |>> fun factors -> { Factors = factors }
 
     // 7.9 <row pattern> ::= <row pattern term> | <row pattern alternation>
-    pRowPatternRef.Value <- sepBy1 pRowPatternTerm (token (pstring "|")) |>> fun terms -> { Terms = terms }
+    pRowPatternRef.Value <- sepBy1 pRowPatternTerm (token pVerticalBar) |>> fun terms -> { Terms = terms }
 
     // 7.8 <row pattern measure definition> ::= <row pattern measure expression> AS <measure name>
     let pRowPatternMeasure =

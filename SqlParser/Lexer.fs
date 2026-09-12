@@ -375,6 +375,29 @@ module Lexer =
     // 5.1 <quote> ::= '
     let pQuote = pchar '\''
 
+    // ---- 5.1 <SQL special character> -----------------------------------------
+    // Terminal characters that have no other home. <simple Latin letter>,
+    // <digit>, <space>, <underscore>, <double quote>, <ampersand>, <apostrophe>,
+    // and the operator/punctuation terminals consumed by <value expression> /
+    // <predicate> / statement parsers are already modelled by their own parsers.
+    // <percent> and <reverse solidus> are deliberately absent: they occur only
+    // inside the embedded XQuery-regex (8.6) and SQL/JSON-path (9.38/9.39)
+    // languages, whose text is kept opaque — see docs/trade-off.md.
+    // 5.1 <left brace> ::= {
+    let pLeftBrace: Parser<char, unit> = pchar '{'
+    // 5.1 <right brace> ::= }
+    let pRightBrace: Parser<char, unit> = pchar '}'
+    // 5.1 <circumflex> ::= ^
+    let pCircumflex: Parser<char, unit> = pchar '^'
+    // 5.1 <vertical bar> ::= |
+    let pVerticalBar: Parser<char, unit> = pchar '|'
+    // 5.1 <dollar sign> ::= $
+    let pDollarSign: Parser<char, unit> = pchar '$'
+    // 5.2 <left brace minus> ::= {-
+    let pLeftBraceMinus: Parser<string, unit> = pstring "{-"
+    // 5.2 <right minus brace> ::= -}
+    let pRightMinusBrace: Parser<string, unit> = pstring "-}"
+
     // 5.2 <separator> ::= { <comment> | <white space> }...
     // 5.2 <comment> ::= <simple comment> | <bracketed comment>
     let pSeparator =

@@ -542,3 +542,14 @@ In `sql-2016-grammar.txt` the `<semicolon> ::= ;` production sits under the `5.1
 Every test file's `parse` / `parseFails` / `parseExpr` helper is `let parse (sql: string) = SqlParser.parse (sql.TrimEnd() + ";")`. The explicit `string` annotation is required — without it F# cannot infer the receiver of `.TrimEnd()` (FS0072). A test that calls `SqlParser.parse` directly must append the semicolon itself, otherwise it can pass for the wrong reason: `OFFSET without ROW or ROWS fails verification` would still succeed if the `OFFSET` rule itself broke.
 
 Because 22.1 is now enforced, `SqlParser.parse` accepts only `<directly executable statement>`s, so the helpers in `CursorTests` / `DynamicTests` / `DiagnosticsTests` / `ControlTests` use `SqlParser.parseStatement` (13.4) instead, and `DmlTests` keeps a second `parseStatement` / `parseStatementFails` pair for the positioned 20.25 / 20.27 forms. Use `parse` when the test is about a directly executable statement; use `parseStatement` otherwise.
+
+## New terminal-character parsers need an explicit type annotation (5.1)
+
+`let pLeftBrace = pchar '{'` does not compile: F#'s value restriction rejects the inferred generic type (`val pLeftBrace: Parser<char,'_a>`, because `pchar` returns a `Parser<char,'u>`). Annotate the binding, exactly as `pQuestionMark` does:
+
+```fsharp
+// 5.1 <left brace> ::= {
+let pLeftBrace: Parser<char, unit> = pchar '{'
+```
+
+The `pstring`-based terminals need `Parser<string, unit>` (`pLeftBraceMinus` / `pRightMinusBrace`, §5.2). This only bites when the parser is bound to a name — writing `token (pstring "{")` inline determines the type at the use site, which is why the row pattern parser did not need the annotation before the 5.1 block was extracted.

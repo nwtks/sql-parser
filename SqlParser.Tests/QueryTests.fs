@@ -1096,3 +1096,80 @@ let ``JSON_TABLE missing columns is rejected`` () =
 [<Fact>]
 let ``MATCH_RECOGNIZE missing DEFINE is rejected`` () =
     parseFails "SELECT * FROM t MATCH_RECOGNIZE (PATTERN (A))"
+
+[<Fact>]
+let ``MATCH_RECOGNIZE row pattern quantifiers verification`` () =
+    match parse "SELECT * FROM t MATCH_RECOGNIZE (PATTERN (A{2,3} B{2}) DEFINE A AS a > 0, B AS b > 0)" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = MatchRecognize(_, _, recog, _) } ] ->
+            match recog.Common.Pattern.Terms with
+            | [ { Factors = [ factorA; factorB ] } ] ->
+                match factorA.Primary, factorA.Quantifier with
+                | RowPatternVariable { Kind = Identifier "A" },
+                  Some(RowPatternQuantifier.Brace(Some lo, Some hi, false)) ->
+                    Assert.Equal(Literal(Number 2m), lo.Kind)
+                    Assert.Equal(Literal(Number 3m), hi.Kind)
+                | res -> Assert.Fail(sprintf "Expected A{2,3}, got %A" res)
+
+                match factorB.Primary, factorB.Quantifier with
+                | RowPatternVariable { Kind = Identifier "B" }, Some(RowPatternQuantifier.BraceExact exact) ->
+                    Assert.Equal(Literal(Number 2m), exact.Kind)
+                | res -> Assert.Fail(sprintf "Expected B{2}, got %A" res)
+            | res -> Assert.Fail(sprintf "Expected two factors, got %A" res)
+        | res -> Assert.Fail(sprintf "Expected MatchRecognize, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
+let ``MATCH_RECOGNIZE row pattern anchors verification`` () =
+    match parse "SELECT * FROM t MATCH_RECOGNIZE (PATTERN (^ A $) DEFINE A AS a > 0)" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = MatchRecognize(_, _, recog, _) } ] ->
+            match recog.Common.Pattern.Terms with
+            | [ { Factors = [ startFactor; aFactor; endFactor ] } ] ->
+                Assert.Equal(RowPatternAnchorStart, startFactor.Primary)
+
+                match aFactor.Primary with
+                | RowPatternVariable { Kind = Identifier "A" } -> ()
+                | res -> Assert.Fail(sprintf "Expected variable A, got %A" res)
+
+                Assert.Equal(RowPatternAnchorEnd, endFactor.Primary)
+            | res -> Assert.Fail(sprintf "Expected three factors, got %A" res)
+        | res -> Assert.Fail(sprintf "Expected MatchRecognize, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
+let ``MATCH_RECOGNIZE row pattern alternation verification`` () =
+    match parse "SELECT * FROM t MATCH_RECOGNIZE (PATTERN (A | B) DEFINE A AS a > 0, B AS b > 0)" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = MatchRecognize(_, _, recog, _) } ] ->
+            match recog.Common.Pattern.Terms with
+            | [ { Factors = [ factorA ] }; { Factors = [ factorB ] } ] ->
+                match factorA.Primary, factorB.Primary with
+                | RowPatternVariable { Kind = Identifier "A" }, RowPatternVariable { Kind = Identifier "B" } -> ()
+                | res -> Assert.Fail(sprintf "Expected A | B, got %A" res)
+            | res -> Assert.Fail(sprintf "Expected two terms, got %A" res)
+        | res -> Assert.Fail(sprintf "Expected MatchRecognize, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
+let ``MATCH_RECOGNIZE row pattern exclusion verification`` () =
+    match parse "SELECT * FROM t MATCH_RECOGNIZE (PATTERN (A {- B -}) DEFINE A AS a > 0, B AS b > 0)" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = MatchRecognize(_, _, recog, _) } ] ->
+            match recog.Common.Pattern.Terms with
+            | [ { Factors = [ factorA; excludeFactor ] } ] ->
+                match factorA.Primary with
+                | RowPatternVariable { Kind = Identifier "A" } -> ()
+                | res -> Assert.Fail(sprintf "Expected variable A, got %A" res)
+
+                match excludeFactor.Primary with
+                | RowPatternExclude { Terms = [ { Factors = [ { Primary = RowPatternVariable { Kind = Identifier "B" } } ] } ] } ->
+                    ()
+                | res -> Assert.Fail(sprintf "Expected exclusion of B, got %A" res)
+            | res -> Assert.Fail(sprintf "Expected two factors, got %A" res)
+        | res -> Assert.Fail(sprintf "Expected MatchRecognize, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)

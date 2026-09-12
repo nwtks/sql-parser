@@ -16,6 +16,16 @@ let testFails p s =
     | Failure _ -> ()
 
 [<Fact>]
+let ``SQL terminal characters are parsed correctly`` () =
+    Assert.Equal('{', test pLeftBrace "{")
+    Assert.Equal('}', test pRightBrace "}")
+    Assert.Equal('^', test pCircumflex "^")
+    Assert.Equal('|', test pVerticalBar "|")
+    Assert.Equal('$', test pDollarSign "$")
+    Assert.Equal("{-", test pLeftBraceMinus "{-")
+    Assert.Equal("-}", test pRightMinusBrace "-}")
+
+[<Fact>]
 let ``Regular identifiers are parsed correctly`` () =
     Assert.Equal("ID", test pIdentifier "id")
     Assert.Equal("MY_TABLE", test pIdentifier "my_table")
