@@ -35,9 +35,9 @@ The type grammar is mutually recursive (`<data type>` can be a collection of `<d
 
 ## Datetime value functions and string functions as dedicated AST cases
 
-`CURRENT_DATE`/`CURRENT_TIME`/`CURRENT_TIMESTAMP`/`LOCALTIME`/`LOCALTIMESTAMP` are reserved words, so they cannot be parsed as identifiers or generic function calls. They get dedicated `ExpressionKind` cases (`CurrentDate`, `CurrentTime of int option`, ...) with optional precision. Likewise `SUBSTRING(x FROM a FOR b)` and `OVERLAY(x PLACING y FROM n)` get dedicated cases, while the comma form (`SUBSTRING(x, a, b)`) still parses as a generic `FunctionCall`.
+`CURRENT_DATE`/`CURRENT_TIME`/`CURRENT_TIMESTAMP`/`LOCALTIME`/`LOCALTIMESTAMP` are reserved words, so they cannot be parsed as identifiers or generic function calls. They get dedicated `ExpressionKind` cases (`CurrentDate`, `CurrentTime of int option`, ...) with optional precision. Likewise `SUBSTRING(x FROM a FOR b)` and `OVERLAY(x PLACING y FROM n)` get dedicated cases.
 
-- **Trade-off:** More AST cases vs. forcing these into `FunctionCall` (which would lose the FROM/FOR structure and require reserved-word identifiers). The dedicated parsers are tried before `pRoutineInvocation` and `attempt`-backtrack to it for the comma form.
+- **Trade-off:** More AST cases vs. forcing these into `FunctionCall` (which would lose the FROM/FOR structure and require reserved-word identifiers). `SUBSTRING`/`OVERLAY`/`TRIM`/`POSITION`/`EXTRACT` are deliberately **not** in the `pRoutineInvocation` reserved-function whitelist, so the non-standard comma form (`SUBSTRING(x, a, b)`) is now rejected (see "Over-permissiveness tightened" below).
 
 ## `FETCH` quantity optional, `OFFSET` ROW/ROWS required
 
@@ -235,11 +235,11 @@ The grammar's `<target table>` allows `ONLY ( <table or query name> )`, but DML 
 
 - **Trade-off:** `(a + b).*` is rejected; the common qualified-asterisk form is supported. `pQualifiedAsterisk` yields `QualifiedStar` when the `AS (cols)` suffix is absent and `AllFieldsReference` when present, so the two shapes share one parser.
 
-## `pPartitionBy` uses `pExpression`
+## `pPartitionBy` accepts only column references
 
-`<partitioned join column reference list>` is a list of column references, but `pPartitionBy` parses `sepBy1 pExpression (token ",")`.
+`<partitioned join column reference list>` is a list of column references, and `pPartitionBy` parses `sepBy1 pColumnReferenceExpr (token ",")` to enforce that (it previously used `pExpression`).
 
-- **Trade-off:** Accepts any expression where the grammar wants column references — permissive but consistent with other column-list parsers in the codebase, and simpler than a dedicated column-reference-only parser.
+- **Trade-off:** Arbitrary expressions such as `PARTITION BY (a + b)` are now rejected, matching the grammar. A column-reference-only parser is stricter than the codebase's other column-list parsers, but the grammar is explicit here.
 
 ## `pJoinSpecification` returns `(JoinCondition * Expression option)`
 
@@ -277,11 +277,11 @@ The `<JSON predicate type constraint>` (`VALUE | ARRAY | OBJECT | SCALAR`) would
 
 - **Trade-off:** No duplicate `Overlaps` case. The period predicate operands are `Expression` (a `<period reference>` is a column reference; `PERIOD (s, e)` is the new `PeriodValue of Expression * Expression` case), so the right operand is `attempt pPeriodValue <|> pExpr`.
 
-## JSON clauses use permissive `pExpression`
+## JSON slots use non-boolean value expressions and a plain-string path
 
-`<JSON API common syntax>` context item, `<JSON name and value>` name/value, `<JSON passing argument>`, and the `DEFAULT <value expression>` behavior all use the full `pExpression` rather than grammar-specific value-expression parsers.
+`<JSON API common syntax>`'s context item, `<JSON name and value>` name/value, `<JSON passing argument>`, and the `DEFAULT <value expression>` behavior use `pValueExpressionNoBoolean` (the grammar's `<JSON value expression>` is a value expression, not a boolean one). `<JSON path specification>` is a `<character string literal>`, so `JsonApiCommon.Path`, `JsonRegularColumn.Path`, `JsonFormattedColumn.Path`, and `JsonNestedColumns.Path` are now `string`/`string option` rather than `Expression`.
 
-- **Trade-off:** Consistent with the codebase's permissive expression slots (e.g. `pPartitionBy`). The JSON path specification is parsed as a string literal wrapped in `Literal(String ...)`.
+- **Trade-off:** The AST no longer wraps the JSON path in a synthetic `Literal(String ...)` node, so consumers read the path directly. Boolean expressions (`a AND b`) are rejected in these slots instead of being silently accepted. The dedicated JSON parsers still use full `pExpression` where the grammar genuinely allows a value expression that the operator-precedence parser cannot cover — see the JSON value/path clauses in `ExpressionParser.fs`.
 
 ## `JSON_QUERY` wrapper/quotes/behavior clauses
 
@@ -295,17 +295,17 @@ As a readability refactor, parser functions were renamed to match the SQL-2016 n
 
 - **Trade-off:** Renames touch every reference (cross-file references like `DmlParser`'s use of `pTableReference` must be updated in lockstep), but the payoff is that a reader can map each parser to the grammar rule it implements. FParsec's define-before-use constraint means files are still ordered leaf-first rather than grammar-top-down; the banners and names bridge that gap.
 
-## Schema elements reuse `pDdl` via a forward reference
+## Schema elements restricted to CREATE-family statements and GRANT
 
-`<schema element>` (inside `CREATE SCHEMA`) is "any DDL statement". `pSchemaElementImpl` is a `createParserForwardedToRef` whose `.Value` is wired to `pDdl` in `SqlParser.fs` (after `pDdl` is defined, mirroring `pDataChangeStatementRef`).
+`<schema element>` (inside `CREATE SCHEMA`) is an explicit list of *definition* statements. `pSchemaElementImpl` is a `createParserForwardedToRef` whose `.Value` is wired in `SqlParser.fs` (after the individual `CREATE` parsers are defined) to a `choice` of the CREATE-family parsers (`pCreateTableStatement`, `pCreateViewStatement`, `pCreateRoleStatement`, `pCreateSequenceStatement`, `pCreateDomainStatement`, `pCreateCharacterSetStatement`, `pCreateCollationStatement`, `pCreateTransliterationStatement`, `pCreateAssertionStatement`, `pCreateCastStatement`, `pCreateOrderingStatement`, `pCreateTransformStatement`, `pCreateTypeStatement`, `pCreateProcedureStatement`, `pCreateFunctionStatement`, `pCreateTriggerStatement`) plus `pGrantStatement`.
 
-- **Trade-off:** Reusing `pDdl` means `DROP`/`ALTER` statements are also accepted as schema elements, which is slightly over-permissive versus the grammar's `<schema element>` list (which is mostly `CREATE` statements). The alternative — a dedicated schema-element parser — would duplicate the whole DDL choice. `CREATE SCHEMA s CREATE TABLE t (id INT)` yields `Elements = [CreateTable _]`.
+- **Trade-off:** `DROP`/`ALTER`/`TRUNCATE`/`REVOKE` are no longer accepted as schema elements (they were when the forward ref pointed at the whole `pDdl`). The list duplicates the CREATE alternatives rather than reusing `pDdl`, but it closes the "any DDL is a schema element" gap. `CREATE SCHEMA s CREATE TABLE t (id INT)` yields `Elements = [CreateTable _]`.
 
-## `ConstraintCharacteristics` as a permissive record
+## `ConstraintCharacteristics` matches the grammar's three alternatives
 
-`<constraint characteristics>` is `[ <constraint check time> ] [ [ NOT ] DEFERRABLE ] [ INITIALLY <check time> ] [ NOT ENFORCED ]`. `ConstraintCharacteristics = { InitiallyDeferred: bool option; Deferrable: bool option; Enforced: bool option }` with `pConstraintCharacteristics` returning a `(bool option * bool option * bool option)` tuple folded from three `attempt`-wrapped alternatives.
+`<constraint characteristics> ::= <constraint check time> [ [ NOT ] DEFERRABLE ] [ <constraint enforcement> ] | [ NOT ] DEFERRABLE [ <constraint check time> ] [ <constraint enforcement> ] | <constraint enforcement>`. `ConstraintCharacteristics = { InitiallyDeferred: bool option; Deferrable: bool option; Enforced: bool option }` and `pConstraintCharacteristics` tries the three alternatives in order, ending with an empty `preturn` because the whole clause is optional in its enclosing production.
 
-- **Trade-off:** Three independent option fields accept any combination (including ones the grammar's ordering forbids), but keep the AST flat and easy to consume. `INITIALLY DEFERRED NOT DEFERRABLE` and `NOT ENFORCED` both parse.
+- **Trade-off:** The record stays flat and easy to consume, but the grammar's combination rules are enforced: a bare `[ NOT ] DEFERRABLE` is valid (the second alternative allows the check time to be omitted), while invalid orders such as `ENFORCED DEFERRABLE` are rejected. The parser must leave any following keyword that belongs to the enclosing production (e.g. a domain's `COLLATE` clause) unconsumed — the second alternative requires `DEFERRABLE`, so it cannot silently swallow `COLLATE`.
 
 ## Specific routine designator simplified
 
@@ -369,9 +369,9 @@ Both are `<SQL-invoked routine>`s differing only in the `<returns clause>` (func
 
 ## `RoutineCharacteristic` as a flat DU
 
-`<routine characteristic>` is `LANGUAGE | PARAMETER STYLE | SPECIFIC | DETERMINISTIC | SQL-data access | null-call | DYNAMIC RESULT SETS | savepoint level`. `RoutineCharacteristic` is a flat DU (`Language of string`, `ParameterStyle of string`, `SpecificName of Expression`, `Deterministic of bool`, `SqlDataAccess of SqlDataAccess`, `NullCall of bool`, `DynamicResultSets of uint64`, `SavepointLevel of bool`, `ExternalName of Expression`). `many pRoutineCharacteristic` collects them in order.
+`<routine characteristic>` is `LANGUAGE | PARAMETER STYLE | SPECIFIC | DETERMINISTIC | SQL-data access | null-call | DYNAMIC RESULT SETS | savepoint level`. `RoutineCharacteristic` is a flat DU (`Language of string`, `ParameterStyle of string`, `SpecificName of Expression`, `Deterministic of bool`, `SqlDataAccess of SqlDataAccess`, `NullCall of bool`, `DynamicResultSets of uint64`, `SavepointLevel of bool`, `ExternalName of Expression`). `pRoutineCharacteristics` collects them and rejects duplicates.
 
-- **Trade-off:** A flat list loses the grammar's ordering constraints (e.g. `LANGUAGE` before `DETERMINISTIC`) but keeps the AST simple and lets consumers filter by characteristic. `Deterministic`/`NullCall`/`SavepointLevel` use `bool` (`NOT DETERMINISTIC` → `false`); `DynamicResultSets` uses `uint64` (from `pUnsignedInteger`, which must be followed by `.>> ws` since it does not consume trailing whitespace). `NAME <external routine name>` is included so `ALTER ROUTINE ... NAME f` works.
+- **Trade-off:** The BNF's `[ <routine characteristic>... ]` permits any order (so no order is enforced), but 11.60's syntax rule allows each characteristic at most once. `pRoutineCharacteristics` groups the parsed characteristics by category and fails on a duplicate (e.g. two null-call clauses, or `LANGUAGE SQL LANGUAGE SQL`). `Deterministic`/`NullCall`/`SavepointLevel` use `bool` (`NOT DETERMINISTIC` → `false`); `DynamicResultSets` uses `uint64` (from `pUnsignedInteger`, which must be followed by `.>> ws` since it does not consume trailing whitespace). `NAME <external routine name>` is included so `ALTER ROUTINE ... NAME f` works.
 
 ## Parameter declaration treats a leading identifier as the name
 
@@ -385,11 +385,11 @@ Both are `<SQL-invoked routine>`s differing only in the `<returns clause>` (func
 
 - **Trade-off:** Four cases mirror the grammar. The `AS` keyword is optional and discarded. `TriggerEvent.Update of Expression list option` uses `None` for `UPDATE` without `OF <column list>`.
 
-## `SELECT ( <privilege method list> )` must precede `SELECT [ <privilege column list> ]`
+## `PrivilegeSelectTarget` distinguishes the two `SELECT` privilege forms
 
-12.3 `<action>` includes `SELECT ( <privilege method list> )` alongside `SELECT [ <privilege column list> ]`. If the plain `SELECT [ column list ]` alternative came first, its `opt pPrivilegeColumnList` would succeed with `None` (leaving the `(` unconsumed) and the grant would fail on the following `ON`. The method-list alternative is therefore tried *before* the column-list one.
+12.3 `<action>` includes `SELECT ( <privilege method list> )` alongside `SELECT [ <privilege column list> ]`. The method-list alternative is tried *before* the column-list one (otherwise its `opt pPrivilegeColumnList` succeeds with `None`, leaving the `(` unconsumed and failing on the following `ON`). `PrivilegeAction.Select` now carries a `PrivilegeSelectTarget option` (`PrivilegeColumns of Expression list | PrivilegeMethods of Expression list`) instead of a bare `Expression list option`.
 
-- **Trade-off:** For `SELECT (col1, col2)` the method-list parser wins and yields `Select (Some [col1; col2])` — the same AST shape as the column-list form, so the distinction is lost. Both forms produce `PrivilegeAction.Select (Expression list option)`; the method-list form is only distinguishable when it contains a routine designator (`SELECT (SPECIFIC FUNCTION f)`).
+- **Trade-off:** The two forms are now distinguishable in the AST. Ambiguous input `SELECT (col1, col2)` still parses as the method-list form (the first alternative wins), but consumers can at least tell which parser produced it; use `SELECT ( SPECIFIC FUNCTION f )` for an unambiguous method list.
 
 ## `pWhereClause` returns `(Expression option * Expression option)`
 
@@ -535,11 +535,11 @@ The output correlation name of `MATCH_RECOGNIZE (...) AS out` is parsed with `pI
 
 - **Trade-off:** Tests use non-reserved output names (e.g. `out_t`). `OUT` is in `reservedWords` (Lexer.fs line 237).
 
-## `VALUE_OF(x)` without `AT` is parsed as a regular function call
+## `VALUE_OF(x)` without `AT` is rejected
 
-`VALUE_OF ( <expr> AT <row marker expr> [ , <expr> ] )` — when `AT` is omitted, `VALUE_OF(x)` is accepted by `pRoutineInvocation` as a regular function call, so it does not fail as an invalid-syntax test.
+`VALUE_OF ( <expr> AT <row marker expr> [ , <expr> ] )` — when `AT` is omitted, `pValueOfFunction` fails and the parser must not fall through to a generic function call. `VALUE_OF` is a reserved word (Lexer.fs) and is deliberately **not** in `pRoutineInvocation`'s reserved-function whitelist, so `VALUE_OF(x)` is now rejected.
 
-- **Trade-off:** Invalid-syntax tests use a form that cannot be consumed as a regular function call either, e.g. `VALUE_OF(x AT 5)`. `VALUE_OF` is a reserved word (Lexer.fs line 359), but `pRoutineInvocation` uses `pIdentifierRaw`, so it accepts reserved words too.
+- **Trade-off:** `VALUE_OF(x)` is no longer a valid invalid-syntax test input (it now genuinely fails). Tests can still use `VALUE_OF(x AT 5)` for the error path. This is a side effect of restricting `pRoutineInvocation` to reserved *function* keywords.
 
 ## JSON_TABLE / JSON_TABLE_PRIMITIVE share `pJsonApiCommon`
 

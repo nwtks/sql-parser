@@ -490,7 +490,7 @@ let ``PERIOD value expression verification`` () =
 let ``JSON_VALUE function verification`` () =
     match parse "SELECT JSON_VALUE(doc, '$.name')" with
     | JsonValue({ Context = { Kind = Identifier "DOC" }
-                  Path = { Kind = Literal(String "$.name") }
+                  Path = "$.name"
                   PathName = None
                   Passing = [] },
                 None,

@@ -15,16 +15,76 @@ module DynamicParser =
         pKeyword "WITH" >>. pKeyword "NESTING" >>% true
         <|> (pKeyword "WITHOUT" >>. pKeyword "NESTING" >>% false)
 
-    // 20.4 <get descriptor information> ::= <get header information> | VALUE <item number> <get item information>
-    // <get item information> ::= <target> <equals operator> <descriptor item name> (item form)
-    let pDescriptorInfoItem =
-        pQualifiedNameExpr .>> token (pstring "=") .>>. pIdentifierRaw
+    // 20.4 <header item name> — closed enumeration.
+    let pHeaderItemName: Parser<string, unit> =
+        choice
+            [ pKeyword "COUNT"
+              pKeyword "KEY_TYPE"
+              pKeyword "DYNAMIC_FUNCTION"
+              pKeyword "DYNAMIC_FUNCTION_CODE"
+              pKeyword "TOP_LEVEL_COUNT" ]
+
+    // 20.4/20.5 <descriptor item name> — closed enumeration.
+    let pDescriptorItemName: Parser<string, unit> =
+        choice
+            [ pKeyword "CARDINALITY"
+              pKeyword "CHARACTER_SET_CATALOG"
+              pKeyword "CHARACTER_SET_NAME"
+              pKeyword "CHARACTER_SET_SCHEMA"
+              pKeyword "COLLATION_CATALOG"
+              pKeyword "COLLATION_NAME"
+              pKeyword "COLLATION_SCHEMA"
+              pKeyword "DATA"
+              pKeyword "DATETIME_INTERVAL_CODE"
+              pKeyword "DATETIME_INTERVAL_PRECISION"
+              pKeyword "DEGREE"
+              pKeyword "INDICATOR"
+              pKeyword "KEY_MEMBER"
+              pKeyword "LENGTH"
+              pKeyword "LEVEL"
+              pKeyword "NAME"
+              pKeyword "NULLABLE"
+              pKeyword "NULL_ORDERING"
+              pKeyword "OCTET_LENGTH"
+              pKeyword "PARAMETER_MODE"
+              pKeyword "PARAMETER_ORDINAL_POSITION"
+              pKeyword "PARAMETER_SPECIFIC_CATALOG"
+              pKeyword "PARAMETER_SPECIFIC_NAME"
+              pKeyword "PARAMETER_SPECIFIC_SCHEMA"
+              pKeyword "PRECISION"
+              pKeyword "RETURNED_CARDINALITY"
+              pKeyword "RETURNED_LENGTH"
+              pKeyword "RETURNED_OCTET_LENGTH"
+              pKeyword "SCALE"
+              pKeyword "SCOPE_CATALOG"
+              pKeyword "SCOPE_NAME"
+              pKeyword "SCOPE_SCHEMA"
+              pKeyword "SORT_DIRECTION"
+              pKeyword "TYPE"
+              pKeyword "UNNAMED"
+              pKeyword "USER_DEFINED_TYPE_CATALOG"
+              pKeyword "USER_DEFINED_TYPE_NAME"
+              pKeyword "USER_DEFINED_TYPE_SCHEMA"
+              pKeyword "USER_DEFINED_TYPE_CODE" ]
+
+    // 20.4 <get header information> ::= <target> <equals operator> <header item name>
+    let pHeaderInfoItem =
+        pQualifiedNameExpr .>> token (pstring "=") .>>. pHeaderItemName
         |>> fun (target, name) -> target, name
 
-    // 20.5 <set descriptor information> ::= <set header information> | VALUE <item number> <set item information>
-    // <set item information> ::= <descriptor item name> <equals operator> <value> (item form)
+    // 20.4 <get item information> ::= <target> <equals operator> <descriptor item name> (item form)
+    let pDescriptorInfoItem =
+        pQualifiedNameExpr .>> token (pstring "=") .>>. pDescriptorItemName
+        |>> fun (target, name) -> target, name
+
+    // 20.5 <set header information> ::= <header item name> <equals operator> <value>
+    let pSetHeaderInfoItem =
+        pHeaderItemName .>> token (pstring "=") .>>. pExpression
+        |>> fun (name, value) -> name, value
+
+    // 20.5 <set item information> ::= <descriptor item name> <equals operator> <value> (item form)
     let pSetDescriptorInfoItem =
-        pIdentifierRaw .>> token (pstring "=") .>>. pExpression
+        pDescriptorItemName .>> token (pstring "=") .>>. pExpression
         |>> fun (name, value) -> name, value
 
     // 20.2 <allocate descriptor statement> ::= ALLOCATE [ SQL ] DESCRIPTOR <descriptor name> [ WITH MAX <occurrences> ]
@@ -49,8 +109,19 @@ module DynamicParser =
                   .>>. sepBy1 pDescriptorInfoItem (token (pstring ","))
                   |>> fun (num, items) -> GetItem(num, items)
               )
-              <|> (sepBy1 pDescriptorInfoItem (token (pstring ",")) |>> GetHeader))
+              <|> (sepBy1 pHeaderInfoItem (token (pstring ",")) |>> GetHeader))
         |>> fun (name, info) -> GetDescriptor(name, info)
+
+    // 20.6 <copy descriptor options> ::= NAME | TYPE | NAME , TYPE | DATA
+    let pCopyDescriptorOptions =
+        choice
+            [ attempt (
+                  pKeyword "NAME" >>. token (pstring ",") >>. pKeyword "TYPE"
+                  >>% [ "NAME"; "TYPE" ]
+              )
+              pKeyword "NAME" >>% [ "NAME" ]
+              pKeyword "TYPE" >>% [ "TYPE" ]
+              pKeyword "DATA" >>% [ "DATA" ] ]
 
     // 20.5 <set descriptor statement> ::= SET [ SQL ] DESCRIPTOR <descriptor name> <set descriptor information>
     let pSetDescriptorStatement =
@@ -61,7 +132,7 @@ module DynamicParser =
                   .>>. sepBy1 pSetDescriptorInfoItem (token (pstring ","))
                   |>> fun (num, items) -> SetItem(num, items)
               )
-              <|> (sepBy1 pSetDescriptorInfoItem (token (pstring ",")) |>> SetHeader))
+              <|> (sepBy1 pSetHeaderInfoItem (token (pstring ",")) |>> SetHeader))
         |>> fun (name, info) -> SetDescriptor(name, info)
 
     // 20.6 <copy descriptor statement> ::= COPY <source> TO <target> | COPY <source> VALUE <n> ( <options> ) TO <target> VALUE <n>
@@ -71,7 +142,7 @@ module DynamicParser =
             attempt (
                 pKeyword "VALUE" >>. pExpression
                 >>= fun srcItem ->
-                    between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierRaw (token (pstring ",")))
+                    between (token (pstring "(")) (token (pstring ")")) pCopyDescriptorOptions
                     >>= fun opts ->
                         pKeyword "TO" >>. pQualifiedNameExpr
                         >>= fun target ->

@@ -6,6 +6,12 @@ open SqlParser.Lexer
 module ExpressionParser =
     // 6.39 <boolean value expression> / 6.3 <value expression> — forward ref (central expression parser)
     let pExpression, pExpressionRef = createParserForwardedToRef<Expression, unit> ()
+    // 6.28 <value expression> without boolean operators — forward ref (wired to
+    // opp.ExpressionParser after the operator-precedence parser is built below).
+    // Used where the grammar requires a non-boolean <value expression> (JSON slots,
+    // <point in time>, etc.).
+    let pValueExpressionNoBoolean, pValueExpressionNoBooleanRef =
+        createParserForwardedToRef<Expression, unit> ()
     // 6.1 <data type> — forward ref (defined in TypeParser; used by CAST / JSON returning)
     let pDataType, pDataTypeRef = createParserForwardedToRef<DataType, unit> ()
     // 7.17 <query expression> — forward ref (defined in QueryParser; used by scalar/quantified subqueries)
@@ -467,11 +473,12 @@ module ExpressionParser =
         |>> fun (ret, fmt) -> { Returning = ret; Format = fmt }
 
     // 6.27 <JSON value empty/error behavior> ::= ERROR | NULL | DEFAULT <value expression>
+    // <value expression> is not boolean, so boolean operators are rejected here.
     let pJsonValueBehavior =
         choice
             [ pKeyword "ERROR" >>% JsonError
               pKeyword "NULL" >>% JsonNull
-              pKeyword "DEFAULT" >>. pExpression |>> JsonDefault ]
+              pKeyword "DEFAULT" >>. pValueExpressionNoBoolean |>> JsonDefault ]
 
     // 6.34 <JSON query wrapper behavior> ::= WITHOUT [ ARRAY ] | WITH [ CONDITIONAL | UNCONDITIONAL ] [ ARRAY ]
     let pJsonQueryWrapper =
@@ -507,16 +514,18 @@ module ExpressionParser =
 
     // 6.33 <JSON name and value> ::= [ KEY ] <JSON name> VALUE <JSON value expression>
     //                              | <JSON name> : <JSON value expression>
+    // Both sides are <JSON value expression>s — value expressions, not boolean ones.
     let pJsonNameAndValue =
         choice
             [ attempt (
-                  opt (pKeyword "KEY") .>>. pExpression .>> pKeyword "VALUE" .>>. pExpression
+                  opt (pKeyword "KEY") .>>. pValueExpressionNoBoolean .>> pKeyword "VALUE"
+                  .>>. pValueExpressionNoBoolean
                   |>> fun ((key, name), value) ->
                       { Name = name
                         Value = value
                         Key = Option.isSome key }
               )
-              pExpression .>> token (pstring ":") .>>. pExpression
+              pValueExpressionNoBoolean .>> token (pstring ":") .>>. pValueExpressionNoBoolean
               |>> fun (name, value) ->
                   { Name = name
                     Value = value
@@ -544,15 +553,19 @@ module ExpressionParser =
               pKeyword "ERROR" >>% JsonExistsError ]
 
     // 10.14 <JSON passing argument> ::= <JSON value expression> [ <JSON input clause> ] AS <identifier>
+    // <JSON value expression> is a value expression — boolean expressions are not allowed.
     let pJsonArgument =
-        pExpression .>>. opt pJsonInputClause .>> pKeyword "AS" .>>. pIdentifierExpr
+        pValueExpressionNoBoolean .>>. opt pJsonInputClause .>> pKeyword "AS"
+        .>>. pIdentifierExpr
         |>> fun ((expr, _), name) -> (expr, name)
 
     // 10.14 <JSON API common syntax> ::= <JSON context item> , <JSON path specification>
     //     [ AS <JSON table path name> ] [ <JSON passing clause> ]
+    // <JSON context item> ::= <JSON value expression> (value expression — no boolean ops)
+    // <JSON path specification> ::= <character string literal> — stored as a plain string.
     let pJsonApiCommon =
-        pExpression .>>. opt pJsonInputClause .>> token (pstring ",")
-        .>>. (pCharacterStringLiteral |>> String |>> Literal |> withExprPosition)
+        pValueExpressionNoBoolean .>>. opt pJsonInputClause .>> token (pstring ",")
+        .>>. pCharacterStringLiteral
         .>>. opt (attempt (pKeyword "AS" >>. pIdentifierExpr))
         .>>. opt (pKeyword "PASSING" >>. sepBy1 pJsonArgument (token (pstring ",")))
         |>> fun ((((context, _), path), pathName), passing) ->
@@ -847,7 +860,131 @@ module ExpressionParser =
                     (token (pstring ")"))
                     (pKeyword "ORDER" >>. pKeyword "BY" >>. sepBy1 pOrderByItem (token (pstring ",")))
 
-        pIdentifierRaw |>> Identifier |> withExprPosition
+        // 10.9 <routine name> ::= [ <schema name> <period> ] <qualified identifier>
+        // — <qualified identifier> is a <nonreserved qualifier>, so a reserved word
+        // cannot normally name a routine. However the standard also spells a large
+        // family of built-in functions using *reserved* keywords (<aggregate function>,
+        // <window function type>, <inverse distribution function type>,
+        // <numeric value function>, <string value function>, <array value function>,
+        // <multiset value function>, <grouping operation>). Those keywords are
+        // whitelisted here so they still parse as routine invocations; every other
+        // reserved word (EXISTS, UNIQUE, PERIOD, VALUE_OF, SELECT, ...) is rejected,
+        // and the dedicated parsers for the special forms are tried before this one.
+        let functionKeywords =
+            [ // <aggregate function> / <binary set function> / <hypothetical set function>
+              "AVG"
+              "MAX"
+              "MIN"
+              "SUM"
+              "EVERY"
+              "ANY"
+              "SOME"
+              "COUNT"
+              "STDDEV_POP"
+              "STDDEV_SAMP"
+              "VAR_SAMP"
+              "VAR_POP"
+              "COLLECT"
+              "FUSION"
+              "INTERSECTION"
+              "COVAR_POP"
+              "COVAR_SAMP"
+              "CORR"
+              "REGR_SLOPE"
+              "REGR_INTERCEPT"
+              "REGR_COUNT"
+              "REGR_R2"
+              "REGR_AVGX"
+              "REGR_AVGY"
+              "REGR_SXX"
+              "REGR_SYY"
+              "REGR_SXY"
+              "RANK"
+              "DENSE_RANK"
+              "PERCENT_RANK"
+              "CUME_DIST"
+              "LISTAGG"
+              "ARRAY_AGG"
+              // <inverse distribution function type>
+              "PERCENTILE_CONT"
+              "PERCENTILE_DISC"
+              // <window function type>
+              "ROW_NUMBER"
+              "NTILE"
+              "LEAD"
+              "LAG"
+              "FIRST_VALUE"
+              "LAST_VALUE"
+              "NTH_VALUE"
+              // <numeric value function>
+              "OCCURRENCES_REGEX"
+              "POSITION_REGEX"
+              "CHAR_LENGTH"
+              "CHARACTER_LENGTH"
+              "OCTET_LENGTH"
+              "CARDINALITY"
+              "ARRAY_MAX_CARDINALITY"
+              "ABS"
+              "MOD"
+              "SIN"
+              "COS"
+              "TAN"
+              "SINH"
+              "COSH"
+              "TANH"
+              "ASIN"
+              "ACOS"
+              "ATAN"
+              "LOG"
+              "LOG10"
+              "LN"
+              "EXP"
+              "POWER"
+              "SQRT"
+              "FLOOR"
+              "CEIL"
+              "CEILING"
+              "WIDTH_BUCKET"
+              "MATCH_NUMBER"
+              // <string value function>
+              "SUBSTRING_REGEX"
+              "TRANSLATE_REGEX"
+              "UPPER"
+              "LOWER"
+              "CONVERT"
+              "TRANSLATE"
+              "NORMALIZE"
+              // <array value function> / <multiset value function>
+              "TRIM_ARRAY"
+              "SET"
+              // <grouping operation>
+              "GROUPING" ]
+
+        let pReservedFunctionName: Parser<string, unit> =
+            functionKeywords
+            |> List.map pKeyword
+            |> choice
+            >>= fun kw ->
+                if reservedWords.Contains kw then
+                    preturn kw
+                else
+                    fail "not a reserved function keyword."
+
+        // 5.4 <identifier> — regular (non-reserved), delimited, or reserved function keyword
+        let pRoutineName: Parser<string, unit> =
+            choice
+                [ attempt pReservedFunctionName
+                  attempt pUnicodeDelimitedIdentifier
+                  pRegularIdentifier
+                  pDelimitedIdentifier ]
+
+        let nameExpr =
+            getPosition .>>. pRoutineName
+            |>> fun (pos, name) ->
+                { Expression.Kind = Identifier name
+                  Pos = { Line = pos.Line; Column = pos.Column } }
+
+        nameExpr
         .>>. pArgs
         .>>. opt pWindowNameOrSpecification
         .>>. opt pFilter
@@ -1295,7 +1432,7 @@ module ExpressionParser =
     // 6.29 <value expression> without boolean operators or predicates — used where the
     // grammar requires a non-boolean <value expression> (e.g. <point in time> in
     // <query system time period specification>, 7.6). Stops before AND/OR.
-    let pValueExpressionNoBoolean = opp.ExpressionParser
+    pValueExpressionNoBooleanRef.Value <- opp.ExpressionParser
 
     // 8.21 <boolean test> ::= <boolean primary> IS [ NOT ] { TRUE | FALSE | UNKNOWN } — combined here with
     // 8.x <predicate> / 6.24 <array element reference> postfix applied to a <value expression>
@@ -1338,7 +1475,6 @@ module ExpressionParser =
     let rec containsStandaloneQuantifiedSubquery (e: Expression) =
         let containsJsonCommon (c: JsonApiCommon) =
             containsStandaloneQuantifiedSubquery c.Context
-            || containsStandaloneQuantifiedSubquery c.Path
             || Option.exists containsStandaloneQuantifiedSubquery c.PathName
             || List.exists
                 (fun (v, n) -> containsStandaloneQuantifiedSubquery v || containsStandaloneQuantifiedSubquery n)

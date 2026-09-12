@@ -344,9 +344,8 @@ module DdlParser =
     // 12.3 <privilege method list> ::= <specific routine designator> [ { , <specific routine designator> }... ]
     let pPrivilegeMethodList = sepBy1 pSpecificRoutineDesignator (token (pstring ","))
 
-    // 12.3 <action> ::= SELECT [ <privilege column list> ] | SELECT ( <privilege method list> )
-    //             | INSERT [ <privilege column list> ] | UPDATE [ <privilege column list> ]
-    //             | DELETE | REFERENCES [ <privilege column list> ] | USAGE | TRIGGER | UNDER | EXECUTE
+    // 12.3 <action> ::= SELECT | SELECT ( <privilege column list> )
+    //                 | SELECT ( <privilege method list> ) | INSERT [ <column list> ] ...
     let pPrivilegeAction =
         choice
             [ // SELECT ( <privilege method list> ) must be tried before the plain
@@ -355,9 +354,12 @@ module DdlParser =
               attempt (
                   pKeyword "SELECT"
                   >>. between (token (pstring "(")) (token (pstring ")")) pPrivilegeMethodList
-                  |>> fun methods -> PrivilegeAction.Select(Some methods)
+                  |>> fun methods -> PrivilegeAction.Select(Some(PrivilegeMethods methods))
               )
-              attempt (pKeyword "SELECT" >>. opt pPrivilegeColumnList |>> PrivilegeAction.Select)
+              attempt (
+                  pKeyword "SELECT" >>. opt pPrivilegeColumnList
+                  |>> fun cols -> PrivilegeAction.Select(Option.map PrivilegeColumns cols)
+              )
               attempt (pKeyword "INSERT" >>. opt pPrivilegeColumnList |>> PrivilegeAction.Insert)
               attempt (pKeyword "UPDATE" >>. opt pPrivilegeColumnList |>> PrivilegeAction.Update)
               attempt (pKeyword "DELETE" >>% PrivilegeAction.Delete)
@@ -589,36 +591,52 @@ module DdlParser =
         )
         |>> fun (table, restart) -> Truncate(table, restart)
 
-    // 10.8 <constraint characteristics> ::= [ <constraint check time> ] [ [ NOT ] DEFERRABLE ] [ [ NOT ] ENFORCED ]
+    // 10.8 <constraint characteristics> ::=
+    //     <constraint check time> [ [ NOT ] DEFERRABLE ] [ <constraint enforcement> ]
+    //   | [ [ NOT ] DEFERRABLE ] <constraint check time> [ <constraint enforcement> ]
+    //   | <constraint enforcement>
     let pConstraintCharacteristics =
         // 10.8 <constraint check time> ::= INITIALLY DEFERRED | INITIALLY IMMEDIATE
-        let pCheckTime =
-            pKeyword "INITIALLY" >>. pKeyword "DEFERRED" >>% Some true
-            <|> (pKeyword "INITIALLY" >>. pKeyword "IMMEDIATE" >>% Some false)
+        // NOTE: both alternatives are parenthesized — `<|>` binds tighter than `>>.`/`>>%`,
+        // so an unparenthesized `INITIALLY >>. DEFERRED >>% true <|> (...)` would group as
+        // `INITIALLY >>. (DEFERRED >>% (true <|> ...))` and never try IMMEDIATE.
+        let pCheckTime: Parser<bool, unit> =
+            attempt (pKeyword "INITIALLY" >>. pKeyword "DEFERRED" >>% true)
+            <|> (pKeyword "INITIALLY" >>. pKeyword "IMMEDIATE" >>% false)
 
         // 10.8 <constraint deferrability> ::= [ NOT ] DEFERRABLE
-        // 10.8 <constraint characteristics> — <constraint deferrability> ::= [ NOT ] DEFERRABLE
-        let pDeferrable =
-            pKeyword "NOT" >>. pKeyword "DEFERRABLE" >>% Some false
-            <|> (pKeyword "DEFERRABLE" >>% Some true)
+        let pDeferrable: Parser<bool, unit> =
+            attempt (pKeyword "NOT" >>. pKeyword "DEFERRABLE" >>% false)
+            <|> (pKeyword "DEFERRABLE" >>% true)
 
         // 10.8 <constraint enforcement> ::= [ NOT ] ENFORCED
-        let pEnforced =
-            pKeyword "NOT" >>. pKeyword "ENFORCED" >>% Some false
-            <|> (pKeyword "ENFORCED" >>% Some true)
+        let pEnforced: Parser<bool, unit> =
+            attempt (pKeyword "NOT" >>. pKeyword "ENFORCED" >>% false)
+            <|> (pKeyword "ENFORCED" >>% true)
 
-        // 10.8 <constraint characteristic> helper — combines check time / deferrability / enforcement
-        let pItem =
-            choice
-                [ attempt (pCheckTime |>> fun b -> b, None, None)
-                  attempt (pDeferrable |>> fun b -> None, b, None)
-                  attempt (pEnforced |>> fun b -> None, None, b) ]
+        let mk (initiallyDeferred: bool option) (deferrable: bool option) (enforced: bool option) =
+            { InitiallyDeferred = initiallyDeferred
+              Deferrable = deferrable
+              Enforced = enforced }
 
-        many pItem
-        |>> fun items ->
-            { InitiallyDeferred = List.tryPick (fun (a, _, _) -> a) items
-              Deferrable = List.tryPick (fun (_, b, _) -> b) items
-              Enforced = List.tryPick (fun (_, _, c) -> c) items }
+        choice
+            [ // <check time> [ <deferrability> ] [ <enforcement> ]
+              attempt (
+                  pCheckTime .>>. opt pDeferrable .>>. opt pEnforced
+                  |>> fun ((ct, d), e) -> mk (Some ct) d e
+              )
+              // [ <deferrability> ] [ <check time> ] [ <enforcement> ]
+              // — only the deferrability is required, so a bare `[ NOT ] DEFERRABLE`
+              // is valid and any following keyword (e.g. a domain's COLLATE clause)
+              // is left for the enclosing production.
+              attempt (
+                  pDeferrable .>>. opt pCheckTime .>>. opt pEnforced
+                  |>> fun ((d, ct), e) -> mk ct (Some d) e
+              )
+              // <enforcement> alone
+              attempt (pEnforced |>> fun e -> mk None None (Some e))
+              // <constraint characteristics> is optional in its enclosing production
+              preturn (mk None None None) ]
 
     // Forward reference to the full DDL statement set; a <schema element> is any
     // DDL statement. Wired to pDdl in SqlParser.fs (which also contains the
@@ -637,41 +655,25 @@ module DdlParser =
                   )
                   pKeyword "AUTHORIZATION" >>. pIdentifierExpr |>> fun auth -> None, Some auth ]
 
-        // 11.1 <schema character set or path> ::= DEFAULT CHARACTER SET <name> | PATH <path> — the two clauses may appear in either order
+        // 11.1 <schema character set or path> ::=
+        //     <schema character set specification>
+        //   | <schema path specification>
+        //   | <character set specification> <path specification>
+        //   | <path specification> <character set specification>
         let pSchemaCharsetOrPath =
             let pCharset =
-                attempt (
-                    pKeyword "DEFAULT"
-                    >>. pKeyword "CHARACTER"
-                    >>. pKeyword "SET"
-                    >>. pQualifiedNameExpr
-                    |>> Choice1Of2
-                )
+                pKeyword "DEFAULT"
+                >>. pKeyword "CHARACTER"
+                >>. pKeyword "SET"
+                >>. pQualifiedNameExpr
 
-            // 11.1 <path specification> ::= PATH <path-resolved user-defined type name> [ { <comma> <path-resolved user-defined type name> }... ]
-            let pPath =
-                attempt (
-                    pKeyword "PATH" >>. sepBy1 pQualifiedNameExpr (token (pstring ","))
-                    |>> Choice2Of2
-                )
+            // 11.1 <path specification> ::= PATH <path-resolved user-defined type name> [ { <comma> ... }... ]
+            let pPath = pKeyword "PATH" >>. sepBy1 pQualifiedNameExpr (token (pstring ","))
 
-            many (pCharset <|> pPath)
-            |>> fun items ->
-                let charset =
-                    List.tryPick
-                        (function
-                        | Choice1Of2 c -> Some c
-                        | _ -> None)
-                        items
-
-                let path =
-                    List.tryPick
-                        (function
-                        | Choice2Of2 p -> Some p
-                        | _ -> None)
-                        items
-
-                charset, path
+            choice
+                [ attempt (pCharset .>>. opt (attempt pPath) |>> fun (c, p) -> Some c, p)
+                  attempt (pPath .>>. opt (attempt pCharset) |>> fun (p, c) -> c, Some p)
+                  preturn (None, None) ]
 
         pKeyword "CREATE" >>. pKeyword "SCHEMA" >>. pNameClause
         .>>. pSchemaCharsetOrPath

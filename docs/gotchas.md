@@ -133,9 +133,12 @@ A record pattern whose fields are on separate lines fails with FS0010 ("Unexpect
 
 7.6 `<derived column>` — `pKeyword` (and every token parser) does NOT skip leading whitespace — the previous parser must consume its own trailing whitespace. In `pQualifiedAsterisk`, after `pchar '*'` the parser sits at ` AS ...` (leading space), so `opt (attempt (pKeyword "AS" >>. ...))` fails and the `AS (cols)` suffix is silently dropped, leaving `SELECT t.* AS (a, b)` to fail at `AS`. Fix: `pchar '*' .>> ws` so the following `pKeyword "AS"` starts at the token.
 
-## `pRoutineInvocation` greedily consumes reserved-word function-like forms
+## `pRoutineInvocation` only accepts reserved *function* keywords
 
-10.9 `<routine invocation>` — `pRoutineInvocation` uses `pIdentifierRaw` (accepts reserved words), so `EXISTS (SELECT ...)`, `UNIQUE (...)`, `JSON_EXISTS(...)`, and `PERIOD (s, e)` parse as generic `FunctionCall`s if their dedicated parsers come after it in `pValueExpressionPrimary`. Dedicated parsers for reserved-word forms must be listed BEFORE `pRoutineInvocation` (see `pValueExpressionPrimary` in `ExpressionParser.fs`). This was a latent bug for `EXISTS`/`UNIQUE` (no prior standalone-expression tests).
+10.9 `<routine invocation>` — `pRoutineInvocation` derives the routine name from `pReservedFunctionName`, an explicit whitelist of the reserved keywords the grammar spells as functions (`COUNT`, `ROW_NUMBER`, `PERCENTILE_CONT`, `ABS`, `MOD`, `LOWER`, ...), plus non-reserved/delimited identifiers. Two consequences:
+
+- Any reserved word that starts a dedicated construct (`EXISTS (SELECT ...)`, `UNIQUE (...)`, `JSON_EXISTS(...)`, `PERIOD (s, e)`, `VALUE_OF (...)`) must **not** be whitelisted, and its dedicated parser must still be listed BEFORE `pRoutineInvocation` in `pValueExpressionPrimary` (belt and braces).
+- **Adding a new built-in or vendor function whose name is reserved requires adding it to `functionKeywords`** — otherwise `SELECT ROW_NUMBER() OVER (...)` / `SELECT ABS(x)` fail with "reserved word." Non-reserved names (`foo(...)`, `app.foo(...)`) are unaffected. See `pReservedFunctionName` in `ExpressionParser.fs`.
 
 ## `JSON_ARRAY(NULL ON NULL)` — `NULL` is ambiguous with the null clause
 
@@ -300,9 +303,9 @@ Because `IMMEDIATE` is not a reserved word, `pExecuteStatement` (`EXECUTE <name>
 
 `QueryParser.fs` and `DmlParser.fs` define a module-level `pWhereClause` with different signatures. The cursor parsers (`CursorParser.fs`) must open only `QueryParser` and must NOT open `DmlParser`.
 
-## `pIdentifierRaw` accepts reserved words too
+## `pIdentifierRaw` must not be used for closed-enumeration item names
 
-Information item names in diagnostics / descriptors (`NUMBER` / `ROW_COUNT` / `COUNT` / `DATA` / `MESSAGE_TEXT` etc.) include reserved words, so they must be parsed with `pIdentifierRaw`, not `pIdentifier`. Conversely, this same fact causes keywords like `ALL` to be incorrectly accepted (see the `GET DIAGNOSTICS` ambiguity above).
+Diagnostics / descriptor item names (`NUMBER` / `ROW_COUNT` / `COUNT` / `DATA` / `MESSAGE_TEXT` etc.) are reserved words, so they cannot be parsed with `pIdentifier` — but `pIdentifierRaw` is too permissive (it also accepts `ALL`, `SELECT`, ...). Use an explicit `choice [ pKeyword "..." ... ]` enumeration instead, as `pStatementInfoItemName` / `pConditionInfoItemName` (DiagnosticsParser) and `pHeaderItemName` / `pDescriptorItemName` / `pCopyDescriptorOptions` (DynamicParser) now do. Note the grammar distinguishes `<header item name>` (`COUNT`, `KEY_TYPE`, ...) from `<descriptor item name>` (`DATA`, `INDICATOR`, ...): the `<get/set header information>` forms use the former, the `VALUE` item forms the latter.
 
 ## `notFollowedBy` makes the failure fatal when the inner parser succeeds — wrap in `attempt` inside `opt`
 
@@ -310,16 +313,24 @@ Information item names in diagnostics / descriptors (`NUMBER` / `ROW_COUNT` / `C
 
 ## `pDataType` accepts any identifier as a user-defined type
 
-Because `pDataTypeElementRef.Value` includes `pIdentifierExpr |>> UserDefinedType`, `NESTED PATH '$.items'` is misread as a regular column (name `NESTED`, type `PATH`). In `pJsonTableColumn`, the NESTED branch must be tried before the regular-column branch (`QueryParser.fs`).
+`pDataTypeElementRef.Value` includes a `pSchemaQualifiedName` branch that maps to `UserDefinedType`, so any identifier is a valid UDT name. Without a guard, `NESTED PATH '$.items'` is misread as a regular column (name `NESTED`, type `PATH`). The UDT branch now uses `pSchemaQualifiedName .>>? notFollowedBy pIdentifier`, so a name immediately followed by another identifier is rejected; `pJsonTableColumn` still tries the NESTED branch before the regular-column branch (`QueryParser.fs`).
 
 ## `OUT` is a reserved word — cannot be used as a MATCH_RECOGNIZE output name
 
 `MATCH_RECOGNIZE (...) AS out` fails because `pIdentifierExpr` rejects the reserved word `OUT`. Tests must use non-reserved output names (e.g. `out_t`).
 
-## `VALUE_OF(x)` without `AT` is parsed as a regular function call
+## `VALUE_OF(x)` without `AT` is rejected
 
-`VALUE_OF(x)` is accepted by `pRoutineInvocation` (which uses `pIdentifierRaw`) as a regular function call, so it does not fail as an invalid-syntax test. Use a form that cannot be consumed as a regular function call either, e.g. `VALUE_OF(x AT 5)`.
+`VALUE_OF` is a reserved word that is deliberately not in `pRoutineInvocation`'s `functionKeywords` whitelist, so `VALUE_OF(x)` (no `AT`) fails instead of falling through to a generic function call. Invalid-syntax tests can use `VALUE_OF(x AT 5)` for the error path.
 
 ## `RowPatternDefinition.Condition` is an `Expression` record
 
 The `Condition` field of `RowPatternDefinition` is an `Expression` record (`{ Kind; Pos }`), not an `ExpressionKind`. Test patterns must wrap it as `Condition = { Kind = ... }` (see the `DEFINE A AS a > 0` validation tests).
+
+## `pValueExpressionNoBoolean` must be a forward ref when JSON parsers use it
+
+6.28 `<value expression>` — the JSON parsers (`pJsonApiCommon`, `pJsonArgument`, `pJsonNameAndValue`, `pJsonValueBehavior`) must reject boolean operators, so they use `pValueExpressionNoBoolean` rather than `pExpression`. That parser is `opp.ExpressionParser`, but the JSON parsers are defined *before* the `OperatorPrecedenceParser` (`opp`) is built. Fix: declare `pValueExpressionNoBoolean` at the top of `ExpressionParser` with `createParserForwardedToRef` and wire `pValueExpressionNoBooleanRef.Value <- opp.ExpressionParser` only after `opp` has all its operators (the same forward-ref pattern as `pExpression`). Reverting it to `let pValueExpressionNoBoolean = opp.ExpressionParser` fails with "value not defined" because `opp` does not exist yet at that point.
+
+## `<constraint characteristics>` must not swallow a following `COLLATE`
+
+10.8 — a domain constraint is `[ <constraint name definition> ] CHECK ( ... ) [ <constraint characteristics> ]` and the enclosing `<domain definition>` ends with `[ <collate clause> ]`. The parser must leave `COLLATE` unconsumed so the domain can parse it. `pConstraintCharacteristics`'s second alternative requires `[ NOT ] DEFERRABLE` before the optional `<constraint check time>`, so a bare `NOT DEFERRABLE COLLATE en_us` parses the deferrability and stops cleanly. Do **not** guard the branch with `notFollowedBy (pKeyword "COLLATE")`: that makes a valid `NOT DEFERRABLE` fail fatally (via `attempt` backtracking) and rejects `CREATE DOMAIN ... NOT DEFERRABLE COLLATE ...`. The clause is optional overall, so the parser ends with a `preturn` empty result.

@@ -359,9 +359,10 @@ and PeriodPredicateKind =
 
 // 10.14 <JSON API common syntax> ::= <JSON context item> , <JSON path specification>
 //     [ AS <JSON table path name> ] [ <JSON passing clause> ]
+// <JSON path specification> is a <character string literal>, so Path is a plain string.
 and JsonApiCommon =
     { Context: Expression
-      Path: Expression
+      Path: string
       PathName: Expression option
       Passing: (Expression * Expression) list }
 
@@ -537,10 +538,12 @@ and JsonTableColumn =
 
 // 7.11 <JSON table regular column definition> ::= <column name> <data type>
 //     [ PATH <path> ] [ <empty behavior> ON EMPTY ] [ <error behavior> ON ERROR ]
+// <JSON table column path specification> is a <JSON path specification> (character string literal),
+// so Path is a plain string.
 and JsonRegularColumn =
     { Name: Expression
       DataType: DataType
-      Path: Expression option
+      Path: string option
       OnEmpty: JsonColumnBehavior option
       OnError: JsonColumnBehavior option }
 
@@ -560,15 +563,16 @@ and JsonFormattedColumn =
     { Name: Expression
       DataType: DataType
       Format: JsonRepresentation
-      Path: Expression option
+      Path: string option
       Wrapper: JsonQueryWrapper option
       Quotes: JsonQueryQuotes option
       OnEmpty: JsonColumnBehavior option
       OnError: JsonColumnBehavior option }
 
 // 7.11 <JSON table nested columns> ::= NESTED [ PATH ] <path> [ AS <name> ] <columns clause>
+// <JSON table nested path specification> is a <JSON path specification> (character string literal).
 and JsonNestedColumns =
-    { Path: Expression
+    { Path: string
       Name: Expression option
       Columns: JsonTableColumn list }
 
@@ -976,9 +980,16 @@ and AlterTableStatement =
     { Table: Expression
       Action: AlterTableAction }
 
+// 12.3 <action> SELECT form: bare SELECT | SELECT ( <privilege column list> )
+// | SELECT ( <privilege method list> ). The column-list and method-list forms are
+// distinguished in the AST (grammar rules <privilege column list> vs <privilege method list>).
+and PrivilegeSelectTarget =
+    | PrivilegeColumns of Expression list
+    | PrivilegeMethods of Expression list
+
 // 12.3 <action> / <privileges> — SELECT | INSERT | UPDATE | DELETE | REFERENCES | USAGE | TRIGGER | UNDER | EXECUTE
 and PrivilegeAction =
-    | Select of Expression list option
+    | Select of PrivilegeSelectTarget option
     | Insert of Expression list option
     | Update of Expression list option
     | Delete

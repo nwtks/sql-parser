@@ -62,9 +62,34 @@ module SqlParser =
               pAlterTableStatement
               pTruncateStatement ]
 
-    // <schema element> ::= any DDL statement (wired here so the CREATE SCHEMA
-    // parser defined in DdlParser.fs can consume nested schema elements).
-    pSchemaElementImpl.Value <- pDdl
+    // 11.1 <schema element> ::= <table definition> | <view definition> | <domain definition>
+    //     | <character set definition> | <collation definition> | <transliteration definition>
+    //     | <assertion definition> | <trigger definition> | <user-defined type definition>
+    //     | <user-defined cast definition> | <user-defined ordering definition>
+    //     | <transform definition> | <schema routine> | <sequence generator definition>
+    //     | <grant statement> | <role definition>
+    // Only CREATE-family elements and GRANT are schema elements — DROP / ALTER /
+    // TRUNCATE / REVOKE are NOT (wired here so the CREATE SCHEMA parser defined in
+    // DdlParser.fs can consume nested schema elements).
+    pSchemaElementImpl.Value <-
+        choice
+            [ attempt pCreateTableStatement
+              attempt pCreateViewStatement
+              attempt pCreateRoleStatement
+              attempt pCreateSequenceStatement
+              attempt pCreateDomainStatement
+              attempt pCreateCharacterSetStatement
+              attempt pCreateCollationStatement
+              attempt pCreateTransliterationStatement
+              attempt pCreateAssertionStatement
+              attempt pCreateCastStatement
+              attempt pCreateOrderingStatement
+              attempt pCreateTransformStatement
+              attempt pCreateTypeStatement
+              attempt pCreateProcedureStatement
+              attempt pCreateFunctionStatement
+              attempt pCreateTriggerStatement
+              attempt pGrantStatement ]
 
     // <SQL procedure statement> / <triggered SQL statement> used inside routine
     // bodies and triggered actions may be any statement (wired here so the

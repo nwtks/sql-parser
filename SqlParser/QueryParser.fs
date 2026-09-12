@@ -114,7 +114,7 @@ module QueryParser =
               attempt (
                   pKeyword "NESTED"
                   >>. opt (pKeyword "PATH" >>% ())
-                  >>. (pCharacterStringLiteral |>> String |>> Literal |> withExprPosition)
+                  >>. pCharacterStringLiteral
                   .>>. opt (attempt (pKeyword "AS" >>. pIdentifierExpr))
                   .>>. pJsonTableColumnsClause
                   |>> fun ((path, name), cols) ->
@@ -131,10 +131,7 @@ module QueryParser =
                       opt (attempt (pKeyword "FORMAT" >>. pJsonRepresentation))
                       >>= fun fmt ->
                           opt (
-                              attempt (
-                                  pKeyword "PATH"
-                                  >>. (pCharacterStringLiteral |>> String |>> Literal |> withExprPosition)
-                              )
+                              attempt (pKeyword "PATH" >>. pCharacterStringLiteral)
                           )
                           >>= fun path ->
                               // <JSON query wrapper behavior> ::= WITHOUT [ ARRAY ] WRAPPER
@@ -510,10 +507,12 @@ module QueryParser =
               |>> fun (cols, alias) -> Using cols, alias ]
 
     // 7.10 <partitioned join column reference list> ::= ( <column reference> [ { , <column reference> }... ] )
+    // <partitioned join column reference> ::= <column reference> — column references only,
+    // not arbitrary value expressions.
     let pPartitionBy =
         pKeyword "PARTITION"
         >>. pKeyword "BY"
-        >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ",")))
+        >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pColumnReferenceExpr (token (pstring ",")))
 
     // 7.10 <joined table> — one suffix folded into a left-associative chain:
     // 7.10 <joined table> ::= <cross join> | <qualified join> | <natural join>

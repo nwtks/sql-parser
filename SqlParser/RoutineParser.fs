@@ -86,6 +86,32 @@ module RoutineParser =
               )
               attempt (pKeyword "NAME" >>. pQualifiedNameExpr |>> ExternalName) ]
 
+    // ISO 9075-2 11.60 SR: each <routine characteristic> may appear at most once in a
+    // given routine definition — reject duplicates (the BNF's "<characteristic>..."
+    // alone would allow them). Categories: Language / ParameterStyle / SpecificName /
+    // Deterministic / SqlDataAccess / NullCall / DynamicResultSets / SavepointLevel / ExternalName.
+    let pRoutineCharacteristics =
+        many pRoutineCharacteristic
+        >>= fun chars ->
+            let dup =
+                chars
+                |> List.groupBy (fun c ->
+                    match c with
+                    | Language _ -> "Language"
+                    | ParameterStyle _ -> "ParameterStyle"
+                    | SpecificName _ -> "SpecificName"
+                    | Deterministic _ -> "Deterministic"
+                    | SqlDataAccess _ -> "SqlDataAccess"
+                    | NullCall _ -> "NullCall"
+                    | DynamicResultSets _ -> "DynamicResultSets"
+                    | SavepointLevel _ -> "SavepointLevel"
+                    | ExternalName _ -> "ExternalName")
+                |> List.tryFind (fun (_, g) -> List.length g > 1)
+
+            match dup with
+            | Some (cat, _) -> fail (sprintf "duplicate routine characteristic: %s" cat)
+            | None -> preturn chars
+
     // 11.60 <routine body> ::= <SQL routine spec> | <external body reference>
     let pRoutineBody =
         choice
@@ -106,7 +132,7 @@ module RoutineParser =
     let pCreateProcedureStatement =
         pKeyword "CREATE" >>. pKeyword "PROCEDURE" >>. pQualifiedNameExpr
         .>>. pParameterDeclarationList
-        .>>. many pRoutineCharacteristic
+        .>>. pRoutineCharacteristics
         .>>. pRoutineBody
         |>> fun (((name, parameters), characteristics), body) ->
             CreateProcedure
@@ -121,7 +147,7 @@ module RoutineParser =
         pKeyword "CREATE" >>. pKeyword "FUNCTION" >>. pQualifiedNameExpr
         .>>. pParameterDeclarationList
         .>>. (pKeyword "RETURNS" >>. pDataType)
-        .>>. many pRoutineCharacteristic
+        .>>. pRoutineCharacteristics
         .>>. pRoutineBody
         |>> fun ((((name, parameters), returns), characteristics), body) ->
             CreateFunction
@@ -134,7 +160,7 @@ module RoutineParser =
     // 11.60 <alter routine statement> ::= ALTER <specific routine designator> <routine characteristic>... [ RESTRICT ]
     let pAlterRoutineStatement =
         pKeyword "ALTER" >>. pSpecificRoutineDesignator
-        .>>. many pRoutineCharacteristic
+        .>>. pRoutineCharacteristics
         .>>. opt (pKeyword "RESTRICT")
         |>> fun ((routine, characteristics), _) ->
             AlterRoutine

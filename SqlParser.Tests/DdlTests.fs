@@ -719,7 +719,7 @@ let ``GRANT EXECUTE ON routine verification`` () =
     | res -> Assert.Fail(sprintf "Expected GRANT SELECT ON PROCEDURE, got %A" res)
 
     match parse "GRANT SELECT (SPECIFIC FUNCTION f) ON TYPE my_type TO alice" with
-    | Grant(GrantStatement.GrantPrivileges(Privileges.Actions [ PrivilegeAction.Select(Some [ { Kind = Identifier "F" } ]) ],
+    | Grant(GrantStatement.GrantPrivileges(Privileges.Actions [ PrivilegeAction.Select(Some(PrivilegeMethods [ { Kind = Identifier "F" } ])) ],
                                            { Kind = Identifier "MY_TYPE" },
                                            [ { Kind = Identifier "ALICE" } ],
                                            false,
@@ -811,13 +811,20 @@ let ``CREATE FUNCTION verification`` () =
 
 [<Fact>]
 let ``CREATE FUNCTION with result sets and null-call verification`` () =
-    match
-        parse
-            "CREATE FUNCTION f () RETURNS INT DYNAMIC RESULT SETS 5 RETURNS NULL ON NULL INPUT CALLED ON NULL INPUT SELECT 1"
-    with
+    match parse "CREATE FUNCTION f () RETURNS INT DYNAMIC RESULT SETS 5 RETURNS NULL ON NULL INPUT SELECT 1" with
     | CreateFunction { Returns = Some Integer
-                       Characteristics = [ DynamicResultSets 5UL; NullCall true; NullCall false ] } -> ()
+                       Characteristics = [ DynamicResultSets 5UL; NullCall true ] } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateFunction characteristics, got %A" res)
+
+    match parse "CREATE FUNCTION f () RETURNS INT CALLED ON NULL INPUT SELECT 1" with
+    | CreateFunction { Returns = Some Integer
+                       Characteristics = [ NullCall false ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateFunction CALLED ON NULL INPUT, got %A" res)
+
+[<Fact>]
+let ``CREATE FUNCTION rejects duplicate characteristics`` () =
+    parseFails "CREATE FUNCTION f () RETURNS INT CALLED ON NULL INPUT RETURNS NULL ON NULL INPUT SELECT 1"
+    parseFails "CREATE FUNCTION f () RETURNS INT LANGUAGE SQL LANGUAGE SQL SELECT 1"
 
 [<Fact>]
 let ``ALTER ROUTINE verification`` () =

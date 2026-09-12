@@ -161,13 +161,33 @@ module TypeParser =
                   >>% NullCall false
               ) ]
 
+    // ISO 9075-2 SR: each <method characteristic> may appear at most once — reject duplicates.
+    let pMethodCharacteristics =
+        many pMethodCharacteristic
+        >>= fun chars ->
+            let dup =
+                chars
+                |> List.groupBy (fun c ->
+                    match c with
+                    | Language _ -> "Language"
+                    | ParameterStyle _ -> "ParameterStyle"
+                    | Deterministic _ -> "Deterministic"
+                    | SqlDataAccess _ -> "SqlDataAccess"
+                    | NullCall _ -> "NullCall"
+                    | _ -> "Other")
+                |> List.tryFind (fun (_, g) -> List.length g > 1)
+
+            match dup with
+            | Some (cat, _) -> fail (sprintf "duplicate method characteristic: %s" cat)
+            | None -> preturn chars
+
     // 11.51 <original method specification> ::= <partial method specification>
     //     [ SELF AS RESULT ] [ SELF AS LOCATOR ] [ <method characteristics> ]
     let pOriginalMethodSpecification =
         pPartialMethodSpecification
         .>>. opt (attempt (pKeyword "SELF" >>. pKeyword "AS" >>. pKeyword "RESULT" >>% true))
         .>>. opt (attempt (pKeyword "SELF" >>. pKeyword "AS" >>. pKeyword "LOCATOR" >>% true))
-        .>>. many pMethodCharacteristic
+        .>>. pMethodCharacteristics
         |>> fun (((baseSpec, selfAsResult), selfAsLocator), characteristics) ->
             { baseSpec with
                 SelfAsResult = Option.isSome selfAsResult

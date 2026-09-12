@@ -173,6 +173,23 @@ module Types =
                   .>>. opt (pKeyword "SCOPE" >>. pQualifiedNameExpr)
                   |>> fun (t, scope) -> ReferenceType(t, scope)
               )
-              pIdentifierExpr |>> UserDefinedType ]
+              // 6.1 <path-resolved user-defined type name> ::= [ <schema name> <period> ] <qualified identifier>
+              // A UDT name is an identifier (optionally schema-qualified), but it must not be
+              // followed by another identifier — that would indicate a misparse (e.g. the
+              // NESTED PATH column form of JSON_TABLE, where NESTED would be read as a
+              // column name and PATH as a UDT).
+              attempt (
+                  pSchemaQualifiedName
+                  .>>? notFollowedBy pIdentifier
+                  >>= fun parts ->
+                      getPosition
+                      |>> fun pos ->
+                          let expr =
+                              match parts with
+                              | [ s ] -> Identifier s
+                              | ps -> ColumnReference ps
+
+                          UserDefinedType { Kind = expr; Pos = { Line = pos.Line; Column = pos.Column } }
+              ) ]
 
     pDataTypeRef.Value <- choice [ attempt pCollectionType; pDataTypeElement ]

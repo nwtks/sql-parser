@@ -706,7 +706,7 @@ let ``JSON_TABLE verification`` () =
         | [ { Kind = JsonTable(stmt, corr) } ] ->
             match stmt.Common with
             | { Context = { Kind = Identifier "DOC" }
-                Path = { Kind = Literal(String "$.a") }
+                Path = "$.a"
                 PathName = None
                 Passing = [] } -> ()
             | res -> Assert.Fail(sprintf "Expected JsonApiCommon, got %A" res)
@@ -715,7 +715,7 @@ let ``JSON_TABLE verification`` () =
             | [ JsonOrdinality { Kind = Identifier "ID" }
                 JsonRegular { Name = { Kind = Identifier "NAME" }
                               DataType = Varchar(Some 50)
-                              Path = Some { Kind = Literal(String "$.name") }
+                              Path = Some "$.name"
                               OnEmpty = Some JsonColumnNull
                               OnError = Some JsonColumnError } ] -> ()
             | res -> Assert.Fail(sprintf "Expected columns, got %A" res)
@@ -769,7 +769,7 @@ let ``JSON_TABLE nested columns verification`` () =
                               Path = None
                               OnEmpty = None
                               OnError = None }
-                JsonNested { Path = { Kind = Literal(String "$.items") }
+                JsonNested { Path = "$.items"
                              Name = Some { Kind = Identifier "IT" }
                              Columns = nested } ] ->
                 match nested with
