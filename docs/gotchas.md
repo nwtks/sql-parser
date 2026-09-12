@@ -334,3 +334,31 @@ The `Condition` field of `RowPatternDefinition` is an `Expression` record (`{ Ki
 ## `<constraint characteristics>` must not swallow a following `COLLATE`
 
 10.8 — a domain constraint is `[ <constraint name definition> ] CHECK ( ... ) [ <constraint characteristics> ]` and the enclosing `<domain definition>` ends with `[ <collate clause> ]`. The parser must leave `COLLATE` unconsumed so the domain can parse it. `pConstraintCharacteristics`'s second alternative requires `[ NOT ] DEFERRABLE` before the optional `<constraint check time>`, so a bare `NOT DEFERRABLE COLLATE en_us` parses the deferrability and stops cleanly. Do **not** guard the branch with `notFollowedBy (pKeyword "COLLATE")`: that makes a valid `NOT DEFERRABLE` fail fatally (via `attempt` backtracking) and rejects `CREATE DOMAIN ... NOT DEFERRABLE COLLATE ...`. The clause is optional overall, so the parser ends with a `preturn` empty result.
+
+## A `>>.`-chain returns the *last* keyword's string
+
+11.30 `<drop system versioning clause>` — `pKeyword` returns `Parser<string, unit>`, and the `>>.`-family is left-associative at equal precedence, so `pKeyword "DROP" >>. pKeyword "SYSTEM" >>. pKeyword "VERSIONING" .>>. pDropBehavior` groups as `((DROP >>. SYSTEM) >>. VERSIONING) .>>. pDropBehavior` and yields `string * bool` (the string is `"VERSIONING"`). The compiler then reports `DropSystemVersioning` as "expects `bool` but was given `string * bool`". Fix: discard the last keyword with `>>.` instead of `.>>.` — `pKeyword "DROP" >>. pKeyword "SYSTEM" >>. pKeyword "VERSIONING" >>. pDropBehavior` (see `pAlterTableStatement` in `DdlParser.fs`).
+
+## An optional-looking sub-rule must not match empty input
+
+11.20 `<alter identity column specification>` — the rule is `<set identity column generation clause> [ <alter identity column option>... ] | <alter identity column option>...`. Transcribing the first alternative as `opt pSetIdentityColumnGeneration .>>. many pAlterIdentityColumnOption` makes the parser succeed on empty input, because `opt` and `many` both allow zero matches. That silently shadows every later `<alter column action>` alternative (`ALTER COLUMN c` alone would "succeed" with an empty specification). Fix: transcribe the two alternatives literally — `attempt (pSetIdentityColumnGeneration .>>. many option) <|> (many1 option)` — so at least one element must match.
+
+## `RESTART` / `EXPRESSION` / `IDENTITY` / `GENERATED` / `ENFORCED` are not reserved words
+
+5.2 `<reserved word>` — only `PERIOD`, `SCOPE`, `SYSTEM`, `SYSTEM_TIME`, `VERSIONING`, `IDENTITY`, and `COLUMN` are reserved among the keywords the new `ALTER TABLE` actions use. Consequences:
+
+- `ALTER TABLE t ALTER COLUMN c DROP EXPRESSION` is safe *at the column-action level*, because that level has no `DROP <column name>` alternative to consume `EXPRESSION` as a name. At the table level the same string would be eaten by the generic `DROP [ COLUMN ] <identifier>` branch, so any new `DROP <keyword>` action must be listed *before* that branch.
+- `DROP IDENTITY` / `DROP SCOPE` / `DROP PERIOD` are unambiguous because `IDENTITY`, `SCOPE`, and `PERIOD` *are* reserved, so `pIdentifierExpr` refuses them.
+- `SET GENERATED { ALWAYS | BY DEFAULT }` is likewise unambiguous (`GENERATED` is not reserved, but no earlier alternative matches `SET GENERATED`).
+
+## `pSequenceOption` is assembled from sub-rule parsers
+
+11.72/11.73 — `<sequence generator option>` is `<sequence generator data type option> | <common sequence generator options>`, and `<common sequence generator options>` is start-with plus `<basic sequence generator option>`. The parser therefore composes `pSequenceGeneratorStartWithOption`, `pBasicSequenceGeneratorOption`, and `pAlterSequenceGeneratorRestartOption` rather than listing every keyword in one `choice`. All of them must still be defined *before* `pColumnDefinition` (and therefore before `pAlterTableStatement`), because `pIdentitySpec` and the 11.20 option parser reference them.
+
+## `pConstraintEnforcement` must live near `pDropBehavior`, not inside `pConstraintCharacteristics`
+
+10.8 `<constraint enforcement>` was originally a local `pEnforced` inside `pConstraintCharacteristics`. 11.25 `ALTER CONSTRAINT <name> [ NOT ] ENFORCED` needs the same parser, but `pAlterTableStatement` appears *earlier* in `DdlParser.fs` than `pConstraintCharacteristics`, so a local binding is not visible. Hoist it to module level next to `pDropBehavior` and let `pConstraintCharacteristics` alias it (`let pEnforced = pConstraintEnforcement`).
+
+## `PERIOD FOR SYSTEM_TIME` needs the `SYSTEM_TIME` token, not `SYSTEM` + `_TIME`
+
+11.3/11.27 `<system time period specification> ::= PERIOD FOR SYSTEM_TIME` — `SYSTEM_TIME` is a single reserved word (Lexer.fs), so `pKeyword "SYSTEM_TIME"` matches it. Writing `pKeyword "SYSTEM" >>. pKeyword "_TIME"` fails, and so does treating the underscore as a separator.

@@ -24,7 +24,7 @@ A SQL parser implemented in F# using [FParsec](https://www.quanttec.com/fparsec/
 - `CREATE VIEW`.
 - `CREATE ROLE` / `DROP ROLE`.
 - `DROP` (Table, Index, View, Role).
-- `ALTER TABLE` (`ADD COLUMN`, `DROP COLUMN`, `ALTER COLUMN ... SET/DROP DEFAULT`, `SET/DROP NOT NULL`, `SET DATA TYPE`, `ADD/DROP CONSTRAINT`, `RENAME TO`, `RENAME COLUMN`).
+- `ALTER TABLE` — the full `<alter table action>` set: `ADD [COLUMN]`, `DROP [COLUMN] ... CASCADE|RESTRICT`, `ALTER [COLUMN]` (`SET`/`DROP DEFAULT`, `SET`/`DROP NOT NULL`, `ADD`/`DROP SCOPE`, `SET DATA TYPE`, `SET GENERATED ...`, `RESTART`/`SET <sequence option>`, `DROP IDENTITY`, `DROP EXPRESSION`), `ADD`/`ALTER`/`DROP CONSTRAINT`, `ADD`/`DROP PERIOD FOR ...`, and `ADD`/`DROP SYSTEM VERSIONING`.
 - `GRANT` / `REVOKE` (privileges and roles, including `ALL PRIVILEGES`, `WITH GRANT OPTION`, `WITH ADMIN OPTION`).
 
 ### 🔐 Transactions

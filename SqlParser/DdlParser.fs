@@ -68,23 +68,36 @@ module DdlParser =
               )
               attempt (pKeyword "DEFAULT" >>. pExpression |>> Default) ]
 
-    // 11.72 <sequence generator option> — shared by CREATE/ALTER SEQUENCE and
-    // the <identity column specification> (11.2).
-    let pSequenceOption =
+    // 11.72 <basic sequence generator option> ::= <sequence generator increment by option>
+    //     | <sequence generator maxvalue option> | <sequence generator minvalue option>
+    //     | <sequence generator cycle option>
+    let pBasicSequenceGeneratorOption =
         choice
-            [ attempt (pKeyword "AS" >>. pDataType |>> DataTypeOption)
-              attempt (pKeyword "START" >>. pKeyword "WITH" >>. pSignedNumericLiteral |>> StartWith)
-              attempt (pKeyword "INCREMENT" >>. pKeyword "BY" >>. pSignedNumericLiteral |>> IncrementBy)
+            [ attempt (pKeyword "INCREMENT" >>. pKeyword "BY" >>. pSignedNumericLiteral |>> IncrementBy)
               attempt (pKeyword "MAXVALUE" >>. pSignedNumericLiteral |>> fun v -> MaxValue(Some v))
               attempt (pKeyword "NO" >>. pKeyword "MAXVALUE" >>% MaxValue None)
               attempt (pKeyword "MINVALUE" >>. pSignedNumericLiteral |>> fun v -> MinValue(Some v))
               attempt (pKeyword "NO" >>. pKeyword "MINVALUE" >>% MinValue None)
               attempt (pKeyword "CYCLE" >>% Cycle true)
-              attempt (pKeyword "NO" >>. pKeyword "CYCLE" >>% Cycle false)
-              attempt (
-                  pKeyword "RESTART" >>. opt (pKeyword "WITH" >>. pSignedNumericLiteral)
-                  |>> Restart
-              ) ]
+              attempt (pKeyword "NO" >>. pKeyword "CYCLE" >>% Cycle false) ]
+
+    // 11.72 <sequence generator start with option> ::= START WITH <sequence generator start value>
+    let pSequenceGeneratorStartWithOption =
+        pKeyword "START" >>. pKeyword "WITH" >>. pSignedNumericLiteral |>> StartWith
+
+    // 11.73 <alter sequence generator restart option> ::= RESTART [ WITH <sequence generator restart value> ]
+    let pAlterSequenceGeneratorRestartOption =
+        pKeyword "RESTART" >>. opt (pKeyword "WITH" >>. pSignedNumericLiteral)
+        |>> Restart
+
+    // 11.72 <sequence generator option> — shared by CREATE/ALTER SEQUENCE and
+    // the <identity column specification> (11.4).
+    let pSequenceOption =
+        choice
+            [ attempt (pKeyword "AS" >>. pDataType |>> DataTypeOption)
+              attempt pSequenceGeneratorStartWithOption
+              attempt pBasicSequenceGeneratorOption
+              attempt pAlterSequenceGeneratorRestartOption ]
 
     // 11.4 <identity column specification> ::= GENERATED { ALWAYS | BY DEFAULT }
     //     AS IDENTITY [ ( <common sequence generator options> ) ]
@@ -397,6 +410,12 @@ module DdlParser =
     // 11.2 <drop behavior> ::= CASCADE | RESTRICT   (true = CASCADE, false = RESTRICT)
     let pDropBehavior = pKeyword "CASCADE" >>% true <|> (pKeyword "RESTRICT" >>% false)
 
+    // 10.8 <constraint enforcement> ::= [ NOT ] ENFORCED   (true = ENFORCED, false = NOT ENFORCED)
+    // Also used by 11.25 <alter table constraint definition>.
+    let pConstraintEnforcement: Parser<bool, unit> =
+        attempt (pKeyword "NOT" >>. pKeyword "ENFORCED" >>% false)
+        <|> (pKeyword "ENFORCED" >>% true)
+
     // 12.2 <grant privilege statement> ::= GRANT <privileges> TO <grantee> [ { , <grantee> }... ]
     //     [ WITH HIERARCHY OPTION ] [ WITH GRANT OPTION ] [ GRANTED BY <grantor> ]
     let pGrantStatement =
@@ -540,8 +559,68 @@ module DdlParser =
                   attempt (pKeyword "TYPE" >>. pQualifiedNameExpr .>>. pDropBehavior) |>> DropType ]
         |>> Drop
 
+    // 11.3 <system or application time period specification>
+    //     ::= PERIOD FOR SYSTEM_TIME | PERIOD FOR <application time period name>
+    let pTimePeriodSpecification =
+        attempt (
+            pKeyword "PERIOD" >>. pKeyword "FOR" >>. pKeyword "SYSTEM_TIME"
+            >>% TimePeriodSpecification.SystemTimePeriod
+        )
+        <|> (pKeyword "PERIOD" >>. pKeyword "FOR" >>. pIdentifierExpr
+             |>> TimePeriodSpecification.ApplicationTimePeriod)
+
+    // 11.3 <table period definition> ::= <system or application time period specification>
+    //     <left paren> <period begin column name> <comma> <period end column name> <right paren>
+    let pTablePeriodDefinition =
+        pTimePeriodSpecification
+        .>>. between
+            (token (pstring "("))
+            (token (pstring ")"))
+            (pIdentifierExpr .>>. (token (pstring ",") >>. pIdentifierExpr))
+        |>> fun (specification, (beginColumn, endColumn)) ->
+            { TablePeriodDefinition.Specification = specification
+              BeginColumn = beginColumn
+              EndColumn = endColumn }
+
+    // 11.27 <add system time period column list>
+    //     ::= ADD [ COLUMN ] <column definition 1> ADD [ COLUMN ] <column definition 2>
+    // Both columns are required by the grammar, so this parser yields exactly two entries.
+    let pAddSystemTimePeriodColumnList =
+        (pKeyword "ADD" >>. opt (pKeyword "COLUMN") >>. pColumnDefinition)
+        .>>. (pKeyword "ADD" >>. opt (pKeyword "COLUMN") >>. pColumnDefinition)
+        |>> fun (first, second) -> [ first; second ]
+
     // 11.10 <alter table statement> ::= ALTER TABLE <table name> <alter table action>
     let pAlterTableStatement =
+        // 11.20 <set identity column generation clause> ::= SET GENERATED { ALWAYS | BY DEFAULT }
+        let pSetIdentityColumnGeneration =
+            pKeyword "SET"
+            >>. pKeyword "GENERATED"
+            >>. (pKeyword "ALWAYS" >>% true <|> (pKeyword "BY" >>. pKeyword "DEFAULT" >>% false))
+
+        // 11.20 <alter identity column option>
+        //     ::= <alter sequence generator restart option> | SET <basic sequence generator option>
+        let pAlterIdentityColumnOption =
+            attempt pAlterSequenceGeneratorRestartOption
+            <|> (pKeyword "SET" >>. pBasicSequenceGeneratorOption)
+
+        // 11.20 <alter identity column specification> ::=
+        //         <set identity column generation clause> [ <alter identity column option>... ]
+        //       | <alter identity column option>...
+        // At least one of the two alternatives must match, so the parser never succeeds on empty
+        // input (which would otherwise shadow the remaining <alter column action> alternatives).
+        let pAlterIdentityColumnSpecification: Parser<AlterIdentityColumnSpecification, unit> =
+            attempt (
+                pSetIdentityColumnGeneration .>>. many pAlterIdentityColumnOption
+                |>> fun (generation, opts) ->
+                    { AlterIdentityColumnSpecification.Generation = Some generation
+                      Options = opts }
+            )
+            <|> (many1 pAlterIdentityColumnOption
+                 |>> fun opts ->
+                     { AlterIdentityColumnSpecification.Generation = None
+                       Options = opts })
+
         let pColumnAction =
             choice
                 [ attempt (
@@ -557,21 +636,82 @@ module DdlParser =
                       pKeyword "DROP" >>. pKeyword "NOT" >>. pKeyword "NULL"
                       >>% ColumnAlteration.DropNotNull
                   )
+                  // 11.17 <add column scope clause> ::= ADD <scope clause>
+                  attempt (
+                      pKeyword "ADD" >>. pKeyword "SCOPE" >>. pQualifiedNameExpr
+                      |>> ColumnAlteration.AddColumnScope
+                  )
+                  // 11.18 <drop column scope clause> ::= DROP SCOPE <drop behavior>
+                  attempt (
+                      pKeyword "DROP" >>. pKeyword "SCOPE" >>. pDropBehavior
+                      |>> ColumnAlteration.DropColumnScope
+                  )
                   attempt (
                       pKeyword "SET" >>. pKeyword "DATA" >>. pKeyword "TYPE" >>. pDataType
                       |>> ColumnAlteration.SetDataType
-                  ) ]
+                  )
+                  // 11.20 <alter identity column specification>
+                  attempt (pAlterIdentityColumnSpecification |>> ColumnAlteration.AlterIdentityColumn)
+                  // 11.21 <drop identity property clause> ::= DROP IDENTITY
+                  attempt (pKeyword "DROP" >>. pKeyword "IDENTITY" >>% ColumnAlteration.DropIdentity)
+                  // 11.22 <drop column generation expression clause> ::= DROP EXPRESSION
+                  // NOTE: EXPRESSION is not a reserved word, but at this level there is no
+                  // `DROP <column name>` alternative to shadow, so the branch is unambiguous.
+                  attempt (pKeyword "DROP" >>. pKeyword "EXPRESSION" >>% ColumnAlteration.DropExpression) ]
 
-        // 11.10 <alter table action> ::= ADD COLUMN <column definition> | ADD <table constraint>
-        //     | DROP COLUMN <column name> | DROP CONSTRAINT <constraint name> | ALTER COLUMN ...
+        // 11.10 <alter table action> ::= <add column definition> | <alter column definition>
+        //     | <drop column definition> | <add table constraint definition>
+        //     | <alter table constraint definition> | <drop table constraint definition>
+        //     | <add table period definition> | <drop table period definition>
+        //     | <add system versioning clause> | <drop system versioning clause>
         let pAction =
             choice
                 [ attempt (pKeyword "ADD" >>. opt (pKeyword "COLUMN") >>. pColumnDefinition |>> AddColumn)
                   attempt (pKeyword "ADD" >>. pTableConstraint |>> AlterTableAction.AddConstraint)
-                  attempt (pKeyword "DROP" >>. opt (pKeyword "COLUMN") >>. pIdentifierExpr |>> DropColumn)
+                  // 11.27 <add table period definition> ::= ADD <table period definition>
+                  //     [ <add system time period column list> ]
                   attempt (
-                      pKeyword "DROP" >>. pKeyword "CONSTRAINT" >>. pIdentifierExpr
+                      pKeyword "ADD" >>. pTablePeriodDefinition
+                      .>>. opt (attempt pAddSystemTimePeriodColumnList)
+                      |>> fun (period, columns) -> AddTablePeriod(period, Option.defaultValue [] columns)
+                  )
+                  // 11.29 <add system versioning clause> ::= ADD <system versioning clause>
+                  attempt (
+                      pKeyword "ADD" >>. pKeyword "SYSTEM" >>. pKeyword "VERSIONING"
+                      >>% AddSystemVersioning
+                  )
+                  // 11.26 <drop table constraint definition>
+                  //     ::= DROP CONSTRAINT <constraint name> <drop behavior>
+                  attempt (
+                      pKeyword "DROP" >>. pKeyword "CONSTRAINT" >>. pIdentifierExpr .>>. pDropBehavior
                       |>> AlterTableAction.DropConstraint
+                  )
+                  // 11.23 <drop column definition> ::= DROP [ COLUMN ] <column name> <drop behavior>
+                  attempt (
+                      pKeyword "DROP" >>. opt (pKeyword "COLUMN") >>. pIdentifierExpr
+                      .>>. pDropBehavior
+                      |>> DropColumn
+                  )
+                  // 11.28 <drop table period definition>
+                  //     ::= DROP <system or application time period specification> <drop behavior>
+                  attempt (
+                      pKeyword "DROP" >>. pTimePeriodSpecification .>>. pDropBehavior
+                      |>> DropTablePeriod
+                  )
+                  // 11.30 <drop system versioning clause> ::= DROP SYSTEM VERSIONING <drop behavior>
+                  attempt (
+                      pKeyword "DROP"
+                      >>. pKeyword "SYSTEM"
+                      >>. pKeyword "VERSIONING"
+                      >>. pDropBehavior
+                      |>> DropSystemVersioning
+                  )
+                  // 11.25 <alter table constraint definition>
+                  //     ::= ALTER CONSTRAINT <constraint name> <constraint enforcement>
+                  attempt (
+                      pKeyword "ALTER" >>. pKeyword "CONSTRAINT" >>. pIdentifierExpr
+                      .>>. pConstraintEnforcement
+                      |>> AlterTableAction.AlterConstraint
                   )
                   attempt (
                       pKeyword "ALTER" >>. opt (pKeyword "COLUMN") >>. pIdentifierExpr
@@ -609,10 +749,8 @@ module DdlParser =
             attempt (pKeyword "NOT" >>. pKeyword "DEFERRABLE" >>% false)
             <|> (pKeyword "DEFERRABLE" >>% true)
 
-        // 10.8 <constraint enforcement> ::= [ NOT ] ENFORCED
-        let pEnforced: Parser<bool, unit> =
-            attempt (pKeyword "NOT" >>. pKeyword "ENFORCED" >>% false)
-            <|> (pKeyword "ENFORCED" >>% true)
+        // 10.8 <constraint enforcement> ::= [ NOT ] ENFORCED — shared with 11.25
+        let pEnforced = pConstraintEnforcement
 
         let mk (initiallyDeferred: bool option) (deferrable: bool option) (enforced: bool option) =
             { InitiallyDeferred = initiallyDeferred

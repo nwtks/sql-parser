@@ -131,9 +131,39 @@ The 5.4 `<schema qualified name>` rule (`[ <schema name> <period> ] <qualified i
 
 ## SEQUENCE options shared between SEQUENCE statements and IDENTITY columns
 
-`CREATE SEQUENCE` / `ALTER SEQUENCE` (11.54/11.73) and the `<identity column specification>` (11.2) share the same `<common sequence generator options>`. Both are parsed by a single `pSequenceOption` producing a `SequenceOption` DU (`DataTypeOption` / `StartWith` / `IncrementBy` / `MaxValue of decimal option` / `MinValue of decimal option` / `Cycle of bool` / `Restart of decimal option`), placed in `DdlParser.fs` *before* `pColumnDefinition` so both parsers can reference it.
+`CREATE SEQUENCE` / `ALTER SEQUENCE` (11.72/11.73) and the `<identity column specification>` (11.4) share the same `<common sequence generator options>`. All of them are parsed by a single `SequenceOption` DU (`DataTypeOption` / `StartWith` / `IncrementBy` / `MaxValue of decimal option` / `MinValue of decimal option` / `Cycle of bool` / `Restart of decimal option`), defined in `DdlParser.fs` *before* `pColumnDefinition` so both parsers can reference it.
 
-- **Trade-off:** One options DU keeps the two features consistent and avoids a second near-identical type. `MaxValue`/`MinValue` use `decimal option` where `None` means `NO MAXVALUE`/`NO MINVALUE`; `Restart` is only valid in `ALTER SEQUENCE` but is not restricted at parse time. `CreateTableStatement.TableScope` (`TableScope option`: `GLOBAL TEMPORARY`/`LOCAL TEMPORARY`) and `ColumnDefinition.Identity` (`IdentitySpec option` = `{ IsAlways; Options }`) are plain option fields, so the absent forms (`CREATE TABLE ...`, `id INT`) are `None`.
+The sub-rules are separate parsers so each caller can take exactly what its clause allows:
+
+- `pBasicSequenceGeneratorOption` — `<basic sequence generator option>` (11.72): `INCREMENT BY`, `MAXVALUE`, `NO MAXVALUE`, `MINVALUE`, `NO MINVALUE`, `CYCLE`, `NO CYCLE`.
+- `pSequenceGeneratorStartWithOption` — `<sequence generator start with option>` (11.72).
+- `pAlterSequenceGeneratorRestartOption` — `<alter sequence generator restart option>` (11.73).
+- `pSequenceOption` — `<sequence generator option>`: `<sequence generator data type option>` (`AS <data type>`) or `<common sequence generator options>` (start-with + basic). Used by `CREATE SEQUENCE`.
+
+- **Trade-off:** One options DU keeps the features consistent and avoids near-identical types, while the split parsers keep each production to its own grammar. `MaxValue`/`MinValue` use `decimal option` where `None` means `NO MAXVALUE`/`NO MINVALUE`. `CREATE TABLE`'s `<identity column specification>` and `ALTER SEQUENCE` still reuse the permissive `pSequenceOption` (so `RESTART`/`AS <data type>`/`START WITH` are not restricted there); the new `<alter identity column specification>` (11.20) instead uses the narrowed parsers, since it is the only place where the standard is explicit about `SET <basic sequence generator option>`. `CreateTableStatement.TableScope` (`TableScope option`: `GLOBAL TEMPORARY`/`LOCAL TEMPORARY`) and `ColumnDefinition.Identity` (`IdentitySpec option` = `{ IsAlways; Options }`) are plain option fields, so the absent forms (`CREATE TABLE ...`, `id INT`) are `None`.
+
+## Full `<alter table action>` coverage (11.10)
+
+`AlterTableAction` now covers every alternative of `<alter table action>`, so `ALTER TABLE` is complete against 11.10:
+
+| Action | AST case | Rule |
+|--------|----------|------|
+| `ADD [COLUMN] <column definition>` | `AddColumn` | 11.11 |
+| `ALTER [COLUMN] <column name> <alter column action>` | `AlterColumn` | 11.12 |
+| `DROP [COLUMN] <column name> <drop behavior>` | `DropColumn of Expression * bool` | 11.23 |
+| `ADD <table constraint definition>` | `AddConstraint` | 11.24 |
+| `ALTER CONSTRAINT <name> <constraint enforcement>` | `AlterConstraint of Expression * bool` | 11.25 |
+| `DROP CONSTRAINT <name> <drop behavior>` | `DropConstraint of Expression * bool` | 11.26 |
+| `ADD <table period definition> [...]` | `AddTablePeriod of TablePeriodDefinition * ColumnDefinition list` | 11.27 |
+| `DROP <period specification> <drop behavior>` | `DropTablePeriod of TimePeriodSpecification * bool` | 11.28 |
+| `ADD SYSTEM VERSIONING` | `AddSystemVersioning` | 11.29 |
+| `DROP SYSTEM VERSIONING <drop behavior>` | `DropSystemVersioning of bool` | 11.30 |
+
+`ColumnAlteration` likewise gained `AddColumnScope` (11.17), `DropColumnScope` (11.18), `AlterIdentityColumn` (11.20), `DropIdentity` (11.21), and `DropExpression` (11.22), in `<alter column action>` order.
+
+- **Trade-off:** `<drop behavior>` is modelled as a bare `bool` (`true` = CASCADE, `false` = RESTRICT) rather than a DU, matching `DropTable`/`DropView`/`DropSequence`. `AlterConstraint` carries `[NOT] ENFORCED` as a `bool` too, even though the AST already has a general `ConstraintCharacteristics` record: 11.25 only permits `<constraint enforcement>`, so reusing that record would advertise `INITIALLY`/`DEFERRABLE` support the parser does not provide. `AddTablePeriod`'s optional `<add system time period column list>` is a `ColumnDefinition list` holding exactly 0 or 2 entries (the grammar fixes the arity), which keeps absent/`[]` and present unambiguous.
+- **Trade-off:** Because the grammar marks `<drop behavior>` as required, `ALTER TABLE t DROP COLUMN c` and `ALTER TABLE t DROP CONSTRAINT c` (the common bare forms) are now rejected — the same decision already taken for `DROP TABLE`/`DROP VIEW`/`DROP SEQUENCE`/`REVOKE`. Making the new actions parse-only (no `<generation clause>` or `GENERATED ALWAYS AS ROW START|END` support in `<column definition>`) means `DROP EXPRESSION` and the `ADD ... ADD COLUMN` pair are accepted without the corresponding column *definitions* being expressible yet; those belong to 11.3/11.4 and are tracked separately in `docs/audit-report.md`.
+- **Trade-off:** `TimePeriodSpecification` and `TablePeriodDefinition` are shared types placed on the `AlterTableAction` side of `Ast.fs`. They mirror the grammar's `<table element>` alternatives (11.3), so a future `CREATE TABLE ... WITH SYSTEM VERSIONING` / `PERIOD FOR ...` element can reuse them without an AST change.
 
 ## `CALL` and `SET ROLE` get their own modules
 
