@@ -3,16 +3,17 @@ module SqlParser.Tests.ExpressionTests
 open Xunit
 open SqlParser
 
-let parseExpr sql =
-    match SqlParser.parse sql with
+// 22.1 <direct SQL statement> requires a trailing <semicolon>.
+let parseExpr (sql: string) =
+    match SqlParser.parse (sql.TrimEnd() + ";") with
     | Ok { Kind = Select(SelectQuery s) } -> s.Columns.[0] |> fun (Column(e, _)) -> e
     | Ok res -> failwithf "Expected Select, got %A" res
     | Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
 
 let parse sql = (parseExpr sql).Kind
 
-let parseFails sql =
-    match SqlParser.parse sql with
+let parseFails (sql: string) =
+    match SqlParser.parse (sql.TrimEnd() + ";") with
     | Ok _ -> failwithf "Expected parse failure for %s" sql
     | Error _ -> ()
 

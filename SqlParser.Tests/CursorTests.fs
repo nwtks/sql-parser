@@ -4,13 +4,14 @@ open Xunit
 open FParsec
 open SqlParser
 
-let parse sql =
-    match SqlParser.parse sql with
+// 22.1 <direct SQL statement> requires a trailing <semicolon>.
+let parse (sql: string) =
+    match SqlParser.parse (sql.TrimEnd() + ";") with
     | Result.Ok res -> res.Kind
     | Result.Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
 
-let parseFails sql =
-    match SqlParser.parse sql with
+let parseFails (sql: string) =
+    match SqlParser.parse (sql.TrimEnd() + ";") with
     | Result.Ok _ -> failwithf "Expected parse failure for %s" sql
     | Result.Error _ -> ()
 
@@ -105,8 +106,22 @@ let ``DECLARE CURSOR without FOR is rejected`` () = parseFails "DECLARE cur CURS
 [<Fact>]
 let ``OPEN verification`` () =
     match parse "OPEN cur" with
-    | Open { Kind = Identifier "CUR" } -> ()
+    | Open({ Kind = Identifier "CUR" }, None) -> ()
     | res -> Assert.Fail(sprintf "Expected Open, got %A" res)
+
+[<Fact>]
+let ``OPEN USING arguments verification`` () =
+    // 20.19 <dynamic open statement> ::= OPEN <conventional dynamic cursor name> [ <input using clause> ]
+    match parse "OPEN cur USING 1, 2" with
+    | Open({ Kind = Identifier "CUR" },
+           Some(UsingArguments [ { Kind = Literal(Number 1m) }; { Kind = Literal(Number 2m) } ])) -> ()
+    | res -> Assert.Fail(sprintf "Expected OPEN USING arguments, got %A" res)
+
+[<Fact>]
+let ``OPEN USING descriptor verification`` () =
+    match parse "OPEN cur USING SQL DESCRIPTOR d" with
+    | Open({ Kind = Identifier "CUR" }, Some(UsingDescriptor { Kind = Identifier "D" })) -> ()
+    | res -> Assert.Fail(sprintf "Expected OPEN USING descriptor, got %A" res)
 
 [<Fact>]
 let ``OPEN without cursor name is rejected`` () = parseFails "OPEN"
@@ -114,26 +129,41 @@ let ``OPEN without cursor name is rejected`` () = parseFails "OPEN"
 [<Fact>]
 let ``FETCH verification`` () =
     match parse "FETCH cur INTO a, b" with
-    | Fetch(None, { Kind = Identifier "CUR" }, [ { Kind = Identifier "A" }; { Kind = Identifier "B" } ]) -> ()
+    | Fetch(None, { Kind = Identifier "CUR" }, UsingArguments [ { Kind = Identifier "A" }; { Kind = Identifier "B" } ]) ->
+        ()
     | res -> Assert.Fail(sprintf "Expected Fetch, got %A" res)
+
+[<Fact>]
+let ``FETCH INTO SQL DESCRIPTOR verification`` () =
+    // 20.20 <dynamic fetch statement> ::= FETCH [ [ <fetch orientation> ] FROM ] <dynamic cursor name> <output using clause>
+    match parse "FETCH cur INTO SQL DESCRIPTOR d" with
+    | Fetch(None, { Kind = Identifier "CUR" }, UsingDescriptor { Kind = Identifier "D" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected FETCH INTO SQL DESCRIPTOR, got %A" res)
+
+[<Fact>]
+let ``FETCH INTO DESCRIPTOR without SQL keyword verification`` () =
+    match parse "FETCH cur INTO DESCRIPTOR d" with
+    | Fetch(None, { Kind = Identifier "CUR" }, UsingDescriptor { Kind = Identifier "D" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected FETCH INTO DESCRIPTOR, got %A" res)
 
 [<Fact>]
 let ``FETCH NEXT FROM verification`` () =
     match parse "FETCH NEXT FROM cur INTO a" with
-    | Fetch(Some Next, { Kind = Identifier "CUR" }, [ { Kind = Identifier "A" } ]) -> ()
+    | Fetch(Some Next, { Kind = Identifier "CUR" }, UsingArguments [ { Kind = Identifier "A" } ]) -> ()
     | res -> Assert.Fail(sprintf "Expected Fetch NEXT FROM, got %A" res)
 
 [<Fact>]
 let ``FETCH FROM verification`` () =
     match parse "FETCH FROM cur INTO a" with
-    | Fetch(None, { Kind = Identifier "CUR" }, [ { Kind = Identifier "A" } ]) -> ()
+    | Fetch(None, { Kind = Identifier "CUR" }, UsingArguments [ { Kind = Identifier "A" } ]) -> ()
     | res -> Assert.Fail(sprintf "Expected Fetch FROM, got %A" res)
 
 [<Fact>]
 let ``FETCH ABSOLUTE verification`` () =
     match parse "FETCH ABSOLUTE 5 FROM cur INTO a" with
-    | Fetch(Some(Absolute { Kind = Literal(Number 5m) }), { Kind = Identifier "CUR" }, [ { Kind = Identifier "A" } ]) ->
-        ()
+    | Fetch(Some(Absolute { Kind = Literal(Number 5m) }),
+            { Kind = Identifier "CUR" },
+            UsingArguments [ { Kind = Identifier "A" } ]) -> ()
     | res -> Assert.Fail(sprintf "Expected Fetch ABSOLUTE, got %A" res)
 
 [<Fact>]
@@ -141,7 +171,7 @@ let ``FETCH RELATIVE verification`` () =
     match parse "FETCH RELATIVE -1 FROM cur INTO a" with
     | Fetch(Some(Relative { Kind = UnaryOp(Minus, { Kind = Literal(Number 1m) }) }),
             { Kind = Identifier "CUR" },
-            [ { Kind = Identifier "A" } ]) -> ()
+            UsingArguments [ { Kind = Identifier "A" } ]) -> ()
     | res -> Assert.Fail(sprintf "Expected Fetch RELATIVE, got %A" res)
 
 [<Fact>]

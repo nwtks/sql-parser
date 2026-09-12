@@ -16,8 +16,8 @@ A SQL parser implemented in F# using [FParsec](https://www.quanttec.com/fparsec/
 
 ### 📝 Data Manipulation (DML)
 - `INSERT INTO ... VALUES / SELECT`
-- `UPDATE ... SET ... WHERE`
-- `DELETE FROM ... WHERE`
+- `UPDATE [ <table> ] ... SET ... WHERE`, including `WHERE CURRENT OF <cursor>` (positioned and preparable-dynamic variants).
+- `DELETE [ FROM <table> ] ... WHERE`, including `WHERE CURRENT OF <cursor>` (positioned and preparable-dynamic variants).
 - `MERGE INTO ... USING ... ON ...`
 - `TRUNCATE TABLE`
 - `<target table>` accepts `ONLY ( <table> )`: `UPDATE ONLY (t) ...`, `DELETE FROM ONLY (t) ...`, `MERGE INTO ONLY (t) ...`.
@@ -26,7 +26,7 @@ A SQL parser implemented in F# using [FParsec](https://www.quanttec.com/fparsec/
 ### ↕️ Cursors & Locators
 - `DECLARE <cursor> [SENSITIVE|INSENSITIVE|ASENSITIVE] [SCROLL|NO SCROLL] CURSOR [WITH|WITHOUT HOLD] [WITH|WITHOUT RETURN] FOR <query expression> [FOR READ ONLY | FOR UPDATE [OF <columns>]]`.
 - Dynamic cursors: `DECLARE <cursor> [<cursor properties>] FOR <statement name>`, `ALLOCATE <extended cursor name> [<cursor properties>] FOR <extended statement name>`, `ALLOCATE <cursor name> [CURSOR] FOR PROCEDURE <specific routine designator>`.
-- `OPEN`, `FETCH` (with `NEXT`/`PRIOR`/`FIRST`/`LAST`/`ABSOLUTE`/`RELATIVE`), `CLOSE`.
+- `OPEN <cursor> [USING <args> | USING [SQL] DESCRIPTOR <descriptor>]`, `FETCH` (with `NEXT`/`PRIOR`/`FIRST`/`LAST`/`ABSOLUTE`/`RELATIVE`) `<cursor> INTO <args> | INTO [SQL] DESCRIPTOR <descriptor>`, `CLOSE`.
 - `SELECT ... INTO ...` (single row).
 - `DECLARE LOCAL TEMPORARY TABLE ... [ON COMMIT PRESERVE|DELETE ROWS]`.
 - `FREE LOCATOR` / `HOLD LOCATOR`.
@@ -72,7 +72,7 @@ A SQL parser implemented in F# using [FParsec](https://www.quanttec.com/fparsec/
 ```fsharp
 open SqlParser
 
-let sql = "SELECT name, SUM(salary) OVER (PARTITION BY dept) FROM employees WHERE active = TRUE"
+let sql = "SELECT name, SUM(salary) OVER (PARTITION BY dept) FROM employees WHERE active = TRUE;"
 
 match SqlParser.parse sql with
 | Ok stmt ->
@@ -80,6 +80,8 @@ match SqlParser.parse sql with
 | Error (ParseError(msg, pos)) ->
     printfn "Parse error: %s at line %d, col %d" msg pos.Line pos.Column
 ```
+
+The trailing `<semicolon>` is required — `parse` accepts a 22.1 `<direct SQL statement> ::= <directly executable statement> <semicolon>`.
 
 ## Project Structure
 

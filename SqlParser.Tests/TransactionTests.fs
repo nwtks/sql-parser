@@ -3,8 +3,9 @@ module SqlParser.Tests.TransactionTests
 open Xunit
 open SqlParser
 
-let parse sql =
-    match SqlParser.parse sql with
+// 22.1 <direct SQL statement> requires a trailing <semicolon>.
+let parse (sql: string) =
+    match SqlParser.parse (sql.TrimEnd() + ";") with
     | Ok { Kind = res } -> res
     | Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
 

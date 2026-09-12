@@ -3,13 +3,14 @@ module SqlParser.Tests.DynamicTests
 open Xunit
 open SqlParser
 
-let parse sql =
-    match SqlParser.parse sql with
+// 22.1 <direct SQL statement> requires a trailing <semicolon>.
+let parse (sql: string) =
+    match SqlParser.parse (sql.TrimEnd() + ";") with
     | Ok res -> res.Kind
     | Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
 
-let parseFails sql =
-    match SqlParser.parse sql with
+let parseFails (sql: string) =
+    match SqlParser.parse (sql.TrimEnd() + ";") with
     | Ok _ -> failwithf "Expected parse failure for %s" sql
     | Error _ -> ()
 
@@ -141,6 +142,15 @@ let ``EXECUTE with descriptors verification`` () =
               Some(UsingDescriptor { Kind = Identifier "D1" }),
               Some(UsingDescriptor { Kind = Identifier "D2" })) -> ()
     | res -> Assert.Fail(sprintf "Expected Execute with descriptors, got %A" res)
+
+[<Fact>]
+let ``EXECUTE with descriptors without SQL keyword verification`` () =
+    // 20.11/20.12 allow the SQL keyword to be omitted.
+    match parse "EXECUTE stmt INTO DESCRIPTOR d1 USING DESCRIPTOR d2" with
+    | Execute({ Kind = Identifier "STMT" },
+              Some(UsingDescriptor { Kind = Identifier "D1" }),
+              Some(UsingDescriptor { Kind = Identifier "D2" })) -> ()
+    | res -> Assert.Fail(sprintf "Expected Execute with descriptors without SQL, got %A" res)
 
 [<Fact>]
 let ``EXECUTE without clauses verification`` () =

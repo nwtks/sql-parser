@@ -608,11 +608,12 @@ The 10.4 reserved-function whitelist used to list every built-in name, so `ABS`,
 
 - **Trade-off:** `ConnectStatement` uses `Server: Expression option` (None = DEFAULT), `SetTimeZone` uses `Expression option` (None = LOCAL), and `SetSessionCollation` uses `Expression option` (None = NO COLLATION), unifying the shorthand forms to `None` to reduce branching on the consumer side.
 
-## `ExecuteUsing` models argument lists and descriptors with a DU
+## `UsingClause` models argument lists and descriptors with a DU
 
-`EXECUTE`'s `INTO` / `USING` clauses can take either a `<result target list>` (argument list) or an `<SQL descriptor>`.
+`EXECUTE`'s `INTO` / `USING` clauses (20.13), `OPEN`'s `<input using clause>` (20.19) and `FETCH`'s `<output using clause>` (20.20) can each take either an argument list or an `[ SQL ] DESCRIPTOR <descriptor name>`.
 
-- **Trade-off:** An `ExecuteUsing = UsingArguments of Expression list | UsingDescriptor of Expression` DU models both forms, and `Execute` holds `ExecuteUsing option * ExecuteUsing option` (INTO, USING).
+- **Trade-off:** A `UsingClause = UsingArguments of Expression list | UsingDescriptor of Expression` DU models both forms; `Execute` holds `UsingClause option * UsingClause option` (INTO, USING), `Open` holds `UsingClause option` and `Fetch` holds a mandatory `UsingClause` (both 14.5 and 20.20 require the output clause).
+- **Trade-off:** `pUsingClause` (20.11) and `pIntoClause` (20.12) live in `CursorParser.fs`, not `DynamicParser.fs`: `CursorParser.fs` is compiled first and `pOpenStatement` / `pFetchStatement` need them, while `DynamicParser.fs` merely opens `SqlParser.CursorParser` again.
 
 ## `DescribeStatement` distinguishes its three forms with bool flags
 
@@ -788,3 +789,25 @@ The `[ <default clause> | <identity column specification> | <generation clause> 
 - **Trade-off:** `<returns data type> [ <result cast> ]` is one record because `<result cast>` is a suffix of the data type rather than an alternative of `<returns type>`; `CastFrom` is `(DataType * bool) option`, where the bool is the `<result cast from type>`'s `AS LOCATOR`.
 - **Not modelled:** `<method specification designator>` (`CREATE METHOD ...`), `<dispatch clause>` (`STATIC DISPATCH`), `<rights clause>` (`SQL SECURITY INVOKER | DEFINER`), the `<external body reference>` extras (`<parameter style clause>`, `<transform group specification>`, `<external security clause>`), `<polymorphic table function body>` and `<descriptor argument>`.
 - **Not tightened:** `<parameter default>` still accepts a general `pExpression` alongside `<descriptor value constructor>`; the grammar's `<contextually typed value specification>` alternative would need the same treatment as `<default option>`.
+
+## The `<target table>` of a positioned `DELETE` / `UPDATE` may be omitted (20.25 / 20.27)
+
+`DELETE [ FROM <target table> ] WHERE CURRENT OF <preparable dynamic cursor name>` and `UPDATE [ <target table> ] SET <set clause list> WHERE CURRENT OF <preparable dynamic cursor name>` allow the target table to be dropped. `DmlTarget = TableTarget of Expression * bool | OmittedTarget` (`bool` = `ONLY ( <table name> )`) makes the two shapes distinguishable, and `DeleteStatement.Target` / `UpdateStatement.Target` hold it instead of the old `Table` + `TableIsOnly` pair.
+
+- **Trade-off:** `MergeStatement.Target` / `MergeStatement.TargetIsOnly` keep the mandatory `Expression * bool` pair — 14.12 has no omitted form, so a `DmlTarget` there would only add an unconstructible `OmittedTarget` case.
+- **Trade-off:** `OmittedTarget` is accepted only for a positioned statement with no `<portion of>`, correlation name or search condition (`pOmittedTargetGuard`).
+- **Trade-off:** `DELETE` builds the target as `opt (attempt (pKeyword "FROM" >>. pTargetTable))` and maps `None` to `OmittedTarget`, so a `FROM` with no table name is still rejected rather than silently becoming the omitted form.
+
+## `<direct SQL statement>` requires the trailing `<semicolon>` (22.1)
+
+`SqlParser.parse` runs `ws >>. pDirectSqlStatement .>> eof`, where `pDirectSqlStatement = pStatement .>> pSemicolon`.
+
+- **Trade-off:** This is a breaking change for callers: `SqlParser.parse "SELECT 1"` no longer parses, and every test file's `parse` / `parseFails` / `parseExpr` helper appends the semicolon. Requiring it also makes `SELECT 1;;` and a bare `;` fail.
+- **Not tightened:** 22.1's `<directly executable statement>` is not enforced — `parse` still accepts `<SQL procedure statement>`s (`DECLARE CURSOR`, `OPEN`, `FETCH`, `GET DIAGNOSTICS`, dynamic SQL), so the entry point remains a general `<SQL statement>` parser.
+
+## `[ SQL ]` is optional in `<using descriptor>` / `<into descriptor>`
+
+20.10/20.11/20.12 all spell the descriptor form as `[ SQL ] DESCRIPTOR <descriptor name>`, but `pUsingClause` / `pIntoClause` used to require the `SQL` keyword.
+
+- **Trade-off:** The shared `pDescriptorName` helper is `opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR" >>. pQualifiedNameExpr`, so `USING SQL DESCRIPTOR d` and `USING DESCRIPTOR d` both parse. The descriptor branch is `attempt`ed as a whole, which keeps a plain argument named `DESCRIPTOR` usable (`INTO descriptor` → `UsingArguments [ DESCRIPTOR ]`).
+- **Not modelled:** `<into argument>` / `<using argument>` are still parsed as `pQualifiedNameExpr` / `pExpression`, so the `<target specification>` host-parameter forms are not modelled (unchanged from before).

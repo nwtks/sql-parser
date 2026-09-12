@@ -3,6 +3,7 @@ namespace SqlParser
 open FParsec
 open SqlParser.Lexer
 open SqlParser.ExpressionParser
+open SqlParser.CursorParser
 
 module DynamicParser =
     // 20.10 <using descriptor> ::= USING [ SQL ] DESCRIPTOR <descriptor name> (DESCRIBE <using descriptor>)
@@ -214,23 +215,9 @@ module DynamicParser =
                                    Nesting = nesting })
             |>> Describe
 
-    // 20.12 <output using clause> ::= INTO <into argument> [ { <comma> <into argument> }... ] | INTO [ SQL ] DESCRIPTOR <descriptor name>
-    let pIntoClause =
-        pKeyword "INTO"
-        >>. (attempt (
-                 pKeyword "SQL" >>. pKeyword "DESCRIPTOR" >>. pQualifiedNameExpr
-                 |>> UsingDescriptor
-             )
-             <|> (sepBy1 pQualifiedNameExpr (token (pstring ",")) |>> UsingArguments))
-
-    // 20.11 <input using clause> ::= USING <using argument> [ { <comma> <using argument> }... ] | USING [ SQL ] DESCRIPTOR <descriptor name>
-    let pUsingClause =
-        pKeyword "USING"
-        >>. (attempt (
-                 pKeyword "SQL" >>. pKeyword "DESCRIPTOR" >>. pQualifiedNameExpr
-                 |>> UsingDescriptor
-             )
-             <|> (sepBy1 pExpression (token (pstring ",")) |>> UsingArguments))
+    // 20.11 <input using clause> / 20.12 <output using clause> are shared with
+    // 20.19 <dynamic open statement> / 20.20 <dynamic fetch statement> and are
+    // therefore defined in CursorParser.fs (compiled before this module).
 
     // 20.13 <execute statement> ::= EXECUTE <SQL statement name> [ <output using clause> ] [ <input using clause> ]
     let pExecuteStatement =

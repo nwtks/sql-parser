@@ -67,8 +67,34 @@ module CursorParser =
               Specification = specification }
             |> DeclareCursor
 
+    // 20.11 <input using clause> / 20.12 <output using clause> — shared by
+    // 20.19 <dynamic open statement>, 20.20 <dynamic fetch statement> and
+    // 20.13 <execute statement>. Defined here (and not in DynamicParser.fs)
+    // because CursorParser.fs is compiled before DynamicParser.fs.
+
+    // 20.10 <using descriptor> / 20.12 <into descriptor>
+    // The `[ SQL ] DESCRIPTOR <descriptor name>` tail shared by both.
+    let pDescriptorName =
+        opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR" >>. pQualifiedNameExpr
+
+    // 20.11 <input using clause> ::= <using arguments> | <using input descriptor>
+    // <using arguments> ::= USING <using argument> [ { <comma> <using argument> }... ]
+    let pUsingClause =
+        pKeyword "USING"
+        >>. (attempt (pDescriptorName |>> UsingClause.UsingDescriptor)
+             <|> (sepBy1 pExpression (token (pstring ",")) |>> UsingClause.UsingArguments))
+
+    // 20.12 <output using clause> ::= <into arguments> | <into descriptor>
+    // <into arguments> ::= INTO <into argument> [ { <comma> <into argument> }... ]
+    let pIntoClause =
+        pKeyword "INTO"
+        >>. (attempt (pDescriptorName |>> UsingClause.UsingDescriptor)
+             <|> (sepBy1 pQualifiedNameExpr (token (pstring ",")) |>> UsingClause.UsingArguments))
+
     // 14.4 <open statement> ::= OPEN <cursor name>
-    let pOpenStatement = pKeyword "OPEN" >>. pQualifiedNameExpr |>> Open
+    // 20.19 <dynamic open statement> ::= OPEN <conventional dynamic cursor name> [ <input using clause> ]
+    let pOpenStatement =
+        pKeyword "OPEN" >>. pQualifiedNameExpr .>>. opt (attempt pUsingClause) |>> Open
 
     // 14.5 <fetch orientation> ::= NEXT | PRIOR | FIRST | LAST | { ABSOLUTE | RELATIVE } <simple value specification>
     let pFetchOrientation =
@@ -81,13 +107,14 @@ module CursorParser =
 
     // 14.5 <fetch statement> ::= FETCH [ [ <fetch orientation> ] FROM ]
     //                                <cursor name> INTO <fetch target list>
+    // 20.20 <dynamic fetch statement> ::= FETCH [ [ <fetch orientation> ] FROM ]
+    //                                <dynamic cursor name> <output using clause>
     let pFetchStatement =
         pKeyword "FETCH" >>. opt (attempt pFetchOrientation)
         .>>. opt (attempt (pKeyword "FROM" >>% ()))
         .>>. pQualifiedNameExpr
-        .>> pKeyword "INTO"
-        .>>. sepBy1 pQualifiedNameExpr (token (pstring ","))
-        |>> fun (((orient, _), cursor), targets) -> Fetch(orient, cursor, targets)
+        .>>. pIntoClause
+        |>> fun (((orient, _), cursor), output) -> Fetch(orient, cursor, output)
 
     // 14.6 <close statement> ::= CLOSE <cursor name>
     let pCloseStatement = pKeyword "CLOSE" >>. pQualifiedNameExpr |>> Close

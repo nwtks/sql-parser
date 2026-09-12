@@ -197,8 +197,17 @@ module SqlParser =
               attempt (pDynamic |> withStmtPosition)
               attempt (pDiagnostics |> withStmtPosition) ]
 
+    // 5.1 <semicolon> ::= ;
+    let pSemicolon = token (pstring ";")
+
+    // 22.1 <direct SQL statement> ::= <directly executable statement> <semicolon>
+    // The semicolon is mandatory; <directly executable statement> is not enforced —
+    // every <SQL statement> the dispatcher accepts is also accepted here (see
+    // docs/trade-off.md).
+    let pDirectSqlStatement = pStatement .>> pSemicolon
+
     let parse sql =
-        match run (ws >>. pStatement .>> eof) sql with
+        match run (ws >>. pDirectSqlStatement .>> eof) sql with
         | Success(res, _, _) -> Result.Ok res
         | Failure(msg, error, _) ->
             Result.Error(

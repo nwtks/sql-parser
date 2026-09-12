@@ -3,13 +3,14 @@ module SqlParser.Tests.QueryTests
 open Xunit
 open SqlParser
 
-let parse sql =
-    match SqlParser.parse sql with
+// 22.1 <direct SQL statement> requires a trailing <semicolon>.
+let parse (sql: string) =
+    match SqlParser.parse (sql.TrimEnd() + ";") with
     | Ok res -> res.Kind
     | Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
 
-let parseFails sql =
-    match SqlParser.parse sql with
+let parseFails (sql: string) =
+    match SqlParser.parse (sql.TrimEnd() + ";") with
     | Ok _ -> failwithf "Expected parse failure for %s" sql
     | Error _ -> ()
 
@@ -467,7 +468,7 @@ let ``Offset and Fetch verification`` () =
 
 [<Fact>]
 let ``OFFSET without ROW or ROWS fails verification`` () =
-    match SqlParser.parse "SELECT * FROM t OFFSET 5" with
+    match SqlParser.parse "SELECT * FROM t OFFSET 5;" with
     | Error _ -> ()
     | Ok res -> Assert.Fail(sprintf "Expected failure, got %A" res)
 

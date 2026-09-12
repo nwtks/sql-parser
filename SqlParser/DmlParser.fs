@@ -48,6 +48,31 @@ module DmlParser =
         )
         <|> (pQualifiedNameExpr |>> fun name -> (name, false))
 
+    // 20.25 <preparable dynamic delete statement: positioned> /
+    // 20.27 <preparable dynamic update statement: positioned> omit the <target table>.
+    let pOptionalDmlTarget =
+        (attempt pTargetTable |>> DmlTarget.TableTarget)
+        <|> preturn DmlTarget.OmittedTarget
+
+    // 20.25/20.27 — the omitted target form is only valid when the statement is
+    // positioned through a dynamic cursor and carries no <portion of>, correlation
+    // name or search condition.
+    let pOmittedTargetGuard clause target cursor where portion alias =
+        let isPositioned =
+            Option.isSome cursor
+            && Option.isNone where
+            && Option.isNone portion
+            && Option.isNone alias
+
+        match target with
+        | DmlTarget.OmittedTarget when not isPositioned ->
+            fail (
+                "The target table of the "
+                + clause
+                + " may only be omitted for a positioned statement (WHERE CURRENT OF)"
+            )
+        | _ -> preturn ()
+
     // 14.11 <insert statement> ::= INSERT INTO <insertion target> <insert columns and source>
     // 14.11 <insertion target> ::= <table name>
     // 14.11 <insert columns and source> ::= <from subquery> | <from constructor> | <from default>
@@ -83,6 +108,8 @@ module DmlParser =
     // 14.13 <update statement: positioned> ::= UPDATE <target table> [ [ AS ] <correlation name> ] SET <set clause list> WHERE CURRENT OF <cursor name>
     // 14.14 <update statement: searched>   ::= UPDATE <target table> [ FOR PORTION OF <application time period name> FROM <point in time 1> TO <point in time 2> ]
     //     [ [ AS ] <correlation name> ] SET <set clause list> [ WHERE <search condition> ]
+    // 20.27 <preparable dynamic update statement: positioned> ::= UPDATE [ <target table> ] SET <set clause list>
+    //     WHERE CURRENT OF <preparable dynamic cursor name>
     // 14.15 <set clause list> ::= <set clause> [ { <comma> <set clause> }... ]
     let pUpdateStatement =
         // 14.15 <set clause> ::= <set target> <equals operator> <update source>
@@ -121,49 +148,74 @@ module DmlParser =
             pIdentifierExpr .>> token (pstring "=") .>>. (pDefaultValue <|> pExpression)
             |>> SingleSet)
 
-        pKeyword "UPDATE" >>. pTargetTable
+        pKeyword "UPDATE" >>. pOptionalDmlTarget
         .>>. opt (attempt pPortionOf)
         .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
         .>> pKeyword "SET"
         .>>. sepBy1 pSetClause (token (pstring ","))
         .>>. opt pWhereClause
-        |>> fun (((((table, isOnly), portion), alias), sets), whr) ->
+        >>= fun ((((target, portion), alias), sets), whr) ->
             let cursor, where =
                 match whr with
                 | Some(c, w) -> c, w
                 | None -> None, None
 
-            { Table = table
-              TableIsOnly = isOnly
-              TableAlias = alias
-              Set = sets
-              Where = where
-              PortionOf = portion
-              Cursor = cursor }
-            |> Update
+            let statement =
+                { Target = target
+                  TableAlias = alias
+                  Set = sets
+                  Where = where
+                  PortionOf = portion
+                  Cursor = cursor }
+                |> Update
+
+            pOmittedTargetGuard
+                "preparable dynamic update statement: positioned (20.27)"
+                target
+                cursor
+                where
+                portion
+                alias
+            >>. preturn statement
 
     // 14.8 <delete statement: positioned> ::= DELETE FROM <target table> [ [ AS ] <correlation name> ] WHERE CURRENT OF <cursor name>
     // 14.9 <delete statement: searched>   ::= DELETE FROM <target table>
     //     [ FOR PORTION OF <application time period name> FROM <point in time 1> TO <point in time 2> ]
     //     [ [ AS ] <correlation name> ] [ WHERE <search condition> ]
+    // 20.25 <preparable dynamic delete statement: positioned> ::= DELETE [ FROM <target table> ]
+    //     WHERE CURRENT OF <preparable dynamic cursor name>
     let pDeleteStatement =
-        pKeyword "DELETE" >>. pKeyword "FROM" >>. pTargetTable
+        pKeyword "DELETE" >>. opt (attempt (pKeyword "FROM" >>. pTargetTable))
         .>>. opt (attempt pPortionOf)
         .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
         .>>. opt pWhereClause
-        |>> fun ((((table, isOnly), portion), alias), whr) ->
+        >>= fun (((target, portion), alias), whr) ->
             let cursor, where =
                 match whr with
                 | Some(c, w) -> c, w
                 | None -> None, None
 
-            { Table = table
-              TableIsOnly = isOnly
-              TableAlias = alias
-              Where = where
-              PortionOf = portion
-              Cursor = cursor }
-            |> Delete
+            let target =
+                match target with
+                | Some(name, isOnly) -> DmlTarget.TableTarget(name, isOnly)
+                | None -> DmlTarget.OmittedTarget
+
+            let statement =
+                { Target = target
+                  TableAlias = alias
+                  Where = where
+                  PortionOf = portion
+                  Cursor = cursor }
+                |> Delete
+
+            pOmittedTargetGuard
+                "preparable dynamic delete statement: positioned (20.25)"
+                target
+                cursor
+                where
+                portion
+                alias
+            >>. preturn statement
 
     // 14.12 <merge statement> ::= MERGE INTO <target table> [ [ AS ] <merge correlation name> ]
     //     USING <table reference> ON <search condition> <merge operation specification>

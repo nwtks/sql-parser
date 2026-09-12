@@ -967,11 +967,18 @@ and PortionOfSpec =
       From: Expression
       To: Expression }
 
+// 14.8/14.9/14.13/14.14 <target table> ::= <table name> | ONLY ( <table name> )
+// 20.25/20.27 allow the target table to be omitted when the statement is positioned
+// through a preparable dynamic cursor (<preparable dynamic delete/update statement:
+// positioned) → OmittedTarget.
+and DmlTarget =
+    // TableTarget (table name, isOnly)
+    | TableTarget of Expression * bool
+    | OmittedTarget
+
 // 14.14 <update statement: searched> ::= UPDATE <target table> SET <set clause list> [ WHERE <search condition> ]
 and UpdateStatement =
-    { Table: Expression
-      // 14.8/14.9 <target table> ::= <table name> | ONLY ( <table name> )
-      TableIsOnly: bool
+    { Target: DmlTarget
       TableAlias: Expression option
       Set: SetClause list
       Where: Expression option
@@ -980,9 +987,7 @@ and UpdateStatement =
 
 // 14.9 <delete statement: searched> ::= DELETE FROM <target table> [ WHERE <search condition> ]
 and DeleteStatement =
-    { Table: Expression
-      // 14.8/14.9 <target table> ::= <table name> | ONLY ( <table name> )
-      TableIsOnly: bool
+    { Target: DmlTarget
       TableAlias: Expression option
       Where: Expression option
       PortionOf: PortionOfSpec option
@@ -1819,10 +1824,12 @@ and CopyDescriptorStatement =
       Target: Expression
       TargetItem: Expression option }
 
-// 20.13 <execute statement> using clauses
-// <output using clause> ::= INTO <args> | INTO [ SQL ] DESCRIPTOR <name>
+// 20.11 <input using clause> / 20.12 <output using clause>
 // <input using clause>  ::= USING <args> | USING [ SQL ] DESCRIPTOR <name>
-and ExecuteUsing =
+// <output using clause> ::= INTO <args> | INTO [ SQL ] DESCRIPTOR <name>
+// Shared by 20.13 <execute statement>, 20.19 <dynamic open statement> and
+// 20.20 <dynamic fetch statement>.
+and UsingClause =
     | UsingArguments of Expression list
     | UsingDescriptor of Expression
 
@@ -1910,9 +1917,11 @@ and StatementKind =
     | AlterType of AlterTypeStatement
     // 14.1 <declare cursor> / 14.2 <cursor properties> / 14.3 <cursor specification>
     | DeclareCursor of DeclareCursorStatement
-    // 14.4-14.7 cursor statements
-    | Open of Expression
-    | Fetch of FetchOrientation option * Expression * Expression list
+    // 14.4 <open statement> / 20.19 <dynamic open statement>
+    | Open of Expression * UsingClause option
+    // 14.5 <fetch statement> / 20.20 <dynamic fetch statement>
+    | Fetch of FetchOrientation option * Expression * UsingClause
+    // 14.6 <close statement> / 20.22 <dynamic close statement>
     | Close of Expression
     | SelectInto of SelectIntoStatement
     // 14.16 <temporary table declaration>
@@ -1940,7 +1949,7 @@ and StatementKind =
     | Prepare of Expression * Expression option * Expression
     | DeallocatePrepare of Expression
     | Describe of DescribeStatement
-    | Execute of Expression * ExecuteUsing option * ExecuteUsing option
+    | Execute of Expression * UsingClause option * UsingClause option
     | ExecuteImmediate of Expression
     | AllocateDescriptor of Expression * Expression option
     | DeallocateDescriptor of Expression

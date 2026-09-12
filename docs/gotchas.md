@@ -512,3 +512,27 @@ F# provides `Choice1Of4`…`Choice4Of4`. The four-way choice keeps `<column defi
 ## Test-only: functions cannot appear in F# patterns
 
 `Parameters = [ { ParameterType = dataTypeParam Integer } ]` does not compile — a record pattern may only contain literals and constructors, not function applications. Bind the value (`Parameters = [ param ]`) and assert with `Assert.Equal(...)`, or match the DU case directly (`match param.ParameterType with | DataTypeParameter(Integer, true) -> …`).
+
+## The omitted DML target relies on `SET` / `WHERE` being reserved words
+
+`pOptionalDmlTarget` is `(attempt pTargetTable |>> DmlTarget.TableTarget) <|> preturn DmlTarget.OmittedTarget`. The `OmittedTarget` branch is only reachable because `pQualifiedNameExpr` rejects reserved words, so `pTargetTable` fails cleanly on the `SET` of `UPDATE SET ...` and on the `WHERE` of `DELETE WHERE ...`. Do not "fix" a missing table name by accepting raw identifiers — `pIdentifierRaw` would make `UPDATE SET ...` parse `SET` as a table name.
+
+## An `|>>` projection cannot fail — validate with `>>=` and `fail`
+
+`pUpdateStatement` / `pDeleteStatement` used `|>> fun … -> …`. Rejecting `OmittedTarget` together with a `<portion of>`, alias or search condition needs `>>=` instead, because `fail` must run on the parsed values; `pOmittedTargetGuard` returns `preturn ()` so `>>.` sequences it in front of the statement value.
+
+## `|>>` binds looser than `<|>` — parenthesise the constructor branch
+
+`attempt pTargetTable |>> DmlTarget.TableTarget <|> preturn DmlTarget.OmittedTarget` parses as `attempt pTargetTable |>> (DmlTarget.TableTarget <|> preturn …)` and does not type-check. Write `(attempt pTargetTable |>> DmlTarget.TableTarget) <|> preturn DmlTarget.OmittedTarget`.
+
+## `CursorParser.fs` is compiled before `DynamicParser.fs`
+
+`pUsingClause` (20.11) and `pIntoClause` (20.12) had to move from `DynamicParser.fs` into `CursorParser.fs`, because `pOpenStatement` / `pFetchStatement` need them and `SqlParser.fsproj` compiles `CursorParser.fs` first. `DynamicParser.fs` now opens `SqlParser.CursorParser`. The `pUsingDescriptor` used by `DESCRIBE` stays in `DynamicParser.fs` and is a different parser — it returns the descriptor name (`Expression`), not a `UsingClause`.
+
+## `<semicolon>` is cited as 5.1, not 5.2
+
+In `sql-2016-grammar.txt` the `<semicolon> ::= ;` production sits under the `5.1 <SQL terminal character>` heading (`5.2 <token>` comes later in the file). `RuleNumberingTests` matches a citation against the clauses that actually mention the name, so `// 5.2 <semicolon>` fails and `// 5.1 <semicolon>` is correct.
+
+## Test-only: the `parse` helpers now append `;`
+
+Every test file's `parse` / `parseFails` / `parseExpr` helper is `let parse (sql: string) = SqlParser.parse (sql.TrimEnd() + ";")`. The explicit `string` annotation is required — without it F# cannot infer the receiver of `.TrimEnd()` (FS0072). A test that calls `SqlParser.parse` directly must append the semicolon itself, otherwise it can pass for the wrong reason: `OFFSET without ROW or ROWS fails verification` would still succeed if the `OFFSET` rule itself broke.
