@@ -1584,11 +1584,62 @@ and RoutineCharacteristic =
     | SavepointLevel of bool
     | ExternalName of Expression
 
-// 11.60 <routine body>
+// 11.60 <rights clause> ::= SQL SECURITY INVOKER | SQL SECURITY DEFINER
+and RightsClause =
+    | SqlSecurityInvoker
+    | SqlSecurityDefiner
+
+// 11.60 <external security clause> ::= EXTERNAL SECURITY DEFINER
+//     | EXTERNAL SECURITY INVOKER | EXTERNAL SECURITY IMPLEMENTATION DEFINED
+and ExternalSecurity =
+    | Definer
+    | Invoker
+    | ImplementationDefined
+
+// 11.60 <transform group specification> ::= TRANSFORM GROUP { <single group specification> | <multiple group specification> }
+// 11.60 <single group specification> ::= <group name>
+// 11.60 <group specification> ::= <group name> FOR TYPE <path-resolved user-defined type name>
+// A single <group name> without FOR TYPE is the <single group specification> form; the two
+// alternatives are syntactically indistinguishable in that case (see docs/trade-off.md).
+and TransformGroupSpecification =
+    | SingleTransformGroup of Expression
+    | MultipleTransformGroups of (Expression * Expression option) list
+
+// 11.60 <external body reference> ::= EXTERNAL [ NAME <external routine name> ]
+//     [ <parameter style clause> ] [ <transform group specification> ] [ <external security clause> ]
+and ExternalBodyReference =
+    { Name: Expression option
+      ParameterStyle: string option
+      TransformGroup: TransformGroupSpecification option
+      ExternalSecurity: ExternalSecurity option }
+
+// 11.60 <PTF private parameters> ::= PRIVATE [ DATA ] <private parameter declaration list>
+and PtfPrivateParameters =
+    { HasData: bool
+      Declarations: ParameterDeclaration list }
+
+// 11.60 <polymorphic table function body> ::= [ <PTF private parameters> ]
+//     [ DESCRIBE WITH <PTF describe component procedure> ]
+//     [ START WITH <PTF start component procedure> ]
+//     FULFILL WITH <PTF fulfill component procedure>
+//     [ FINISH WITH <PTF finish component procedure> ]
+// The four component procedures are <specific routine designator>s (10.6).
+and PolymorphicTableFunctionBody =
+    { PrivateParameters: PtfPrivateParameters option
+      Describe: SpecificRoutineDesignator option
+      Start: SpecificRoutineDesignator option
+      Fulfill: SpecificRoutineDesignator
+      Finish: SpecificRoutineDesignator option }
+
+// 11.60 <routine body> ::= <SQL routine spec> | <external body reference> | <polymorphic table function body>
+// 11.60 <SQL routine spec> ::= [ <rights clause> ] <SQL routine body>
+// `BeginAtomic` is an implementation extension: 13.4's <SQL procedure statement> has no
+// <compound statement> in sql-2016-grammar.txt.
 and RoutineBody =
-    | SqlRoutine of StatementKind
+    | SqlRoutine of RightsClause option * StatementKind
     | BeginAtomic of StatementKind list
-    | ExternalRoutine of Expression option
+    | ExternalRoutine of ExternalBodyReference
+    | PolymorphicTableFunction of PolymorphicTableFunctionBody
 
 // 11.60 <SQL-invoked routine> — shared by CREATE FUNCTION / CREATE PROCEDURE
 and CreateRoutine =
@@ -1597,6 +1648,31 @@ and CreateRoutine =
       // 11.60 <returns clause> — None for a procedure
       Returns: ReturnsType option
       Characteristics: RoutineCharacteristic list
+      // 11.60 <dispatch clause> ::= STATIC DISPATCH — false for a procedure
+      Dispatch: bool
+      Body: RoutineBody }
+
+// 11.60 <method specification designator> ::=
+//       SPECIFIC METHOD <specific method name>
+//     | [ INSTANCE | STATIC | CONSTRUCTOR ] METHOD <method name>
+//         <SQL parameter declaration list> [ <returns clause> ]
+//         FOR <schema-resolved user-defined type name>
+// The method form carries no <routine characteristics> (11.60), so CreateMethodStatement has
+// no Characteristics / Dispatch field.
+and CreateMethodSpecification =
+    { Kind: MethodKind option
+      Name: Expression
+      Parameters: ParameterDeclaration list
+      Returns: ReturnsType option
+      ForType: Expression }
+
+and MethodSpecificationDesignator =
+    | SpecificMethod of Expression
+    | MethodDeclaration of CreateMethodSpecification
+
+// 11.60 <schema function> ::= CREATE <SQL-invoked function>, method form
+and CreateMethodStatement =
+    { Designator: MethodSpecificationDesignator
       Body: RoutineBody }
 
 // 11.61 <alter routine statement>
@@ -1954,9 +2030,11 @@ and StatementKind =
     | Rollback of bool option * Expression option
     // 7.17 <with clause> + <SQL statement>
     | WithStatement of bool * Cte list * StatementKind
-    // 11.60 <SQL-invoked routine> — CREATE PROCEDURE / FUNCTION
+    // 11.60 <SQL-invoked routine> — CREATE PROCEDURE / FUNCTION / METHOD
     | CreateProcedure of CreateRoutine
     | CreateFunction of CreateRoutine
+    // 11.60 <method specification designator> — CREATE SPECIFIC METHOD / CREATE METHOD ... FOR t
+    | CreateMethod of CreateMethodStatement
     // 11.61 <alter routine statement> ::= ALTER <specific routine designator> ...
     | AlterRoutine of AlterRoutineStatement
     // 11.49 <trigger definition> ::= CREATE TRIGGER ...

@@ -393,9 +393,9 @@ Per 11.70 `<drop transform element list> ::= DROP ( <transform kind> [ , <transf
 
 ## `CREATE PROCEDURE` / `CREATE FUNCTION` share one `CreateRoutine` record
 
-Both are `<SQL-invoked routine>`s differing only in the `<returns clause>` (functions require `RETURNS <data type>`, procedures never have one). `CreateRoutine = { Name; Parameters; Returns: DataType option; Characteristics; Body }` is shared, with `StatementKind.CreateProcedure` / `CreateFunction` wrapping it; `Returns` is `None` for procedures.
+Both are `<SQL-invoked routine>`s differing in the `<returns clause>` (functions require one, procedures never have one) and in the optional `<dispatch clause>` (a `<function specification>` suffix only). `CreateRoutine = { Name; Parameters; Returns: ReturnsType option; Characteristics; Dispatch: bool; Body }` is shared, with `StatementKind.CreateProcedure` / `CreateFunction` wrapping it; `Returns` is `None` and `Dispatch` is `false` for procedures.
 
-- **Trade-off:** One record avoids two near-identical types. `Returns: DataType option` encodes the procedure/function distinction at the AST level, so consumers can rely on `Returns = None` ⇔ procedure.
+- **Trade-off:** One record avoids two near-identical types. `Returns = None` ⇔ procedure, and only a function can report `Dispatch = true`. `CREATE METHOD` (11.60 `<method specification designator>`) is deliberately *not* folded into this record: it has no `<routine characteristics>` slot at all, so it gets its own `MethodSpecificationDesignator` DU (`SpecificMethod of Expression | MethodDeclaration of CreateMethodSpecification`) and its own `StatementKind.CreateMethod` case.
 
 ## Routine body is a forward reference to the full statement parser
 
@@ -413,7 +413,8 @@ Both are `<SQL-invoked routine>`s differing only in the `<returns clause>` (func
 
 `<routine characteristic>` is `LANGUAGE | PARAMETER STYLE | SPECIFIC | DETERMINISTIC | SQL-data access | null-call | DYNAMIC RESULT SETS | savepoint level`. `RoutineCharacteristic` is a flat DU (`Language of string`, `ParameterStyle of string`, `SpecificName of Expression`, `Deterministic of bool`, `SqlDataAccess of SqlDataAccess`, `NullCall of bool`, `DynamicResultSets of uint64`, `SavepointLevel of bool`, `ExternalName of Expression`). `pRoutineCharacteristics` collects them and rejects duplicates.
 
-- **Trade-off:** The BNF's `[ <routine characteristic>... ]` permits any order (so no order is enforced), but 11.60's syntax rule allows each characteristic at most once. `pRoutineCharacteristics` groups the parsed characteristics by category and fails on a duplicate (e.g. two null-call clauses, or `LANGUAGE SQL LANGUAGE SQL`). `Deterministic`/`NullCall`/`SavepointLevel` use `bool` (`NOT DETERMINISTIC` → `false`); `DynamicResultSets` uses `uint64` (from `pUnsignedInteger`, which must be followed by `.>> ws` since it does not consume trailing whitespace). `NAME <external routine name>` is included so `ALTER ROUTINE ... NAME f` works.
+- **Trade-off:** The BNF's `[ <routine characteristic>... ]` permits any order (so no order is enforced), but 11.60's syntax rule allows each characteristic at most once. `pRoutineCharacteristics` groups the parsed characteristics by category and fails on a duplicate (e.g. two null-call clauses, or `LANGUAGE SQL LANGUAGE SQL`). `Deterministic`/`NullCall`/`SavepointLevel` use `bool` (`NOT DETERMINISTIC` → `false`); `DynamicResultSets` uses `uint64` (from `pUnsignedInteger`, which must be followed by `.>> ws` since it does not consume trailing whitespace).
+- **Trade-off:** 11.60 and 11.61 use *different* characteristic sets, so there are two parsers sharing one duplicate check (`rejectDuplicateCharacteristics`). `NAME <external routine name>` is **not** an 11.60 `<routine characteristic>` — it belongs to 11.61 `<alter routine characteristic>` — while `ALTER ROUTINE` in turn does not accept `SPECIFIC` / `<deterministic characteristic>` / `<savepoint level indication>`. `<language name>` (10.2: ADA | C | COBOL | FORTRAN | M | MUMPS | PASCAL | PLI | SQL) and `<parameter style>` (SQL | GENERAL) are closed keyword sets; the shared `pLanguageClause` / `pParameterStyleClause` live in `RoutineParser.fs` (compiled before `TypeParser.fs`, which reuses them for 11.51).
 
 ## Parameter declaration treats a leading identifier as the name
 
@@ -792,8 +793,43 @@ The `[ <default clause> | <identity column specification> | <generation clause> 
 
 - **Trade-off:** `<generic table parameter type>` / `<descriptor parameter type>` are tried **before** `<data type>` even though the grammar lists `<data type>` first, because `DESCRIPTOR` is a non-reserved word and `pDataType`'s user-defined-type branch would otherwise consume `d DESCRIPTOR` as a parameter named `d` of UDT type `DESCRIPTOR`. `TABLE` is reserved, so only `DESCRIPTOR` is affected.
 - **Trade-off:** `<returns data type> [ <result cast> ]` is one record because `<result cast>` is a suffix of the data type rather than an alternative of `<returns type>`; `CastFrom` is `(DataType * bool) option`, where the bool is the `<result cast from type>`'s `AS LOCATOR`.
-- **Not modelled:** `<method specification designator>` (`CREATE METHOD ...`), `<dispatch clause>` (`STATIC DISPATCH`), `<rights clause>` (`SQL SECURITY INVOKER | DEFINER`), the `<external body reference>` extras (`<parameter style clause>`, `<transform group specification>`, `<external security clause>`), `<polymorphic table function body>` and `<descriptor argument>`.
 - **Not tightened:** `<parameter default>` still accepts a general `pExpression` alongside `<descriptor value constructor>`; the grammar's `<contextually typed value specification>` alternative would need the same treatment as `<default option>`.
+- **Note:** `<descriptor argument>` is *not* an 11.60 rule — it appears in 10.4 `<SQL argument>` / `<named argument SQL argument>`. It is reachable only through `<parameter default>` (20.16).
+
+## `<SQL routine spec>` and the `<rights clause>` (11.60)
+
+`RoutineBody.SqlRoutine` carries `RightsClause option * StatementKind`, so `CREATE PROCEDURE p () SQL SECURITY DEFINER SELECT 1` keeps its `<rights clause>` (`SQL SECURITY INVOKER | SQL SECURITY DEFINER`) instead of dropping it.
+
+- **Trade-off:** The clause belongs to `<SQL routine spec> ::= [ <rights clause> ] <SQL routine body>`, not to the routine, so it is modelled inside `RoutineBody` — an `ExternalRoutine` or `PolymorphicTableFunction` body cannot carry one, and `SQL SECURITY DEFINER EXTERNAL ...` is rejected.
+- **Trade-off:** `BEGIN ATOMIC` is a pre-existing extension of this parser (13.4's `<SQL procedure statement>` in `sql-2016-grammar.txt` has no `<compound statement>`), so a `<rights clause>` is not accepted before `BEGIN ATOMIC` either.
+
+## `<dispatch clause>` (11.60)
+
+`<function specification> ::= FUNCTION ... <routine characteristics> [ <dispatch clause> ]` — `STATIC DISPATCH` is a suffix of the function form only, stored as `CreateRoutine.Dispatch: bool`.
+
+- **Trade-off:** `CreateRoutine` is shared with `<SQL-invoked procedure>`, which has no `<dispatch clause>`, so a procedure always reports `Dispatch = false`. `CREATE PROCEDURE p () STATIC DISPATCH ...` fails naturally because no `<routine body>` starts with `STATIC`.
+
+## `<external body reference>` extras (11.60)
+
+`ExternalBodyReference = { Name; ParameterStyle; TransformGroup; ExternalSecurity }` models `EXTERNAL [ NAME <external routine name> ] [ <parameter style clause> ] [ <transform group specification> ] [ <external security clause> ]`; `ExternalSecurity` is `Definer | Invoker | ImplementationDefined`.
+
+- **Trade-off:** `<external security clause>` starts with the same `EXTERNAL` keyword as the rule itself, but the extras follow the `EXTERNAL` token, so `EXTERNAL SECURITY DEFINER` is picked up by the trailing `opt` — there is no ambiguity with `EXTERNAL NAME x`.
+- **Trade-off:** `<transform group specification>` admits either `<single group specification>` (a bare `<group name>`) or `<multiple group specification>` (one or more `<group specification>`, each optionally `FOR TYPE <path-resolved user-defined type name>`). A lone name with no `FOR TYPE` matches both readings, so it is reported as `SingleTransformGroup`; `MultipleTransformGroups` is used only for a list with a comma or a `FOR TYPE`.
+- **Trade-off:** `<parameter style clause>` may appear both in `<routine characteristics>` and in `<external body reference>`, so `validateRoutine` rejects a routine that has both.
+
+## `<polymorphic table function body>` (11.60)
+
+`RoutineBody.PolymorphicTableFunction` holds `{ PrivateParameters; Describe; Start; Fulfill; Finish }`, with the four component procedures carried as `SpecificRoutineDesignator` (10.6).
+
+- **Trade-off:** `FULFILL WITH` is the only mandatory clause; `<PTF private parameters>` (`PRIVATE [ DATA ] (...)`) and `DESCRIBE WITH` / `START WITH` / `FINISH WITH` are optional. The PTF branch is tried **before** the generic statement branch of `pRoutineBody` because the dynamic `<describe statement>` (20.10) also starts with `DESCRIBE` — see `docs/gotchas.md`.
+
+## `<method specification designator>` (11.60)
+
+`CREATE METHOD m (x INT) [ RETURNS <returns type> ] FOR t <routine body>`, `CREATE { INSTANCE | STATIC | CONSTRUCTOR } METHOD ...` and `CREATE SPECIFIC METHOD <specific method name> <routine body>` all parse into `StatementKind.CreateMethod`.
+
+- **Trade-off:** A `<method specification designator>` has **no** `<routine characteristics>` slot (unlike `<function specification>`), so `CREATE METHOD ... LANGUAGE SQL ...` is rejected — hence a separate record and `StatementKind` rather than another field on `CreateRoutine`.
+- **Trade-off:** The `<returns clause>` is optional in the method form but mandatory for `<function specification>`; both reuse `pReturnsType`.
+- **Trade-off:** `pMethodKind` (`[ INSTANCE | STATIC | CONSTRUCTOR ]`) moved to `Types.fs` so 10.6 (`pRoutineType`, `DdlParser.fs`), 11.60 (`RoutineParser.fs`) and 11.51 (`pPartialMethodSpecification`, `TypeParser.fs`) share one definition instead of three copies.
 
 ## The `<target table>` of a positioned `DELETE` / `UPDATE` may be omitted (20.25 / 20.27)
 

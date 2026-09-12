@@ -100,16 +100,11 @@ module TypeParser =
                   |>> TypeOption.CastToSource
               ) ]
 
-    // 11.51 <partial method specification> — [ INSTANCE | STATIC | CONSTRUCTOR ]
-    let pMethodKind =
-        choice
-            [ attempt (pKeyword "INSTANCE" >>% MethodKind.Instance)
-              attempt (pKeyword "STATIC" >>% MethodKind.Static)
-              attempt (pKeyword "CONSTRUCTOR" >>% MethodKind.Constructor) ]
-
     // 11.51 <partial method specification> ::= [ INSTANCE | STATIC | CONSTRUCTOR ]
     //     METHOD <method name> <SQL parameter declaration list> <returns clause>
     //     [ SPECIFIC <specific method name> ]
+    // NOTE: pMethodKind (10.6 / 11.51 / 11.60) lives in Types.fs so DdlParser, RoutineParser
+    // and TypeParser can all share it.
     let pPartialMethodSpecification =
         opt pMethodKind
         .>>. (pKeyword "METHOD" >>. pIdentifierExpr)
@@ -129,10 +124,9 @@ module TypeParser =
     // 11.51 <method characteristic> ::= <language clause> | <parameter style clause> | <deterministic characteristic> | <SQL-data access indication> | <null-call clause>
     let pMethodCharacteristic =
         choice
-            [ // 10.2 <language clause> ::= LANGUAGE <language name>
-              attempt (pKeyword "LANGUAGE" >>. pIdentifierRaw |>> Language)
-              // 11.51 <parameter style clause> ::= PARAMETER STYLE <parameter style>
-              attempt (pKeyword "PARAMETER" >>. pKeyword "STYLE" >>. pIdentifierRaw |>> ParameterStyle)
+            [ // 10.2 <language clause> / 11.51 <parameter style clause> — shared with 11.60
+              attempt (pLanguageClause |>> Language)
+              attempt (pParameterStyleClause |>> ParameterStyle)
               // 11.51 <deterministic characteristic> ::= DETERMINISTIC | NOT DETERMINISTIC
               attempt (pKeyword "NOT" >>. pKeyword "DETERMINISTIC" >>% Deterministic false)
               attempt (pKeyword "DETERMINISTIC" >>% Deterministic true)
@@ -178,7 +172,7 @@ module TypeParser =
                 |> List.tryFind (fun (_, g) -> List.length g > 1)
 
             match dup with
-            | Some (cat, _) -> fail (sprintf "duplicate method characteristic: %s" cat)
+            | Some(cat, _) -> fail (sprintf "duplicate method characteristic: %s" cat)
             | None -> preturn chars
 
     // 11.51 <original method specification> ::= <partial method specification>

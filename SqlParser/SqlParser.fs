@@ -53,6 +53,7 @@ module SqlParser =
               attempt pCreateTypeStatement
               attempt pCreateProcedureStatement
               attempt pCreateFunctionStatement
+              attempt pCreateMethodStatement
               attempt pAlterTypeStatement
               attempt pAlterRoutineStatement
               attempt pCreateTriggerStatement
@@ -88,6 +89,7 @@ module SqlParser =
               attempt pCreateTypeStatement
               attempt pCreateProcedureStatement
               attempt pCreateFunctionStatement
+              attempt pCreateMethodStatement
               attempt pCreateTriggerStatement
               attempt pGrantStatement ]
 

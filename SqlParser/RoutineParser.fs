@@ -14,6 +14,32 @@ module RoutineParser =
     let pRoutineBodyStatementRef, pRoutineBodyStatementRefImpl =
         createParserForwardedToRef<Statement, unit> ()
 
+    // 10.2 <language name> ::= ADA | C | COBOL | FORTRAN | M | MUMPS | PASCAL | PLI | SQL
+    // Shared with 11.51 <method characteristic> (TypeParser.fs) — TypeParser.fs is compiled
+    // after RoutineParser.fs, so it reuses these two parsers (see docs/trade-off.md).
+    let pLanguageName: Parser<string, unit> =
+        choice
+            [ attempt (pKeyword "FORTRAN" >>% "FORTRAN")
+              attempt (pKeyword "MUMPS" >>% "MUMPS")
+              attempt (pKeyword "PASCAL" >>% "PASCAL")
+              attempt (pKeyword "COBOL" >>% "COBOL")
+              attempt (pKeyword "ADA" >>% "ADA")
+              attempt (pKeyword "PLI" >>% "PLI")
+              attempt (pKeyword "SQL" >>% "SQL")
+              attempt (pKeyword "M" >>% "M")
+              attempt (pKeyword "C" >>% "C") ]
+
+    // 10.2 <language clause> ::= LANGUAGE <language name>
+    let pLanguageClause: Parser<string, unit> =
+        attempt (pKeyword "LANGUAGE" >>. pLanguageName)
+
+    // 11.60 <parameter style clause> ::= PARAMETER STYLE <parameter style>
+    // 11.60 <parameter style> ::= SQL | GENERAL
+    let pParameterStyleClause: Parser<string, unit> =
+        pKeyword "PARAMETER"
+        >>. pKeyword "STYLE"
+        >>. ((pKeyword "SQL" >>% "SQL") <|> (pKeyword "GENERAL" >>% "GENERAL"))
+
     // 11.60 <parameter mode> ::= IN | OUT | INOUT
     let pParameterMode =
         choice
@@ -111,11 +137,91 @@ module RoutineParser =
     let pParameterDeclarationList =
         between (token (pstring "(")) (token (pstring ")")) (sepBy pParameterDeclaration (token (pstring ",")))
 
+    // 11.60 <rights clause> ::= SQL SECURITY INVOKER | SQL SECURITY DEFINER
+    let pRightsClause: Parser<RightsClause, unit> =
+        pKeyword "SQL"
+        >>. pKeyword "SECURITY"
+        >>. ((pKeyword "INVOKER" >>% RightsClause.SqlSecurityInvoker)
+             <|> (pKeyword "DEFINER" >>% RightsClause.SqlSecurityDefiner))
+
+    // 11.60 <external security clause> ::= EXTERNAL SECURITY DEFINER
+    //     | EXTERNAL SECURITY INVOKER | EXTERNAL SECURITY IMPLEMENTATION DEFINED
+    let pExternalSecurityClause: Parser<ExternalSecurity, unit> =
+        pKeyword "EXTERNAL"
+        >>. pKeyword "SECURITY"
+        >>. choice
+                [ attempt (
+                      pKeyword "IMPLEMENTATION" >>. pKeyword "DEFINED"
+                      >>% ExternalSecurity.ImplementationDefined
+                  )
+                  pKeyword "DEFINER" >>% ExternalSecurity.Definer
+                  pKeyword "INVOKER" >>% ExternalSecurity.Invoker ]
+
+    // 11.60 <transform group specification> ::= TRANSFORM GROUP { <single group specification> | <multiple group specification> }
+    // 11.60 <single group specification> ::= <group name>
+    // 11.60 <multiple group specification> ::= <group specification> [ { <comma> <group specification> }... ]
+    // 11.60 <group specification> ::= <group name> FOR TYPE <path-resolved user-defined type name>
+    // A lone <group name> with no FOR TYPE is syntactically identical to a one-element
+    // <multiple group specification>, so it is reported as <single group specification>
+    // (see docs/trade-off.md).
+    let pTransformGroupSpecification: Parser<TransformGroupSpecification, unit> =
+        pKeyword "TRANSFORM"
+        >>. pKeyword "GROUP"
+        >>. sepBy1
+                (pIdentifierExpr
+                 .>>. opt (attempt (pKeyword "FOR" >>. pKeyword "TYPE" >>. pQualifiedNameExpr)))
+                (token (pstring ","))
+        |>> fun groups ->
+            match groups with
+            | [ (name, None) ] -> TransformGroupSpecification.SingleTransformGroup name
+            | _ -> TransformGroupSpecification.MultipleTransformGroups groups
+
+    // 11.60 <external body reference> ::= EXTERNAL [ NAME <external routine name> ]
+    //     [ <parameter style clause> ] [ <transform group specification> ] [ <external security clause> ]
+    let pExternalBodyReference: Parser<ExternalBodyReference, unit> =
+        pKeyword "EXTERNAL" >>. opt (pKeyword "NAME" >>. pQualifiedNameExpr)
+        .>>. opt (attempt pParameterStyleClause)
+        .>>. opt (attempt pTransformGroupSpecification)
+        .>>. opt (attempt pExternalSecurityClause)
+        |>> fun (((name, style), transform), security) ->
+            { Name = name
+              ParameterStyle = style
+              TransformGroup = transform
+              ExternalSecurity = security }
+
+    // 11.60 <PTF private parameters> ::= PRIVATE [ DATA ] <private parameter declaration list>
+    // 11.60 <private parameter declaration list> ::= ( [ <SQL parameter declaration> [ { <comma> <SQL parameter declaration> }... ] ] )
+    let pPtfPrivateParameters: Parser<PtfPrivateParameters, unit> =
+        pKeyword "PRIVATE" >>. opt (pKeyword "DATA") .>>. pParameterDeclarationList
+        |>> fun (data, declarations) ->
+            { HasData = Option.isSome data
+              Declarations = declarations }
+
+    // 11.60 <polymorphic table function body> ::= [ <PTF private parameters> ]
+    //     [ DESCRIBE WITH <PTF describe component procedure> ]
+    //     [ START WITH <PTF start component procedure> ]
+    //     FULFILL WITH <PTF fulfill component procedure>
+    //     [ FINISH WITH <PTF finish component procedure> ]
+    // <PTF {describe|start|fulfill|finish} component procedure> (11.60) is a
+    // <specific routine designator> (10.6); only FULFILL is mandatory.
+    let pPolymorphicTableFunctionBody: Parser<PolymorphicTableFunctionBody, unit> =
+        opt (attempt pPtfPrivateParameters)
+        .>>. opt (attempt (pKeyword "DESCRIBE" >>. pKeyword "WITH" >>. pSpecificRoutineDesignator))
+        .>>. opt (attempt (pKeyword "START" >>. pKeyword "WITH" >>. pSpecificRoutineDesignator))
+        .>>. (pKeyword "FULFILL" >>. pKeyword "WITH" >>. pSpecificRoutineDesignator)
+        .>>. opt (attempt (pKeyword "FINISH" >>. pKeyword "WITH" >>. pSpecificRoutineDesignator))
+        |>> fun ((((privateParams, describe), start), fulfill), finish) ->
+            { PrivateParameters = privateParams
+              Describe = describe
+              Start = start
+              Fulfill = fulfill
+              Finish = finish }
+
     // 11.60 <routine characteristic> ::= <language clause> | <parameter style clause> | SPECIFIC <specific name> | <deterministic characteristic> | <SQL-data access indication> | <null-call clause> | <returned result sets characteristic> | <savepoint level indication>
     let pRoutineCharacteristic =
         choice
-            [ attempt (pKeyword "LANGUAGE" >>. pIdentifierRaw |>> Language)
-              attempt (pKeyword "PARAMETER" >>. pKeyword "STYLE" >>. pIdentifierRaw |>> ParameterStyle)
+            [ attempt (pLanguageClause |>> Language)
+              attempt (pParameterStyleClause |>> ParameterStyle)
               attempt (pKeyword "SPECIFIC" >>. pQualifiedNameExpr |>> SpecificName)
               attempt (pKeyword "NOT" >>. pKeyword "DETERMINISTIC" >>% Deterministic false)
               attempt (pKeyword "DETERMINISTIC" >>% Deterministic true)
@@ -155,42 +261,91 @@ module RoutineParser =
               attempt (
                   pKeyword "OLD" >>. pKeyword "SAVEPOINT" >>. pKeyword "LEVEL"
                   >>% SavepointLevel false
+              ) ]
+
+    // ISO 9075-2 11.60 SR: each <routine characteristic> may appear at most once in a
+    // given routine definition — reject duplicates (the BNF's "[ <routine characteristic>... ]"
+    // alone would allow them). Categories: Language / ParameterStyle / SpecificName /
+    // Deterministic / SqlDataAccess / NullCall / DynamicResultSets / SavepointLevel / ExternalName.
+    let routineCharacteristicCategory (c: RoutineCharacteristic) =
+        match c with
+        | Language _ -> "Language"
+        | ParameterStyle _ -> "ParameterStyle"
+        | SpecificName _ -> "SpecificName"
+        | Deterministic _ -> "Deterministic"
+        | SqlDataAccess _ -> "SqlDataAccess"
+        | NullCall _ -> "NullCall"
+        | DynamicResultSets _ -> "DynamicResultSets"
+        | SavepointLevel _ -> "SavepointLevel"
+        | ExternalName _ -> "ExternalName"
+
+    let private rejectDuplicateCharacteristics
+        (chars: RoutineCharacteristic list)
+        : Parser<RoutineCharacteristic list, unit> =
+        let dup =
+            chars
+            |> List.groupBy routineCharacteristicCategory
+            |> List.tryFind (fun (_, g) -> List.length g > 1)
+
+        match dup with
+        | Some(cat, _) -> fail (sprintf "duplicate routine characteristic: %s" cat)
+        | None -> preturn chars
+
+    let pRoutineCharacteristics =
+        many pRoutineCharacteristic >>= rejectDuplicateCharacteristics
+
+    // 11.61 <alter routine characteristic> ::= <language clause> | <parameter style clause>
+    //     | <SQL-data access indication> | <null-call clause> | <returned result sets characteristic>
+    //     | NAME <external routine name>
+    // 11.61's set is narrower than 11.60's — no SPECIFIC / <deterministic characteristic> /
+    // <savepoint level indication> — but NAME <external routine name> is allowed here and is
+    // NOT a <routine characteristic> of 11.60 (it used to be accepted in CREATE by mistake).
+    let pAlterRoutineCharacteristic =
+        choice
+            [ attempt (pLanguageClause |>> Language)
+              attempt (pParameterStyleClause |>> ParameterStyle)
+              attempt (pKeyword "NO" >>. pKeyword "SQL" >>% SqlDataAccess NoSql)
+              attempt (pKeyword "CONTAINS" >>. pKeyword "SQL" >>% SqlDataAccess ContainsSql)
+              attempt (
+                  pKeyword "READS" >>. pKeyword "SQL" >>. pKeyword "DATA"
+                  >>% SqlDataAccess ReadsSqlData
+              )
+              attempt (
+                  pKeyword "MODIFIES" >>. pKeyword "SQL" >>. pKeyword "DATA"
+                  >>% SqlDataAccess ModifiesSqlData
+              )
+              attempt (
+                  pKeyword "RETURNS"
+                  >>. pKeyword "NULL"
+                  >>. pKeyword "ON"
+                  >>. pKeyword "NULL"
+                  >>. pKeyword "INPUT"
+                  >>% NullCall true
+              )
+              attempt (
+                  pKeyword "CALLED" >>. pKeyword "ON" >>. pKeyword "NULL" >>. pKeyword "INPUT"
+                  >>% NullCall false
+              )
+              attempt (
+                  pKeyword "DYNAMIC"
+                  >>. pKeyword "RESULT"
+                  >>. pKeyword "SETS"
+                  >>. (pUnsignedInteger .>> ws)
+                  |>> DynamicResultSets
               )
               attempt (pKeyword "NAME" >>. pQualifiedNameExpr |>> ExternalName) ]
 
-    // ISO 9075-2 11.60 SR: each <routine characteristic> may appear at most once in a
-    // given routine definition — reject duplicates (the BNF's "<characteristic>..."
-    // alone would allow them). Categories: Language / ParameterStyle / SpecificName /
-    // Deterministic / SqlDataAccess / NullCall / DynamicResultSets / SavepointLevel / ExternalName.
-    let pRoutineCharacteristics =
-        many pRoutineCharacteristic
-        >>= fun chars ->
-            let dup =
-                chars
-                |> List.groupBy (fun c ->
-                    match c with
-                    | Language _ -> "Language"
-                    | ParameterStyle _ -> "ParameterStyle"
-                    | SpecificName _ -> "SpecificName"
-                    | Deterministic _ -> "Deterministic"
-                    | SqlDataAccess _ -> "SqlDataAccess"
-                    | NullCall _ -> "NullCall"
-                    | DynamicResultSets _ -> "DynamicResultSets"
-                    | SavepointLevel _ -> "SavepointLevel"
-                    | ExternalName _ -> "ExternalName")
-                |> List.tryFind (fun (_, g) -> List.length g > 1)
+    let pAlterRoutineCharacteristics =
+        many pAlterRoutineCharacteristic >>= rejectDuplicateCharacteristics
 
-            match dup with
-            | Some(cat, _) -> fail (sprintf "duplicate routine characteristic: %s" cat)
-            | None -> preturn chars
-
-    // 11.60 <routine body> ::= <SQL routine spec> | <external body reference>
+    // 11.60 <routine body> ::= <SQL routine spec> | <external body reference> | <polymorphic table function body>
+    // 11.60 <SQL routine spec> ::= [ <rights clause> ] <SQL routine body>
+    // The PTF branch is tried first: `DESCRIBE WITH ...` would otherwise be consumed by the
+    // dynamic <describe statement> (20.10) — see docs/gotchas.md.
     let pRoutineBody =
         choice
-            [ attempt (
-                  pKeyword "EXTERNAL" >>. opt (pKeyword "NAME" >>. pQualifiedNameExpr)
-                  |>> ExternalRoutine
-              )
+            [ attempt (pPolymorphicTableFunctionBody |>> RoutineBody.PolymorphicTableFunction)
+              attempt (pExternalBodyReference |>> RoutineBody.ExternalRoutine)
               attempt (
                   pKeyword "BEGIN"
                   >>. pKeyword "ATOMIC"
@@ -198,7 +353,29 @@ module RoutineParser =
                   .>> pKeyword "END"
                   |>> fun stmts -> RoutineBody.BeginAtomic(List.map (fun s -> s.Kind) stmts)
               )
-              attempt (pRoutineBodyStatementRef |>> fun s -> SqlRoutine s.Kind) ]
+              attempt (
+                  opt pRightsClause .>>. pRoutineBodyStatementRef
+                  |>> fun (rights, s) -> RoutineBody.SqlRoutine(rights, s.Kind)
+              ) ]
+
+    // ISO 9075-2 11.60 SR: <parameter style clause> may appear in <routine characteristics> and
+    // again in <external body reference>, but a routine has at most one parameter style.
+    let private validateRoutine (routine: CreateRoutine) : Parser<CreateRoutine, unit> =
+        let inCharacteristics =
+            routine.Characteristics
+            |> List.exists (function
+                | ParameterStyle _ -> true
+                | _ -> false)
+
+        let inExternalBody =
+            match routine.Body with
+            | RoutineBody.ExternalRoutine { ParameterStyle = Some _ } -> true
+            | _ -> false
+
+        if inCharacteristics && inExternalBody then
+            fail "duplicate <parameter style clause> (11.60)"
+        else
+            preturn routine
 
     // 11.60 <schema procedure> ::= CREATE <SQL-invoked procedure> — <SQL-invoked procedure> ::= PROCEDURE <schema qualified routine name> <SQL parameter declaration list> <routine characteristics> <routine body>
     let pCreateProcedureStatement =
@@ -206,13 +383,16 @@ module RoutineParser =
         .>>. pParameterDeclarationList
         .>>. pRoutineCharacteristics
         .>>. pRoutineBody
-        |>> fun (((name, parameters), characteristics), body) ->
-            CreateProcedure
-                { Name = name
-                  Parameters = parameters
-                  Returns = None
-                  Characteristics = characteristics
-                  Body = body }
+        |>> (fun (((name, parameters), characteristics), body) ->
+            { Name = name
+              Parameters = parameters
+              Returns = None
+              Characteristics = characteristics
+              // 11.60 <dispatch clause> is a <function specification> suffix only.
+              Dispatch = false
+              Body = body })
+        >>= validateRoutine
+        |>> CreateProcedure
 
     // 11.60 <returns clause> ::= RETURNS <returns type>
     // 11.60 <returns data type> ::= <data type> [ <locator indication> ]
@@ -253,25 +433,61 @@ module RoutineParser =
                   >>% ReturnsOnlyPassThrough
               ) ]
 
-    // 11.60 <schema function> ::= CREATE <SQL-invoked function> — <SQL-invoked function> ::= { <function specification> | <method specification designator> } <routine body>
+    // 11.60 <schema function> ::= CREATE <SQL-invoked function>
+    // 11.60 <SQL-invoked function> ::= { <function specification> | <method specification designator> } <routine body>
+    // 11.60 <function specification> ::= FUNCTION <schema qualified routine name> <SQL parameter declaration list>
+    //     <returns clause> <routine characteristics> [ <dispatch clause> ]
     let pCreateFunctionStatement =
         pKeyword "CREATE" >>. pKeyword "FUNCTION" >>. pQualifiedNameExpr
         .>>. pParameterDeclarationList
         .>>. (pKeyword "RETURNS" >>. pReturnsType)
         .>>. pRoutineCharacteristics
+        .>>. opt (pKeyword "STATIC" >>. pKeyword "DISPATCH")
         .>>. pRoutineBody
-        |>> fun ((((name, parameters), returns), characteristics), body) ->
-            CreateFunction
-                { Name = name
-                  Parameters = parameters
-                  Returns = Some returns
-                  Characteristics = characteristics
-                  Body = body }
+        |>> (fun (((((name, parameters), returns), characteristics), dispatch), body) ->
+            { Name = name
+              Parameters = parameters
+              Returns = Some returns
+              Characteristics = characteristics
+              Dispatch = Option.isSome dispatch
+              Body = body })
+        >>= validateRoutine
+        |>> CreateFunction
 
-    // 11.61 <alter routine statement> ::= ALTER <specific routine designator> <routine characteristic>... [ RESTRICT ]
+    // 11.60 <method specification designator> ::= SPECIFIC METHOD <specific method name>
+    //     | [ INSTANCE | STATIC | CONSTRUCTOR ] METHOD <method name> <SQL parameter declaration list>
+    //         [ <returns clause> ] FOR <schema-resolved user-defined type name>
+    // A <method specification designator> has no <routine characteristics> slot (11.60).
+    let pMethodSpecificationDesignator: Parser<MethodSpecificationDesignator, unit> =
+        choice
+            [ attempt (
+                  pKeyword "SPECIFIC" >>. pKeyword "METHOD" >>. pQualifiedNameExpr
+                  |>> MethodSpecificationDesignator.SpecificMethod
+              )
+              attempt (
+                  opt pMethodKind
+                  .>>. (pKeyword "METHOD" >>. pIdentifierExpr)
+                  .>>. pParameterDeclarationList
+                  .>>. opt (pKeyword "RETURNS" >>. pReturnsType)
+                  .>>. (pKeyword "FOR" >>. pQualifiedNameExpr)
+                  |>> fun ((((kind, name), parameters), returns), forType) ->
+                      MethodSpecificationDesignator.MethodDeclaration
+                          { Kind = kind
+                            Name = name
+                            Parameters = parameters
+                            Returns = returns
+                            ForType = forType }
+              ) ]
+
+    // 11.60 <schema function> ::= CREATE <SQL-invoked function>, <method specification designator> form
+    let pCreateMethodStatement =
+        pKeyword "CREATE" >>. pMethodSpecificationDesignator .>>. pRoutineBody
+        |>> fun (designator, body) -> CreateMethod { Designator = designator; Body = body }
+
+    // 11.61 <alter routine statement> ::= ALTER <specific routine designator> <alter routine characteristic>... [ RESTRICT ]
     let pAlterRoutineStatement =
         pKeyword "ALTER" >>. pSpecificRoutineDesignator
-        .>>. pRoutineCharacteristics
+        .>>. pAlterRoutineCharacteristics
         .>>. opt (pKeyword "RESTRICT")
         |>> fun ((routine, characteristics), _) ->
             AlterRoutine

@@ -573,3 +573,53 @@ let pLeftBrace: Parser<char, unit> = pchar '{'
 ```
 
 The `pstring`-based terminals need `Parser<string, unit>` (`pLeftBraceMinus` / `pRightMinusBrace`, §5.2). This only bites when the parser is bound to a name — writing `token (pstring "{")` inline determines the type at the use site, which is why the row pattern parser did not need the annotation before the 5.1 block was extracted.
+
+## The PTF branch must precede the generic statement branch in `pRoutineBody` (11.60)
+
+`<polymorphic table function body>` starts with `DESCRIBE WITH ...`, and `DESCRIBE` is a reserved word that also starts the dynamic `<describe statement>` (20.10, `DynamicParser.pDescribeStatement`). `pRoutineBody` is a `choice`, so trying the generic `pRoutineBodyStatementRef` branch first would let `DESCRIBE` be consumed there. Keep `attempt (pPolymorphicTableFunctionBody |>> …)` as the **first** alternative.
+
+`PRIVATE` / `FULFILL` / `FINISH` are non-reserved words, but no statement parser accepts them as a leading token, so they need no special handling.
+
+## Reserved vs non-reserved: the new 11.60 keywords
+
+`INSTANCE`, `CONSTRUCTOR`, `PRIVATE`, `DATA`, `FULFILL`, `FINISH`, `SECURITY`, `DISPATCH`, `GENERAL`, `IMPLEMENTATION`, `DEFINER`, `INVOKER`, `TRANSFORM`, `STYLE` are **non-reserved**; `DESCRIBE`, `START`, `STATIC`, `METHOD`, `GROUP`, `PARAMETER`, `SQL`, `EXTERNAL`, `DEFAULT` are **reserved**. That is why `pMethodKind` (`Types.fs`) wraps every alternative in `attempt` — `INSTANCE` and `CONSTRUCTOR` would otherwise be consumable as identifiers — and why `pLanguageName` can use bare `attempt`ed `pKeyword`s for the one-letter names `M` and `C` (`pKeyword` already refuses to match when an identifier character follows, so `C` does not match `COBOL` and `M` does not match `MUMPS`).
+
+`EXTERNAL SECURITY DEFINER` reuses the `EXTERNAL` keyword of `<external body reference>` itself, but the extras follow the `EXTERNAL` token, so the trailing `opt pExternalSecurityClause` sees the second `EXTERNAL`. `EXTERNAL NAME x` and `EXTERNAL SECURITY …` cannot be confused.
+
+## `|>>` swallows `>>=` into the lambda body — parenthesise the projection
+
+Building a routine record and then validating it needs `>>=`, but
+
+```fsharp
+        |>> fun (((name, parameters), characteristics), body) ->
+            { Name = name; … }
+        >>= validateRoutine
+```
+
+parses as `|>> (fun … -> { … } >>= validateRoutine)` — the lambda body extends as far as possible, so `>>=` is applied to the *record*, not to the parser (`Type mismatch. Expecting 'CreateRoutine -> …' but given '… -> CharStream<unit> -> Reply<…>'`). Parenthesise the lambda:
+
+```fsharp
+        |>> (fun (((name, parameters), characteristics), body) -> { … })
+        >>= validateRoutine
+        |>> CreateProcedure
+```
+
+Note the order: `CreateProcedure` / `CreateFunction` are `StatementKind` cases, so build the `CreateRoutine` **record**, run `validateRoutine`, and only then wrap it — `(CreateProcedure { … }) >>= validateRoutine` cannot type-check.
+
+## Nested record patterns need same-column alignment — destructure instead
+
+In F#, newline-separated fields in a record pattern must all start at the same column (FS0010 otherwise), and a list inside a pattern must stay on one line. Deeply nested patterns such as
+
+```fsharp
+    | CreateProcedure { Body =
+                           ExternalRoutine { ParameterStyle = Some "GENERAL"
+                                             TransformGroup = None } } -> ()
+```
+
+are painful to keep aligned once one more nesting level is added (`ExternalRoutine {` starts one column further right). Prefer binding the payload and asserting on the fields:
+
+```fsharp
+    | CreateProcedure { Body = ExternalRoutine ext } ->
+        Assert.Equal(Some "GENERAL", ext.ParameterStyle)
+        Assert.True(Option.isNone ext.TransformGroup)
+```

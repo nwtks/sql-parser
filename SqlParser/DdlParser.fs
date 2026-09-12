@@ -640,14 +640,9 @@ module DdlParser =
             [ pKeyword "ROUTINE" >>% RoutineType.Routine
               pKeyword "FUNCTION" >>% RoutineType.Function
               pKeyword "PROCEDURE" >>% RoutineType.Procedure
+              // 10.6 pMethodKind also serves 11.51 / 11.60 — it lives in Types.fs.
               attempt (
-                  opt (
-                      choice
-                          [ pKeyword "INSTANCE" >>% MethodKind.Instance
-                            pKeyword "STATIC" >>% MethodKind.Static
-                            pKeyword "CONSTRUCTOR" >>% MethodKind.Constructor ]
-                  )
-                  .>>. pKeyword "METHOD"
+                  opt pMethodKind .>>. pKeyword "METHOD"
                   |>> fun (methodKind, _) -> RoutineType.Method methodKind
               ) ]
 

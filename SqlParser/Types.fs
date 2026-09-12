@@ -144,6 +144,17 @@ module Types =
     let pDataTypeElement, pDataTypeElementRef =
         createParserForwardedToRef<DataType, unit> ()
 
+    // 10.6 <routine type> / 11.51 <partial method specification> — [ INSTANCE | STATIC | CONSTRUCTOR ]
+    // Shared by 10.6 (<routine type>, DdlParser.fs), 11.60 (<method specification designator>,
+    // RoutineParser.fs) and 11.51 (<partial method specification>, TypeParser.fs); it lives here
+    // because Types.fs is compiled before all three. INSTANCE and CONSTRUCTOR are not reserved
+    // words, hence the `attempt`s.
+    let pMethodKind: Parser<MethodKind, unit> =
+        choice
+            [ attempt (pKeyword "INSTANCE" >>% MethodKind.Instance)
+              attempt (pKeyword "STATIC" >>% MethodKind.Static)
+              attempt (pKeyword "CONSTRUCTOR" >>% MethodKind.Constructor) ]
+
     // 6.1 <scope clause> ::= SCOPE <table name>
     // Shared by <reference type> (6.1), <column option list> (11.3) and
     // <add column scope clause> (11.17); it lives here because Types.fs is

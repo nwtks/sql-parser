@@ -1217,7 +1217,7 @@ let ``CREATE PROCEDURE verification`` () =
                         Parameters = [ first; second ]
                         Returns = None
                         Characteristics = [ Language "SQL"; Deterministic true ]
-                        Body = SqlRoutine(Select _) } ->
+                        Body = SqlRoutine(None, Select _) } ->
         Assert.Equal(Some ParameterMode.In, first.Mode)
         Assert.Equal(Some(Identifier "NAME"), first.Name |> Option.map (fun e -> e.Kind))
         Assert.Equal(DataTypeParameter(Varchar(Some 100), false), first.ParameterType)
@@ -1258,12 +1258,118 @@ let ``CREATE PROCEDURE with BEGIN ATOMIC body verification`` () =
 [<Fact>]
 let ``CREATE PROCEDURE with EXTERNAL body verification`` () =
     match parse "CREATE PROCEDURE p () EXTERNAL NAME ext_proc" with
-    | CreateProcedure { Body = ExternalRoutine(Some { Kind = Identifier "EXT_PROC" }) } -> ()
+    | CreateProcedure { Body = ExternalRoutine { Name = Some { Kind = Identifier "EXT_PROC" } } } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateProcedure EXTERNAL NAME, got %A" res)
 
     match parse "CREATE PROCEDURE p () EXTERNAL" with
-    | CreateProcedure { Body = ExternalRoutine None } -> ()
+    | CreateProcedure { Body = ExternalRoutine { Name = None } } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateProcedure EXTERNAL, got %A" res)
+
+[<Fact>]
+let ``CREATE PROCEDURE external body reference extras verification`` () =
+    // 11.60 <external body reference> ::= EXTERNAL [ NAME <external routine name> ]
+    //     [ <parameter style clause> ] [ <transform group specification> ] [ <external security clause> ]
+    match parse "CREATE PROCEDURE p () EXTERNAL PARAMETER STYLE GENERAL EXTERNAL SECURITY IMPLEMENTATION DEFINED" with
+    | CreateProcedure { Body = ExternalRoutine ext } ->
+        Assert.Equal(Some "GENERAL", ext.ParameterStyle)
+        Assert.True(Option.isNone ext.TransformGroup)
+        Assert.Equal(Some ExternalSecurity.ImplementationDefined, ext.ExternalSecurity)
+    | res -> Assert.Fail(sprintf "Expected the external body extras, got %A" res)
+
+    // 11.60 <transform group specification> ::= TRANSFORM GROUP <single group specification>
+    match parse "CREATE PROCEDURE p () EXTERNAL TRANSFORM GROUP g EXTERNAL SECURITY INVOKER" with
+    | CreateProcedure { Body = ExternalRoutine ext } ->
+        match ext.TransformGroup with
+        | Some(SingleTransformGroup { Kind = Identifier "G" }) -> ()
+        | other -> Assert.Fail(sprintf "Expected a single transform group, got %A" other)
+
+        Assert.Equal(Some ExternalSecurity.Invoker, ext.ExternalSecurity)
+    | res -> Assert.Fail(sprintf "Expected a single transform group, got %A" res)
+
+    // 11.60 <multiple group specification> ::= <group specification> [ { , <group specification> }... ]
+    // 11.60 <group specification> ::= <group name> FOR TYPE <path-resolved user-defined type name>
+    match parse "CREATE PROCEDURE p () EXTERNAL TRANSFORM GROUP g1, g2 FOR TYPE my_type EXTERNAL SECURITY DEFINER" with
+    | CreateProcedure { Body = ExternalRoutine ext } ->
+        match ext.TransformGroup with
+        | Some(MultipleTransformGroups [ (g1, None); (g2, Some _) ]) ->
+            Assert.Equal(Identifier "G1", g1.Kind)
+            Assert.Equal(Identifier "G2", g2.Kind)
+        | other -> Assert.Fail(sprintf "Expected multiple transform groups, got %A" other)
+
+        Assert.Equal(Some ExternalSecurity.Definer, ext.ExternalSecurity)
+    | res -> Assert.Fail(sprintf "Expected multiple transform groups, got %A" res)
+
+[<Fact>]
+let ``routine parameter style may not appear twice verification`` () =
+    // 11.60 SR: <parameter style clause> is legal in <routine characteristics> and again in
+    // <external body reference>, but a routine has at most one parameter style.
+    parseFails "CREATE PROCEDURE p () PARAMETER STYLE SQL EXTERNAL PARAMETER STYLE SQL"
+    parse "CREATE PROCEDURE p () PARAMETER STYLE SQL EXTERNAL" |> ignore
+
+[<Fact>]
+let ``CREATE FUNCTION with polymorphic table function body verification`` () =
+    // 11.60 <polymorphic table function body> — only FULFILL WITH is mandatory
+    match parse "CREATE FUNCTION f () RETURNS TABLE FULFILL WITH fulfill_proc" with
+    | CreateFunction { Body = PolymorphicTableFunction ptf } ->
+        Assert.True(Option.isNone ptf.PrivateParameters)
+        Assert.True(Option.isNone ptf.Describe)
+        Assert.True(Option.isNone ptf.Start)
+        Assert.Equal(Identifier "FULFILL_PROC", ptf.Fulfill.Name.Kind)
+        Assert.True(Option.isNone ptf.Finish)
+    | res -> Assert.Fail(sprintf "Expected a PTF body, got %A" res)
+
+    // 11.60 <PTF private parameters> ::= PRIVATE [ DATA ] <private parameter declaration list>
+    match
+        parse
+            "CREATE FUNCTION f () RETURNS TABLE PRIVATE DATA (x INT) DESCRIBE WITH d START WITH s FULFILL WITH f2 FINISH WITH fin"
+    with
+    | CreateFunction { Body = PolymorphicTableFunction ptf } ->
+        match ptf.PrivateParameters with
+        | Some priv ->
+            Assert.True(priv.HasData)
+            Assert.Equal(1, List.length priv.Declarations)
+            Assert.Equal(Some(Identifier "X"), priv.Declarations.Head.Name |> Option.map (fun e -> e.Kind))
+        | None -> Assert.Fail "Expected PTF private parameters"
+
+        Assert.Equal(Some(Identifier "D"), ptf.Describe |> Option.map (fun d -> d.Name.Kind))
+        Assert.Equal(Some(Identifier "S"), ptf.Start |> Option.map (fun s -> s.Name.Kind))
+        Assert.Equal(Identifier "F2", ptf.Fulfill.Name.Kind)
+        Assert.Equal(Some(Identifier "FIN"), ptf.Finish |> Option.map (fun f -> f.Name.Kind))
+    | res -> Assert.Fail(sprintf "Expected the full PTF body, got %A" res)
+
+    // FULFILL WITH is not optional
+    parseFails "CREATE FUNCTION f () RETURNS TABLE PRIVATE (x INT) SELECT 1"
+
+[<Fact>]
+let ``CREATE PROCEDURE with rights clause verification`` () =
+    // 11.60 <SQL routine spec> ::= [ <rights clause> ] <SQL routine body>
+    match parse "CREATE PROCEDURE p () SQL SECURITY DEFINER SELECT 1" with
+    | CreateProcedure { Body = SqlRoutine(Some RightsClause.SqlSecurityDefiner, Select _) } -> ()
+    | res -> Assert.Fail(sprintf "Expected SQL SECURITY DEFINER, got %A" res)
+
+    match parse "CREATE FUNCTION f () RETURNS INT SQL SECURITY INVOKER SELECT 1" with
+    | CreateFunction { Body = SqlRoutine(Some RightsClause.SqlSecurityInvoker, Select _) } -> ()
+    | res -> Assert.Fail(sprintf "Expected SQL SECURITY INVOKER, got %A" res)
+
+    match parse "CREATE PROCEDURE p () SELECT 1" with
+    | CreateProcedure { Body = SqlRoutine(None, Select _) } -> ()
+    | res -> Assert.Fail(sprintf "Expected a bare SQL routine spec, got %A" res)
+
+    parseFails "CREATE PROCEDURE p () SQL SECURITY OWNER SELECT 1"
+
+[<Fact>]
+let ``CREATE FUNCTION with dispatch clause verification`` () =
+    // 11.60 <dispatch clause> ::= STATIC DISPATCH — a <function specification> suffix
+    match parse "CREATE FUNCTION f () RETURNS INT STATIC DISPATCH SELECT 1" with
+    | CreateFunction { Dispatch = true } -> ()
+    | res -> Assert.Fail(sprintf "Expected STATIC DISPATCH, got %A" res)
+
+    match parse "CREATE FUNCTION f () RETURNS INT SELECT 1" with
+    | CreateFunction { Dispatch = false } -> ()
+    | res -> Assert.Fail(sprintf "Expected no dispatch clause, got %A" res)
+
+    // a procedure has no <dispatch clause> (11.60)
+    parseFails "CREATE PROCEDURE p () STATIC DISPATCH SELECT 1"
 
 [<Fact>]
 let ``CREATE FUNCTION verification`` () =
@@ -1272,7 +1378,7 @@ let ``CREATE FUNCTION verification`` () =
                        Parameters = [ first; second ]
                        Returns = returns
                        Characteristics = [ Language "SQL"; Deterministic true; SqlDataAccess ReadsSqlData ]
-                       Body = SqlRoutine(Select _) } ->
+                       Body = SqlRoutine(None, Select _) } ->
         Assert.Equal(Some(Identifier "A"), first.Name |> Option.map (fun e -> e.Kind))
         Assert.Equal(DataTypeParameter(Integer, false), first.ParameterType)
         Assert.Equal(Some(Identifier "B"), second.Name |> Option.map (fun e -> e.Kind))
@@ -1410,15 +1516,82 @@ let ``routine characteristics are accepted in any order`` () =
 [<Fact>]
 let ``routine characteristic catalogue verification`` () =
     let sql =
-        "CREATE FUNCTION f () RETURNS INT PARAMETER STYLE SQL SPECIFIC f_spec OLD SAVEPOINT LEVEL NAME ext NO SQL SELECT 1"
+        "CREATE FUNCTION f () RETURNS INT PARAMETER STYLE SQL SPECIFIC f_spec OLD SAVEPOINT LEVEL NO SQL SELECT 1"
 
     match parse sql with
     | CreateFunction { Characteristics = [ ParameterStyle "SQL"
                                            SpecificName { Kind = Identifier "F_SPEC" }
                                            SavepointLevel false
-                                           ExternalName { Kind = Identifier "EXT" }
                                            SqlDataAccess NoSql ] } -> ()
     | res -> Assert.Fail(sprintf "Expected the full characteristic catalogue, got %A" res)
+
+[<Fact>]
+let ``ALTER ROUTINE characteristic catalogue verification`` () =
+    // 11.61 <alter routine characteristic> = <language clause> | <parameter style clause>
+    //     | <SQL-data access indication> | <null-call clause> | <returned result sets characteristic>
+    //     | NAME <external routine name>
+    match parse "ALTER FUNCTION f LANGUAGE SQL NAME ext RETURNS NULL ON NULL INPUT" with
+    | AlterRoutine { Characteristics = [ Language "SQL"; ExternalName { Kind = Identifier "EXT" }; NullCall true ] } ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected the 11.61 catalogue, got %A" res)
+
+    // 11.61 does not allow SPECIFIC / <deterministic characteristic> / <savepoint level indication>
+    parseFails "ALTER FUNCTION f DETERMINISTIC"
+    parseFails "ALTER FUNCTION f SPECIFIC f_spec"
+    parseFails "ALTER FUNCTION f OLD SAVEPOINT LEVEL"
+
+[<Fact>]
+let ``CREATE routine rejects the 11.61-only NAME characteristic verification`` () =
+    // NAME <external routine name> belongs to 11.61 <alter routine characteristic>, not to
+    // 11.60 <routine characteristic>.
+    parseFails "CREATE PROCEDURE p () NAME ext SELECT 1"
+    parseFails "CREATE FUNCTION f () RETURNS INT NAME ext SELECT 1"
+
+[<Fact>]
+let ``LANGUAGE and PARAMETER STYLE are closed keyword sets verification`` () =
+    // 10.2 <language name> ::= ADA | C | COBOL | FORTRAN | M | MUMPS | PASCAL | PLI | SQL
+    parseFails "CREATE FUNCTION f () RETURNS INT LANGUAGE JS SELECT 1"
+    parse "CREATE FUNCTION f () RETURNS INT LANGUAGE FORTRAN SELECT 1" |> ignore
+    // 11.60 <parameter style> ::= SQL | GENERAL
+    parseFails "CREATE FUNCTION f () RETURNS INT PARAMETER STYLE FOO SELECT 1"
+
+[<Fact>]
+let ``CREATE METHOD verification`` () =
+    // 11.60 <method specification designator> ::= [ INSTANCE | STATIC | CONSTRUCTOR ] METHOD
+    //     <method name> <SQL parameter declaration list> [ <returns clause> ] FOR <udt>
+    match parse "CREATE METHOD m (x INT) RETURNS INT FOR my_type SELECT 1" with
+    | CreateMethod stmt ->
+        match stmt.Designator with
+        | MethodDeclaration methodSpec ->
+            Assert.True(Option.isNone methodSpec.Kind)
+            Assert.Equal(Identifier "M", methodSpec.Name.Kind)
+            Assert.Equal(1, List.length methodSpec.Parameters)
+            Assert.Equal(Some(Identifier "X"), methodSpec.Parameters.Head.Name |> Option.map (fun e -> e.Kind))
+            Assert.Equal(Some(returnsData Integer), methodSpec.Returns)
+            Assert.Equal(Identifier "MY_TYPE", methodSpec.ForType.Kind)
+        | other -> Assert.Fail(sprintf "Expected MethodDeclaration, got %A" other)
+
+        match stmt.Body with
+        | SqlRoutine(None, Select _) -> ()
+        | other -> Assert.Fail(sprintf "Expected a SQL routine body, got %A" other)
+    | res -> Assert.Fail(sprintf "Expected CreateMethod, got %A" res)
+
+    // the <returns clause> is optional in the method form
+    match parse "CREATE STATIC METHOD m () FOR my_type SELECT 1" with
+    | CreateMethod { Designator = MethodDeclaration methodSpec } ->
+        Assert.Equal(Some MethodKind.Static, methodSpec.Kind)
+        Assert.True(Option.isNone methodSpec.Returns)
+    | res -> Assert.Fail(sprintf "Expected CREATE STATIC METHOD without RETURNS, got %A" res)
+
+    // 11.60 <method specification designator> ::= SPECIFIC METHOD <specific method name>
+    match parse "CREATE SPECIFIC METHOD m_spec SELECT 1" with
+    | CreateMethod { Designator = SpecificMethod { Kind = Identifier "M_SPEC" } } -> ()
+    | res -> Assert.Fail(sprintf "Expected SPECIFIC METHOD, got %A" res)
+
+    // FOR <schema-resolved user-defined type name> is mandatory in the non-SPECIFIC form
+    parseFails "CREATE METHOD m (x INT) SELECT 1"
+    // a <method specification designator> has no <routine characteristics> slot
+    parseFails "CREATE METHOD m (x INT) FOR my_type LANGUAGE SQL SELECT 1"
 
 [<Fact>]
 let ``ALTER ROUTINE verification`` () =
