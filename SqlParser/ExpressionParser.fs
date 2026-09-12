@@ -276,6 +276,16 @@ module ExpressionParser =
               |>> CollationFor
               |> withExprPosition ]
 
+    // 6.4 <simple value specification> ::= <literal> | <host parameter name>
+    //     | <SQL parameter reference> | <embedded variable name>
+    // (<embedded variable name> is a host-language construct and is not modelled;
+    //  it degrades to <host parameter name> — see docs/trade-off.md.)
+    let pSimpleValueSpecification =
+        choice
+            [ pLiteralExpr
+              pQuestionMark >>% "?" <|> pHostParameter |>> Parameter |> withExprPosition
+              pQualifiedNameExpr ]
+
     // 6.30 <extract expression> ::= EXTRACT <left paren> <extract field> FROM <extract source> <right paren>
     let pExtractExpression =
         pKeyword "EXTRACT"

@@ -112,9 +112,7 @@ module QueryParser =
               // so "NESTED PATH '$.items' ..." would otherwise be misread as a regular
               // column named NESTED of user-defined type PATH.
               attempt (
-                  pKeyword "NESTED"
-                  >>. opt (pKeyword "PATH" >>% ())
-                  >>. pCharacterStringLiteral
+                  pKeyword "NESTED" >>. opt (pKeyword "PATH" >>% ()) >>. pCharacterStringLiteral
                   .>>. opt (attempt (pKeyword "AS" >>. pIdentifierExpr))
                   .>>. pJsonTableColumnsClause
                   |>> fun ((path, name), cols) ->
@@ -130,9 +128,7 @@ module QueryParser =
                   >>= fun (name, dt) ->
                       opt (attempt (pKeyword "FORMAT" >>. pJsonRepresentation))
                       >>= fun fmt ->
-                          opt (
-                              attempt (pKeyword "PATH" >>. pCharacterStringLiteral)
-                          )
+                          opt (attempt (pKeyword "PATH" >>. pCharacterStringLiteral))
                           >>= fun path ->
                               // <JSON query wrapper behavior> ::= WITHOUT [ ARRAY ] WRAPPER
                               //   | WITH [ UNCONDITIONAL | CONDITIONAL ] [ ARRAY ] WRAPPER
@@ -791,7 +787,11 @@ module QueryParser =
     // 14.3 <updatability clause> ::= FOR { READ ONLY | UPDATE [ OF <column name list> ] }
     let pLockingClause =
         pKeyword "FOR"
-        >>. (attempt (pKeyword "UPDATE" >>% ForUpdate)
+        >>. (attempt (
+                 pKeyword "UPDATE"
+                 >>. opt (attempt (pKeyword "OF" >>. sepBy1 pIdentifierExpr (token (pstring ","))))
+                 |>> ForUpdate
+             )
              <|> (pKeyword "READ" >>. pKeyword "ONLY" >>% ForReadOnly))
 
     // 7.17 <corresponding spec> ::= CORRESPONDING [ BY ( <corresponding column list> ) ]

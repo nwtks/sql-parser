@@ -162,3 +162,93 @@ let ``PIPE ROW verification`` () =
 
 [<Fact>]
 let ``EXECUTE without statement name is rejected`` () = parseFails "EXECUTE"
+
+[<Fact>]
+let ``DYNAMIC DECLARE CURSOR verification`` () =
+    match parse "DECLARE c CURSOR FOR s1" with
+    | DynamicDeclareCursor dc ->
+        match dc.Name.Kind, dc.Statement.Scope, dc.Statement.SimpleValue.Kind with
+        | Identifier "C", None, Identifier "S1" -> ()
+        | _ -> Assert.Fail(sprintf "Unexpected DynamicDeclareCursor %A" dc)
+
+        Assert.Equal(None, dc.Properties.Sensitivity)
+        Assert.Equal(None, dc.Properties.Scrollability)
+        Assert.Equal(None, dc.Properties.Holdability)
+        Assert.Equal(None, dc.Properties.Returnability)
+    | res -> Assert.Fail(sprintf "Expected DynamicDeclareCursor, got %A" res)
+
+[<Fact>]
+let ``DYNAMIC DECLARE CURSOR with properties and scope verification`` () =
+    match parse "DECLARE c INSENSITIVE CURSOR WITH HOLD FOR GLOBAL s1" with
+    | DynamicDeclareCursor dc ->
+        Assert.Equal(Some Insensitive, dc.Properties.Sensitivity)
+        Assert.Equal(Some WithHold, dc.Properties.Holdability)
+        Assert.Equal(Some ScopeGlobal, dc.Statement.Scope)
+
+        match dc.Statement.SimpleValue.Kind with
+        | Identifier "S1" -> ()
+        | _ -> Assert.Fail(sprintf "Unexpected statement name %A" dc.Statement)
+    | res -> Assert.Fail(sprintf "Expected DynamicDeclareCursor, got %A" res)
+
+[<Fact>]
+let ``DYNAMIC DECLARE CURSOR with literal statement name verification`` () =
+    match parse "DECLARE c CURSOR FOR 's1'" with
+    | DynamicDeclareCursor dc ->
+        match dc.Statement.SimpleValue.Kind with
+        | Literal(String "s1") -> ()
+        | _ -> Assert.Fail(sprintf "Unexpected statement name %A" dc.Statement)
+    | res -> Assert.Fail(sprintf "Expected DynamicDeclareCursor, got %A" res)
+
+[<Fact>]
+let ``DYNAMIC DECLARE CURSOR without CURSOR keyword is rejected`` () = parseFails "DECLARE c FOR s1"
+
+[<Fact>]
+let ``ALLOCATE EXTENDED DYNAMIC CURSOR verification`` () =
+    match parse "ALLOCATE c SCROLL CURSOR FOR GLOBAL s1" with
+    | AllocateExtendedDynamicCursor ac ->
+        Assert.Equal(Some Scroll, ac.Properties.Scrollability)
+        Assert.Equal(Some ScopeGlobal, ac.Statement.Scope)
+
+        match ac.Cursor.Scope, ac.Cursor.SimpleValue.Kind, ac.Statement.SimpleValue.Kind with
+        | None, Identifier "C", Identifier "S1" -> ()
+        | _ -> Assert.Fail(sprintf "Unexpected AllocateExtendedDynamicCursor %A" ac)
+    | res -> Assert.Fail(sprintf "Expected AllocateExtendedDynamicCursor, got %A" res)
+
+[<Fact>]
+let ``ALLOCATE EXTENDED DYNAMIC CURSOR with dynamic names verification`` () =
+    match parse "ALLOCATE ? CURSOR FOR LOCAL :s1" with
+    | AllocateExtendedDynamicCursor ac ->
+        match ac.Cursor.Scope, ac.Cursor.SimpleValue.Kind, ac.Statement.Scope, ac.Statement.SimpleValue.Kind with
+        | None, Parameter "?", Some ScopeLocal, Parameter ":S1" -> ()
+        | _ -> Assert.Fail(sprintf "Unexpected AllocateExtendedDynamicCursor %A" ac)
+    | res -> Assert.Fail(sprintf "Expected AllocateExtendedDynamicCursor, got %A" res)
+
+[<Fact>]
+let ``ALLOCATE RECEIVED CURSOR verification`` () =
+    match parse "ALLOCATE c CURSOR FOR PROCEDURE p" with
+    | AllocateReceivedCursor ar ->
+        match ar.Name.Kind, ar.Routine.Kind with
+        | Identifier "C", Identifier "P" -> ()
+        | _ -> Assert.Fail(sprintf "Unexpected AllocateReceivedCursor %A" ar)
+    | res -> Assert.Fail(sprintf "Expected AllocateReceivedCursor, got %A" res)
+
+[<Fact>]
+let ``ALLOCATE RECEIVED CURSOR without CURSOR keyword verification`` () =
+    match parse "ALLOCATE c FOR PROCEDURE p" with
+    | AllocateReceivedCursor ar ->
+        match ar.Name.Kind with
+        | Identifier "C" -> ()
+        | _ -> Assert.Fail(sprintf "Unexpected AllocateReceivedCursor %A" ar)
+    | res -> Assert.Fail(sprintf "Expected AllocateReceivedCursor, got %A" res)
+
+[<Fact>]
+let ``ALLOCATE RECEIVED CURSOR with specific routine designator verification`` () =
+    match parse "ALLOCATE c CURSOR FOR PROCEDURE SPECIFIC FUNCTION f_spec" with
+    | AllocateReceivedCursor ar ->
+        match ar.Name.Kind, ar.Routine.Kind with
+        | Identifier "C", Identifier "F_SPEC" -> ()
+        | _ -> Assert.Fail(sprintf "Unexpected AllocateReceivedCursor SPECIFIC %A" ar)
+    | res -> Assert.Fail(sprintf "Expected AllocateReceivedCursor SPECIFIC, got %A" res)
+
+[<Fact>]
+let ``ALLOCATE without cursor name is rejected`` () = parseFails "ALLOCATE c"

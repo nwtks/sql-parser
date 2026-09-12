@@ -96,10 +96,16 @@ module SqlParser =
     // routine/trigger parsers defined in RoutineParser.fs can consume them).
     pRoutineBodyStatementRefImpl.Value <- pStatement
 
-    // 14.4 <open statement> / 14.5 <fetch statement> / 14.6 <close statement> / 14.7 <select statement: single row>
+    // 14.1 <declare cursor> / 14.4 <open statement> / 14.5 <fetch statement> / 14.6 <close statement>
+    // 14.7 <select statement: single row> / 14.16 <temporary table declaration>
+    // 14.17 <free locator statement> / 14.18 <hold locator statement>
     let pCursor =
         choice
-            [ attempt pOpenStatement
+            [ attempt pTemporaryTableDeclarationStatement
+              attempt pDeclareCursorStatement
+              attempt pFreeLocatorStatement
+              attempt pHoldLocatorStatement
+              attempt pOpenStatement
               attempt pFetchStatement
               attempt pCloseStatement
               attempt pSelectIntoStatement ]
@@ -153,12 +159,15 @@ module SqlParser =
     // 20 <SQL-dynamic statement> — dispatcher
     let pDynamic =
         choice
-            [ attempt pExecuteImmediateStatement
+            [ attempt pDynamicDeclareCursorStatement
+              attempt pExecuteImmediateStatement
               attempt pExecuteStatement
               attempt pPrepareStatement
               attempt pDeallocatePrepareStatement
               attempt pDescribeStatement
               attempt pAllocateDescriptorStatement
+              attempt pAllocateExtendedDynamicCursorStatement
+              attempt pAllocateReceivedCursorStatement
               attempt pDeallocateDescriptorStatement
               attempt pGetDescriptorStatement
               attempt pSetDescriptorStatement

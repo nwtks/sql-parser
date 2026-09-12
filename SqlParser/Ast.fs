@@ -113,11 +113,6 @@ type NullsOrder =
     | NullsFirst
     | NullsLast
 
-// 14.3 <updatability clause> / 14.1 <declare cursor> — FOR { UPDATE | READ ONLY }
-type LockingClause =
-    | ForUpdate
-    | ForReadOnly
-
 // 7.15 <window frame units> ::= ROWS | RANGE | GROUPS
 type WindowFrameUnit =
     | Rows
@@ -199,6 +194,8 @@ and ExpressionKind =
     | AllFieldsReference of Expression * Expression list option
     // 6.4 <dynamic parameter specification> / <host parameter specification>
     | Parameter of string
+    // 20.16 <descriptor value constructor> ::= DESCRIPTOR ( <descriptor column list> )
+    | DescriptorValueConstructor of (Expression * DataType option) list
     // 6.10 <window function> ::= <window function type> OVER <window name or specification>
     | WindowFunction of WindowFunction
     // 6.7 <column reference> ::= [ <table name> . ] <column name>
@@ -1327,6 +1324,98 @@ and AlterTypeStatement =
     { Name: Expression
       Action: AlterTypeAction }
 
+// 14.2 <cursor sensitivity> ::= SENSITIVE | INSENSITIVE | ASENSITIVE
+and CursorSensitivity =
+    | Sensitive
+    | Insensitive
+    | Asensitive
+
+// 14.2 <cursor scrollability> ::= SCROLL | NO SCROLL
+and CursorScrollability =
+    | Scroll
+    | NoScroll
+
+// 14.2 <cursor holdability> ::= WITH HOLD | WITHOUT HOLD
+and CursorHoldability =
+    | WithHold
+    | WithoutHold
+
+// 14.2 <cursor returnability> ::= WITH RETURN | WITHOUT RETURN
+and CursorReturnability =
+    | WithReturn
+    | WithoutReturn
+
+// 20.8 <cursor attribute> ::= <cursor sensitivity> | <cursor scrollability>
+//     | <cursor holdability> | <cursor returnability>
+and CursorAttribute =
+    | SensitivityAttribute of CursorSensitivity
+    | ScrollabilityAttribute of CursorScrollability
+    | HoldabilityAttribute of CursorHoldability
+    | ReturnabilityAttribute of CursorReturnability
+
+// 14.2 <cursor properties> ::= [ <cursor sensitivity> ] [ <cursor scrollability> ] CURSOR
+//     [ <cursor holdability> ] [ <cursor returnability> ]
+and CursorProperties =
+    { Sensitivity: CursorSensitivity option
+      Scrollability: CursorScrollability option
+      Holdability: CursorHoldability option
+      Returnability: CursorReturnability option }
+
+// 14.1 <declare cursor> ::= DECLARE <cursor name> <cursor properties> FOR <cursor specification>
+// 14.3 <cursor specification> ::= <query expression> [ <updatability clause> ]
+and DeclareCursorStatement =
+    { Name: Expression
+      Properties: CursorProperties
+      Specification: Query }
+
+// 14.3 <updatability clause> ::= FOR { READ ONLY | UPDATE [ OF <column name list> ] }
+and LockingClause =
+    | ForUpdate of Expression list option
+    | ForReadOnly
+
+// 14.16 <table commit action> ::= PRESERVE | DELETE
+and TableCommitAction =
+    | PreserveOnCommit
+    | DeleteOnCommit
+
+// 14.16 <temporary table declaration> ::= DECLARE LOCAL TEMPORARY TABLE <table name> <table element list>
+//     [ ON COMMIT <table commit action> ROWS ]
+and TemporaryTableDeclarationStatement =
+    { Name: Expression
+      Columns: ColumnDefinition list
+      Constraints: TableConstraint list
+      OnCommit: TableCommitAction option }
+
+// 5.4 <scope option> ::= GLOBAL | LOCAL
+and ScopeOption =
+    | ScopeGlobal
+    | ScopeLocal
+
+// 20.15 <statement name> / <extended statement name> / 20.17 <extended cursor name>
+//     ::= [ <scope option> ] <simple value specification>
+and ExtendedName =
+    { Scope: ScopeOption option
+      SimpleValue: Expression }
+
+// 20.15 <dynamic declare cursor> ::= DECLARE <cursor name> <cursor properties> FOR <statement name>
+and DynamicDeclareCursorStatement =
+    { Name: Expression
+      Properties: CursorProperties
+      Statement: ExtendedName }
+
+// 20.17 <allocate extended dynamic cursor statement> ::= ALLOCATE <extended cursor name>
+//     <cursor properties> FOR <extended statement name>
+and AllocateExtendedDynamicCursorStatement =
+    { Cursor: ExtendedName
+      Properties: CursorProperties
+      Statement: ExtendedName }
+
+// 20.18 <allocate received cursor statement> ::= ALLOCATE <cursor name> [ CURSOR ]
+//     FOR PROCEDURE <specific routine designator>
+and AllocateReceivedCursorStatement =
+    { Name: Expression
+      Routine: Expression }
+
 // 14.5 <fetch orientation>
 and FetchOrientation =
     | Next
@@ -1493,11 +1582,18 @@ and StatementKind =
     | CreateType of CreateTypeStatement
     // 11.53 <alter type statement> ::= ALTER TYPE ...
     | AlterType of AlterTypeStatement
+    // 14.1 <declare cursor> / 14.2 <cursor properties> / 14.3 <cursor specification>
+    | DeclareCursor of DeclareCursorStatement
     // 14.4-14.7 cursor statements
     | Open of Expression
     | Fetch of FetchOrientation option * Expression * Expression list
     | Close of Expression
     | SelectInto of SelectIntoStatement
+    // 14.16 <temporary table declaration>
+    | DeclareTemporaryTable of TemporaryTableDeclarationStatement
+    // 14.17 <free locator statement> / 14.18 <hold locator statement>
+    | FreeLocator of Expression list
+    | HoldLocator of Expression list
     // 18.1-18.3 connection statements
     | Connect of ConnectStatement
     | SetConnection of Expression option
@@ -1525,6 +1621,12 @@ and StatementKind =
     | GetDescriptor of Expression * GetDescriptorInfo
     | SetDescriptor of Expression * SetDescriptorInfo
     | CopyDescriptor of CopyDescriptorStatement
+    // 20.15 <dynamic declare cursor>
+    | DynamicDeclareCursor of DynamicDeclareCursorStatement
+    // 20.17 <allocate extended dynamic cursor statement>
+    | AllocateExtendedDynamicCursor of AllocateExtendedDynamicCursorStatement
+    // 20.18 <allocate received cursor statement>
+    | AllocateReceivedCursor of AllocateReceivedCursorStatement
     // 20.28 <pipe row statement> ::= PIPE ROW <PTF descriptor name>
     | PipeRow of Expression
 

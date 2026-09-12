@@ -434,11 +434,20 @@ let ``PARTITION BY join verification`` () =
 [<Fact>]
 let ``Locking clause verification`` () =
     match parse "SELECT * FROM users FOR UPDATE" with
-    | Select(SelectQuery s) -> Assert.Equal(Some ForUpdate, s.Locking)
+    | Select(SelectQuery s) -> Assert.Equal(Some(ForUpdate None), s.Locking)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
     match parse "SELECT * FROM users FOR READ ONLY" with
     | Select(SelectQuery s) -> Assert.Equal(Some ForReadOnly, s.Locking)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
+let ``Updatability clause OF column list verification`` () =
+    match parse "SELECT * FROM users FOR UPDATE OF a, b" with
+    | Select(SelectQuery s) ->
+        match s.Locking with
+        | Some(ForUpdate(Some [ { Kind = Identifier "A" }; { Kind = Identifier "B" } ])) -> ()
+        | other -> Assert.Fail(sprintf "Expected FOR UPDATE OF a, b, got %A" other)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]

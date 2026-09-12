@@ -21,13 +21,26 @@ module RoutineParser =
               attempt (pKeyword "IN" >>% ParameterMode.In)
               attempt (pKeyword "OUT" >>% ParameterMode.Out) ]
 
+    // 20.16 <descriptor value constructor> ::= DESCRIPTOR ( <descriptor column list> )
+    // 20.16 <descriptor column specification> ::= <column name> [ <data type> ]
+    // (only reachable here from <parameter default>; <descriptor argument> / PTF
+    //  copartition is not implemented — see docs/trade-off.md.)
+    let pDescriptorValueConstructor =
+        pKeyword "DESCRIPTOR"
+        >>. between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (sepBy1 (pIdentifierExpr .>>. opt pDataType) (token (pstring ",")))
+        |>> DescriptorValueConstructor
+        |> withExprPosition
+
     // 11.60 <SQL parameter declaration> ::= [ <parameter mode> ] [ <SQL parameter name> ] <parameter type> [ RESULT ] [ DEFAULT <parameter default> ]
     let pParameterDeclaration =
         opt pParameterMode
         .>>. opt pIdentifierExpr
         .>>. pDataType
         .>>. opt (pKeyword "RESULT")
-        .>>. opt (pKeyword "DEFAULT" >>. pExpression)
+        .>>. opt (pKeyword "DEFAULT" >>. (attempt pDescriptorValueConstructor <|> pExpression))
         |>> fun ((((mode, name), dataType), isResult), defaultVal) ->
             { Mode = mode
               Name = name
@@ -109,7 +122,7 @@ module RoutineParser =
                 |> List.tryFind (fun (_, g) -> List.length g > 1)
 
             match dup with
-            | Some (cat, _) -> fail (sprintf "duplicate routine characteristic: %s" cat)
+            | Some(cat, _) -> fail (sprintf "duplicate routine characteristic: %s" cat)
             | None -> preturn chars
 
     // 11.60 <routine body> ::= <SQL routine spec> | <external body reference>

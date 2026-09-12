@@ -18,6 +18,15 @@ A SQL parser implemented in F# using [FParsec](https://www.quanttec.com/fparsec/
 - `MERGE INTO ... USING ... ON ...`
 - `TRUNCATE TABLE`
 
+### ↕️ Cursors & Locators
+- `DECLARE <cursor> [SENSITIVE|INSENSITIVE|ASENSITIVE] [SCROLL|NO SCROLL] CURSOR [WITH|WITHOUT HOLD] [WITH|WITHOUT RETURN] FOR <query expression> [FOR READ ONLY | FOR UPDATE [OF <columns>]]`.
+- Dynamic cursors: `DECLARE <cursor> [<cursor properties>] FOR <statement name>`, `ALLOCATE <extended cursor name> [<cursor properties>] FOR <extended statement name>`, `ALLOCATE <cursor name> [CURSOR] FOR PROCEDURE <specific routine designator>`.
+- `OPEN`, `FETCH` (with `NEXT`/`PRIOR`/`FIRST`/`LAST`/`ABSOLUTE`/`RELATIVE`), `CLOSE`.
+- `SELECT ... INTO ...` (single row).
+- `DECLARE LOCAL TEMPORARY TABLE ... [ON COMMIT PRESERVE|DELETE ROWS]`.
+- `FREE LOCATOR` / `HOLD LOCATOR`.
+- Routine parameter defaults accept `DESCRIPTOR ( <column name> [ <data type> ] , ... )`.
+
 ### 🏗️ Data Definition (DDL)
 - `CREATE TABLE` (column constraints like `PRIMARY KEY`, `UNIQUE`, `NOT NULL`, `CHECK`, `REFERENCES`, and table-level constraints: `PRIMARY KEY (...)`, `UNIQUE (...)`, `FOREIGN KEY (...) REFERENCES ... [ON UPDATE/DELETE ...]`, `CHECK (...)`).
 - `CREATE INDEX` (including `UNIQUE`).
@@ -65,6 +74,7 @@ match SqlParser.parse sql with
 - `ExpressionParser.fs`: Handles operator precedence and expression parsing.
 - `QueryParser.fs`: Main logic for `SELECT` queries and set operations.
 - `DmlParser.fs`: Parsers for `INSERT`, `UPDATE`, `DELETE`, `MERGE`.
+- `CursorParser.fs`: Parsers for cursor declarations, `OPEN`/`FETCH`/`CLOSE`, cursor `SELECT ... INTO`, temporary table declarations, and locator statements.
 - `DdlParser.fs`: Parsers for schema modification statements (including `GRANT`/`REVOKE`/role).
 - `TransactionParser.fs`: Parsers for transaction statements.
 - `SqlParser.fs`: Main entry point and `WITH` clause handling.

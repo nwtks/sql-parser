@@ -303,6 +303,28 @@ Because `IMMEDIATE` is not a reserved word, `pExecuteStatement` (`EXECUTE <name>
 
 `QueryParser.fs` and `DmlParser.fs` define a module-level `pWhereClause` with different signatures. The cursor parsers (`CursorParser.fs`) must open only `QueryParser` and must NOT open `DmlParser`.
 
+## `LockingClause` must live inside the recursive AST type group
+
+`<updatability clause>` is `FOR UPDATE [ OF <column name list> ]`, so `LockingClause.ForUpdate` carries `Expression list option`. `Expression` is defined inside the big recursive type group that starts at `type DataType` (`Ast.fs`), so a standalone `type LockingClause = ...` placed *before* the group cannot reference it (FS0039). Define it as `and LockingClause = ...` inside the group.
+
+- **Trade-off:** The type moved out of the "plain DU" section near the top of `Ast.fs`. `QueryParser.pLockingClause` is otherwise unchanged.
+
+## `opt (attempt (...))` is required around the `OF` column list
+
+For `FOR UPDATE OF a, b`, a bare `opt (pKeyword "OF" >>. sepBy1 ...)` does not backtrack the consumed `OF`, so `FOR UPDATE OF` (no columns) or a following failure loses the whole clause. Wrap the `OF` group in `attempt`.
+
+## `DECLARE LOCAL TEMPORARY TABLE` must be tried before `DECLARE <cursor name>`
+
+Both statements start with `DECLARE`. `pDeclareCursorStatement` parses `LOCAL` as the cursor name and then fails on the missing `CURSOR` keyword. In `pCursor`, `attempt pTemporaryTableDeclarationStatement` precedes `attempt pDeclareCursorStatement`.
+
+## `WITH HOLD` / `WITH RETURN` share the `WITH` prefix
+
+`<cursor holdability>` and `<cursor returnability>` are both `WITH...` / `WITHOUT...`. `pCursorHoldability`'s `WITH HOLD` branch consumes `WITH` before failing on `HOLD`, so `opt (attempt pCursorHoldability)` must wrap the whole parser; otherwise `WITH RETURN` would be swallowed. The same applies to `pCursorReturnability`.
+
+## `LOCATOR` / `PRESERVE` / `TEMPORARY` are not reserved words
+
+`pKeyword` matches any keyword, reserved or not, so `FREE LOCATOR`, `ON COMMIT PRESERVE ROWS` and `DECLARE LOCAL TEMPORARY TABLE` all parse. Those words are non-reserved, so they could also be identifiers elsewhere; statement dispatch relies on the leading reserved words `FREE` / `HOLD` / `DECLARE`.
+
 ## `pIdentifierRaw` must not be used for closed-enumeration item names
 
 Diagnostics / descriptor item names (`NUMBER` / `ROW_COUNT` / `COUNT` / `DATA` / `MESSAGE_TEXT` etc.) are reserved words, so they cannot be parsed with `pIdentifier` — but `pIdentifierRaw` is too permissive (it also accepts `ALL`, `SELECT`, ...). Use an explicit `choice [ pKeyword "..." ... ]` enumeration instead, as `pStatementInfoItemName` / `pConditionInfoItemName` (DiagnosticsParser) and `pHeaderItemName` / `pDescriptorItemName` / `pCopyDescriptorOptions` (DynamicParser) now do. Note the grammar distinguishes `<header item name>` (`COUNT`, `KEY_TYPE`, ...) from `<descriptor item name>` (`DATA`, `INDICATOR`, ...): the `<get/set header information>` forms use the former, the `VALUE` item forms the latter.
@@ -362,3 +384,19 @@ The `Condition` field of `RowPatternDefinition` is an `Expression` record (`{ Ki
 ## `PERIOD FOR SYSTEM_TIME` needs the `SYSTEM_TIME` token, not `SYSTEM` + `_TIME`
 
 11.3/11.27 `<system time period specification> ::= PERIOD FOR SYSTEM_TIME` — `SYSTEM_TIME` is a single reserved word (Lexer.fs), so `pKeyword "SYSTEM_TIME"` matches it. Writing `pKeyword "SYSTEM" >>. pKeyword "_TIME"` fails, and so does treating the underscore as a separator.
+
+## The static `DECLARE CURSOR` parser is tried before the dynamic one
+
+14.1 `DECLARE <cursor name> <cursor properties> FOR <cursor specification>` and 20.15 `DECLARE <cursor name> <cursor properties> FOR <statement name>` share a prefix. `pCursor` (CursorParser) is dispatched **before** `pDynamic` in `SqlParser.fs`, so `pDeclareCursorStatement` is attempted first; a statement name (`s1`, `?`, `'x'`, `GLOBAL ?`) makes `pQuery` fail, the `attempt` backtracks, and `pDynamic` then reaches `pDynamicDeclareCursorStatement`. No extra disambiguation is needed, but the order matters — putting the dynamic form first would make `DECLARE c CURSOR FOR <query>` fail instead.
+
+## `DESCRIPTOR` / `EXTENDED` / `ATTRIBUTES` are not reserved words
+
+Only `ALLOCATE`, `PROCEDURE`, `GLOBAL`, `LOCAL` and `PTF` are reserved (Lexer.fs). `DESCRIPTOR` is therefore also a valid identifier, which is why the `<parameter default>` slot needs `attempt pDescriptorValueConstructor <|> pExpression`: without `attempt`, a default written as the identifier `DESCRIPTOR` would consume the keyword and then fail on the missing `(`.
+
+## `ALLOCATE` dispatch: 20.17 must precede 20.18
+
+`ALLOCATE <extended cursor name> <cursor properties> FOR <extended statement name>` (20.17) and `ALLOCATE <cursor name> [ CURSOR ] FOR PROCEDURE <specific routine designator>` (20.18) share the `ALLOCATE <name>` prefix. Trying 20.17 first is safe because `PROCEDURE` is reserved: for `ALLOCATE c CURSOR FOR PROCEDURE p`, the extended-statement-name branch cannot match `PROCEDURE`, so 20.17 fails cleanly and 20.18 succeeds. `ALLOCATE [ SQL ] DESCRIPTOR ...` (20.2) is tried before both and requires the `DESCRIPTOR` keyword.
+
+## `<scope option>` is defined by 5.4, not 20.17
+
+`<scope option> ::= GLOBAL | LOCAL` is a heading-only-adjacent rule in §5.4 (Names and identifiers), so `RuleNumberingTests` rejects a `// 20.15/20.17 <scope option>` citation — the allowed clauses are the ones that *mention* the name (5.4 and 20.26). Cite it as `// 5.4 <scope option>`.

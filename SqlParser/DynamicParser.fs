@@ -248,3 +248,48 @@ module DynamicParser =
     // 20.28 <pipe row statement> ::= PIPE ROW (<row value expression>)
     let pPipeRowStatement =
         pKeyword "PIPE" >>. pKeyword "ROW" >>. pQualifiedNameExpr |>> PipeRow
+
+    // 5.4 <scope option> ::= GLOBAL | LOCAL
+    let pScopeOption =
+        (pKeyword "GLOBAL" >>% ScopeOption.ScopeGlobal)
+        <|> (pKeyword "LOCAL" >>% ScopeOption.ScopeLocal)
+
+    // 20.15 <statement name> / <extended statement name> / 20.17 <extended cursor name>
+    //     ::= [ <scope option> ] <simple value specification>
+    let pExtendedName =
+        opt (attempt pScopeOption) .>>. pSimpleValueSpecification
+        |>> fun (scope, simpleValue) ->
+            { Scope = scope
+              SimpleValue = simpleValue }
+
+    // 20.15 <dynamic declare cursor> ::= DECLARE <cursor name> <cursor properties> FOR <statement name>
+    let pDynamicDeclareCursorStatement =
+        pKeyword "DECLARE" >>. pQualifiedNameExpr .>>. CursorParser.pCursorProperties
+        .>> pKeyword "FOR"
+        .>>. pExtendedName
+        |>> fun ((name, properties), statement) ->
+            { Name = name
+              Properties = properties
+              Statement = statement }
+            |> DynamicDeclareCursor
+
+    // 20.17 <allocate extended dynamic cursor statement> ::= ALLOCATE <extended cursor name>
+    //     <cursor properties> FOR <extended statement name>
+    let pAllocateExtendedDynamicCursorStatement =
+        pKeyword "ALLOCATE" >>. pExtendedName .>>. CursorParser.pCursorProperties
+        .>> pKeyword "FOR"
+        .>>. pExtendedName
+        |>> fun ((cursor, properties), statement) ->
+            { Cursor = cursor
+              Properties = properties
+              Statement = statement }
+            |> AllocateExtendedDynamicCursor
+
+    // 20.18 <allocate received cursor statement> ::= ALLOCATE <cursor name> [ CURSOR ]
+    //     FOR PROCEDURE <specific routine designator>
+    let pAllocateReceivedCursorStatement =
+        pKeyword "ALLOCATE" >>. pQualifiedNameExpr .>>. opt (pKeyword "CURSOR" >>% ())
+        .>> pKeyword "FOR"
+        .>> pKeyword "PROCEDURE"
+        .>>. DdlParser.pSpecificRoutineDesignator
+        |>> fun ((name, _), routine) -> { Name = name; Routine = routine } |> AllocateReceivedCursor

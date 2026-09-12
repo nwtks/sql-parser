@@ -582,3 +582,43 @@ Both statements share the `<JSON API common syntax>` (context expression / PATH 
 `MATCH_RECOGNIZE` (QueryParser) and the `<row pattern measures>` / `<row pattern common syntax>` inside window frames (ExpressionParser) share the same row-pattern syntax.
 
 - **Trade-off:** `pRowPatternMeasures` / `pRowPatternCommon` are defined as forward references with `createParserForwardedToRef` and referenced from both modules. `WindowFrame` gained `Measures: RowPatternMeasure list option` and `RowPattern: RowPatternCommon option` fields to hold the window row pattern.
+
+## `<declare cursor>` / `<cursor properties>` / `<cursor specification>` (14.1–14.3)
+
+`pDeclareCursorStatement` parses `DECLARE <cursor name> <cursor properties> FOR <cursor specification>`. The `<cursor specification>` reuses `QueryParser.pQuery`, which already consumes the optional trailing `<updatability clause>`; there is therefore no dedicated `CursorSpecification` AST type and `DeclareCursorStatement.Specification` is a `Query`.
+
+`<cursor properties>` (`CursorProperties`) holds four independent optional attributes: sensitivity (`SENSITIVE | INSENSITIVE | ASENSITIVE`), scrollability (`SCROLL | NO SCROLL`), holdability (`WITH HOLD | WITHOUT HOLD`) and returnability (`WITH RETURN | WITHOUT RETURN`). The `CURSOR` keyword is mandatory between scrollability and holdability, matching the grammar.
+
+- **Trade-off:** The `<updatability clause>` was extended from `FOR UPDATE` to `FOR UPDATE [ OF <column name list> ]`; `LockingClause.ForUpdate` now carries `Expression list option`. The clause is shared by plain `SELECT`, set operations and `DECLARE CURSOR`, so the `OF` list works everywhere the clause is allowed.
+- **Trade-off:** The four `<cursor properties>` attributes are separate DUs rather than one flat keyword list, so an absent attribute is `None` and the AST preserves exactly what was written (including the implicit `ASENSITIVE` default).
+
+## `<temporary table declaration>` (14.16)
+
+`pTemporaryTableDeclarationStatement` parses `DECLARE LOCAL TEMPORARY TABLE <name> ( <table element list> ) [ ON COMMIT { PRESERVE | DELETE } ROWS ]`, reusing `DdlParser.pColumnDefinition` / `pTableConstraint` for the elements.
+
+- **Trade-off:** This module-level declaration is distinct from `CREATE LOCAL TEMPORARY TABLE` (11.3, which uses `TableScope`). `TemporaryTableDeclarationStatement` keeps columns and constraints as separate lists (mirroring `CreateTableStatement`) with `OnCommit` as a `TableCommitAction option`.
+
+## `<locator reference>` is limited to host/dynamic parameters (14.17–14.18)
+
+`FREE LOCATOR` / `HOLD LOCATOR` parse a comma-separated `<locator reference>` list. The grammar allows `<host parameter name> | <embedded variable name> | <dynamic parameter specification>`; only `:name` and `?` have standalone syntax, so `<embedded variable name>` is not modelled.
+
+- **Trade-off:** Each reference is an `Expression` of `Parameter` kind, reusing the representation from `6.4 <general value specification>`. A host-language `<embedded variable name>` is treated as `<host parameter name>`.
+
+## `<cursor attributes>` (20.8) is a free-standing rule
+
+`<cursor attributes> ::= <cursor attribute>...` is defined in 20.8 but is not referenced by any production in `sql-2016-grammar.txt` — `<cursor properties>` (14.2, used by `DECLARE CURSOR` and `ALLOCATE`) is the ordered form actually reached by the grammar. `CursorParser.pCursorAttributes` is therefore implemented as a reusable parser (`many1` of the four `<cursor attribute>` alternatives) and is exercised directly rather than through a statement.
+
+- **Trade-off:** 20.8 is not reachable from `SqlParser.parse`; the rule is kept as a library-facing parser so the design document and the implementation agree rule-for-rule. `pCursorProperties` deliberately does **not** reuse it, because `<cursor properties>` fixes the order (`sensitivity`, `scrollability`, `CURSOR`, `holdability`, `returnability`) while `<cursor attributes>` is an unordered repetition.
+
+## Dynamic cursors (20.15 / 20.17 / 20.18) reuse `CursorProperties` and add `ExtendedName`
+
+`pDynamicDeclareCursorStatement`, `pAllocateExtendedDynamicCursorStatement` and `pAllocateReceivedCursorStatement` live in `DynamicParser.fs` and reuse `CursorParser.pCursorProperties` (14.2) so the four cursor attributes are parsed identically for static and dynamic cursors.
+
+- **Trade-off:** `<extended statement name>` / `<extended cursor name>` are both `[ <scope option> ] <simple value specification>`, so one record serves both: `ExtendedName { Scope: ScopeOption option; SimpleValue: Expression }`. A plain `<statement name>` (`<identifier>`) is the same shape with `Scope = None`. `<simple value specification>` (6.4) is a new parser in `ExpressionParser.fs`.
+- **Trade-off:** The two `ALLOCATE` forms are distinguished by requiring `<cursor properties>` (20.17) vs. the optional `CURSOR` plus `FOR PROCEDURE` (20.18). `<specific routine designator>` is stored as an `Expression`, matching the existing simplification used by `ALTER ROUTINE` and `GRANT`.
+
+## `<descriptor value constructor>` (20.16) is wired into `<parameter default>` only
+
+The grammar admits `DESCRIPTOR ( <descriptor column list> )` in two slots: `<descriptor argument>` (PTF `<copartition specification>`, not implemented) and `<parameter default>` (11.60). Only the latter is reachable, so `RoutineParser.pDescriptorValueConstructor` is used there and the result is carried as `ExpressionKind.DescriptorValueConstructor`.
+
+- **Trade-off:** The constructor is intentionally **not** an alternative of `<value expression primary>` — the grammar does not allow it as a general value expression, and adding it would make `DESCRIPTOR` (a non-reserved word) bind more eagerly than the existing identifier fallback.

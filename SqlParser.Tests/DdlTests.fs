@@ -943,6 +943,16 @@ let ``CREATE PROCEDURE with INOUT and DEFAULT verification`` () =
     | res -> Assert.Fail(sprintf "Expected CreateProcedure INOUT DEFAULT, got %A" res)
 
 [<Fact>]
+let ``CREATE PROCEDURE with DESCRIPTOR parameter default verification`` () =
+    match parse "CREATE PROCEDURE p (IN x INT DEFAULT DESCRIPTOR (a INT, b)) SELECT 1" with
+    | CreateProcedure { Parameters = [ param ] } ->
+        match param.Default with
+        | Some { Kind = DescriptorValueConstructor [ ({ Kind = Identifier "A" }, Some _)
+                                                     ({ Kind = Identifier "B" }, None) ] } -> ()
+        | other -> Assert.Fail(sprintf "Expected DESCRIPTOR default, got %A" other)
+    | res -> Assert.Fail(sprintf "Expected CreateProcedure, got %A" res)
+
+[<Fact>]
 let ``CREATE PROCEDURE with BEGIN ATOMIC body verification`` () =
     match parse "CREATE PROCEDURE p () BEGIN ATOMIC SELECT 1; SELECT 2; END" with
     | CreateProcedure { Body = RoutineBody.BeginAtomic [ Select _; Select _ ] } -> ()
