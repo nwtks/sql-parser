@@ -129,7 +129,7 @@ module TypeParser =
     // 11.51 <method characteristic> ::= <language clause> | <parameter style clause> | <deterministic characteristic> | <SQL-data access indication> | <null-call clause>
     let pMethodCharacteristic =
         choice
-            [ // 11.51 <language clause> ::= LANGUAGE <language name>
+            [ // 10.2 <language clause> ::= LANGUAGE <language name>
               attempt (pKeyword "LANGUAGE" >>. pIdentifierRaw |>> Language)
               // 11.51 <parameter style clause> ::= PARAMETER STYLE <parameter style>
               attempt (pKeyword "PARAMETER" >>. pKeyword "STYLE" >>. pIdentifierRaw |>> ParameterStyle)

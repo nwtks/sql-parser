@@ -489,7 +489,7 @@ module Lexer =
     // <quote symbol> ::= <quote> <quote>
     let pCharacterRepresentation = attempt (pstring "''") >>% '\'' <|> noneOf "'"
 
-    // 5.2 <introducer> ::= <underscore>
+    // 5.3 <introducer> ::= <underscore>
     let pIntroducer = pchar '_' .>> ws
 
     // 5.2 <SQL language identifier> ::= <SQL language identifier start> [ <SQL language identifier part>... ]
@@ -817,7 +817,7 @@ module Lexer =
         pIdentifier .>>. many (token (pstring ".") >>. pIdentifier)
         |>> fun (first, rest) -> first :: rest
 
-    // 5.4 <dynamic parameter specification> ::= <question mark>
+    // 6.4 <dynamic parameter specification> ::= <question mark>
     let pQuestionMark: Parser<char, unit> = pchar '?' .>> ws
 
     // 5.4 <host parameter name> ::= <colon> <identifier>

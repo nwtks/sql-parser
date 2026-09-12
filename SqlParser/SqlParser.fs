@@ -104,7 +104,7 @@ module SqlParser =
               attempt pCloseStatement
               attempt pSelectIntoStatement ]
 
-    // 14.8-14.14 <DML statement> ::= <insert statement> | <update statement> | <delete statement> | <merge statement> | <query expression>
+    // 14.8-14.15 <DML statement> ::= <insert statement> | <update statement> | <delete statement> | <merge statement> | <query expression>
     let pDml =
         choice
             [ attempt (pQuery |>> Select)

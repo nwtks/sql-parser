@@ -21,6 +21,7 @@
     <Compile Include="DiagnosticsTests.fs" />
     <Compile Include="DynamicTests.fs" />
     <Compile Include="SqlParserTests.fs" />
+    <Compile Include="RuleNumberingTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

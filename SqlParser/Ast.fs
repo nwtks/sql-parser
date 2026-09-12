@@ -27,29 +27,29 @@ type UnaryOperator =
     | Plus
     | Minus
 
-// 8.8 <quantifier> ::= ALL | ANY | SOME
+// 8.9 <quantifier> ::= ALL | ANY | SOME
 type Quantifier =
     | Any
     | SomeQuantifier
     | All
 
-// 6.1 <date literal> / 5.3 <date string>
+// 5.3 <date literal> / <date string>
 type DateValue = { Year: int; Month: int; Day: int }
 
-// 6.1 <time literal> / 5.3 <time string> — <time zone interval>
+// 5.3 <time literal> / <time string> — <time zone interval>
 type TimeZoneOffset = { Sign: int; Hours: int; Minutes: int }
 
-// 6.1 <time literal> / 5.3 <time string>
+// 5.3 <time literal> / <time string>
 type TimeValue =
     { Hour: int
       Minute: int
       Second: decimal
       TzOffset: TimeZoneOffset option }
 
-// 6.1 <timestamp literal> / 5.3 <timestamp string>
+// 5.3 <timestamp literal> / <timestamp string>
 type TimestampValue = { Date: DateValue; Time: TimeValue }
 
-// 6.1 <interval qualifier> — <datetime field>
+// 10.1 <interval qualifier> — <datetime field>
 type DateTimeField =
     | Year
     | Month
@@ -72,13 +72,13 @@ type IntervalQualifier =
     | SingleField of DateTimeField * IntervalPrecision option
     | Range of DateTimeField * DateTimeField * IntervalPrecision option
 
-// 6.1 <interval literal> / 5.3 <interval string>
+// 5.3 <interval literal> / <interval string>
 type IntervalValue =
     { IsNegative: bool
       ValueString: string
       Qualifier: IntervalQualifier }
 
-// 5.3 <literal> / 6.1 <general literal> — <character string literal> | <national character string literal>
+// 5.3 <literal> / <general literal> — <character string literal> | <national character string literal>
 //     | <Unicode character string literal> | <binary string literal> | <exact numeric literal>
 //     | <boolean literal> | <date literal> | <time literal> | <timestamp literal> | <interval literal> | <null>
 type Literal =
@@ -108,12 +108,12 @@ type SetOperatorKind =
     | Intersect
     | Except
 
-// 7.17 <sort specification> ::= ... [ NULLS { FIRST | LAST } ]
+// 10.10 <sort specification> ::= ... [ NULLS { FIRST | LAST } ]
 type NullsOrder =
     | NullsFirst
     | NullsLast
 
-// 7.17 <updatability clause> / 14.3 <declare cursor> — FOR { UPDATE | READ ONLY }
+// 14.3 <updatability clause> / 14.1 <declare cursor> — FOR { UPDATE | READ ONLY }
 type LockingClause =
     | ForUpdate
     | ForReadOnly
@@ -124,7 +124,7 @@ type WindowFrameUnit =
     | Range
     | Groups
 
-// 6.30 <trim specification> ::= LEADING | TRAILING | BOTH
+// 6.32 <trim specification> ::= LEADING | TRAILING | BOTH
 type TrimSpecification =
     | Both
     | Leading
@@ -166,18 +166,18 @@ type DataType =
     // 6.1 <reference type> ::= REF ( <referenced type> ) [ SCOPE <table name> ]
     | ReferenceType of DataType * Expression option
 
-// 6.3 <value expression> / 6.29 <numeric value expression> / 6.31 <string value expression>
+// 6.28 <value expression> / 6.29 <numeric value expression> / 6.31 <string value expression>
 // 8.x <predicate> — the full expression grammar
 and ExpressionKind =
-    // 5.3 <literal> / 6.1 <general literal>
+    // 5.3 <literal> / <general literal>
     | Literal of Literal
-    // 6.3 <column reference> | <identifier>
+    // 6.7 <column reference> | <identifier>
     | Identifier of string
     // 6.29 <term> | <factor> | 8.2 <comp op> | 6.31 <concatenation>
     | BinaryOp of BinaryOperator * Expression * Expression
-    // 6.29 <signed numeric literal> | 8.x <boolean factor>
+    // 5.3 <signed numeric literal> | 6.39 <boolean factor>
     | UnaryOp of UnaryOperator * Expression
-    // 6.9 <aggregate function> / 6.10 <window function> / 6.27 <routine invocation>
+    // 10.9 <aggregate function> / 6.10 <window function> / 10.4 <routine invocation>
     | FunctionCall of
         Expression *
         bool *
@@ -189,7 +189,7 @@ and ExpressionKind =
     | Cast of Expression * DataType
     // 6.12 <case expression> ::= CASE ... END
     | Case of Expression option * (Expression * Expression) list * Expression option
-    // 7.17 <scalar subquery> ::= <subquery>
+    // 7.19 <scalar subquery> ::= <subquery>
     | SubqueryExpression of Query
     // 7.16 <asterisk> ::= *
     | Star
@@ -197,11 +197,11 @@ and ExpressionKind =
     | QualifiedStar of string list
     // 7.16 <all fields reference> ::= <value expression primary> . * [ AS ( <column list> ) ]
     | AllFieldsReference of Expression * Expression list option
-    // 5.4 <dynamic parameter specification> / <host parameter specification>
+    // 6.4 <dynamic parameter specification> / <host parameter specification>
     | Parameter of string
     // 6.10 <window function> ::= <window function type> OVER <window name or specification>
     | WindowFunction of WindowFunction
-    // 6.3 <column reference> ::= [ <table name> . ] <column name>
+    // 6.7 <column reference> ::= [ <table name> . ] <column name>
     | ColumnReference of string list
     // 8.3 <between predicate> ::= <row value predicand> [ NOT ] BETWEEN [ ASYMMETRIC | SYMMETRIC ] <left> AND <right>
     | Between of Expression * bool * bool * Expression * Expression
@@ -209,45 +209,45 @@ and ExpressionKind =
     | InList of Expression * bool * Expression list
     // 8.4 <in predicate> — <row value predicand> [ NOT ] IN <table subquery>
     | InSubquery of Expression * bool * Query
-    // 8.6 <null predicate> ::= <row value predicand> IS [ NOT ] NULL
+    // 8.8 <null predicate> ::= <row value predicand> IS [ NOT ] NULL
     | IsNull of Expression * bool
-    // 8.10 <boolean test> ::= <boolean predicand> IS [ NOT ] [ <truth value> ]
+    // 6.39 <boolean test> ::= <boolean predicand> IS [ NOT ] [ <truth value> ]
     | IsBoolean of Expression * bool * bool option
-    // 8.9 <exists predicate> ::= EXISTS <table subquery>
+    // 8.10 <exists predicate> ::= EXISTS <table subquery>
     | Exists of Query
     // 8.11 <unique predicate> ::= UNIQUE <table subquery>
     | Unique of Query
-    // 8.14 <distinct predicate> ::= <row value predicand> IS [ NOT ] DISTINCT FROM <row value predicand>
+    // 8.15 <distinct predicate> ::= <row value predicand> IS [ NOT ] DISTINCT FROM <row value predicand>
     | IsDistinctFrom of Expression * bool * Expression
-    // 8.15 <overlaps predicate> ::= <row value predicand> OVERLAPS <row value predicand>
+    // 8.14 <overlaps predicate> ::= <row value predicand> OVERLAPS <row value predicand>
     | Overlaps of Expression * Expression
-    // 8.8 <quantified comparison predicate> ::= <row value predicand> <comp op> <quantifier> <table subquery>
+    // 8.9 <quantified comparison predicate> ::= <row value predicand> <comp op> <quantifier> <table subquery>
     | QuantifiedComparison of BinaryOperator * Quantifier * Expression * Query
-    // 8.8 <quantified comparison predicate> — row value constructor <quantifier> <table subquery>
+    // 8.9 <quantified comparison predicate> — row value constructor <quantifier> <table subquery>
     | QuantifiedSubquery of Quantifier * Query
-    // 6.14 <collate clause> ::= COLLATE <collation name>
+    // 10.7 <collate clause> ::= COLLATE <collation name>
     | Collate of Expression * Expression
     // 8.5 <like predicate> ::= <character string predicand> [ NOT ] LIKE <pattern> [ ESCAPE <escape> ]
     | Like of Expression * bool * Expression * Expression option
-    // 8.5 <similar predicate> ::= <character string predicand> [ NOT ] SIMILAR TO <pattern> [ ESCAPE <escape> ]
+    // 8.6 <similar predicate> ::= <character string predicand> [ NOT ] SIMILAR TO <pattern> [ ESCAPE <escape> ]
     | SimilarTo of Expression * bool * Expression * Expression option
-    // 6.32 <extract expression> ::= EXTRACT ( <extract field> FROM <extract source> )
+    // 6.30 <extract expression> ::= EXTRACT ( <extract field> FROM <extract source> )
     | Extract of Expression * Expression
     // 6.30 <character position expression> ::= POSITION ( ... IN ... [ USING ... ] )
     | Position of Expression * Expression * Expression option
-    // 6.30 <trim function> ::= TRIM ( [ [ <trim specification> ] [ <trim character> ] FROM ] <trim source> )
+    // 6.32 <trim function> ::= TRIM ( [ [ <trim specification> ] [ <trim character> ] FROM ] <trim source> )
     | Trim of TrimSpecification option * Expression option * Expression
-    // 6.32 <current date value function> / <current time/timestamp/localtime/localtimestamp>
+    // 6.36 <current date value function> / <current time/timestamp/localtime/localtimestamp>
     | CurrentDate
     | CurrentTime of int option
     | CurrentTimestamp of int option
     | LocalTime of int option
     | LocalTimestamp of int option
-    // 6.30 <character substring function> ::= SUBSTRING ( <character value expression> FROM <start> [ FOR <length> ] [ USING ... ] )
+    // 6.32 <character substring function> ::= SUBSTRING ( <character value expression> FROM <start> [ FOR <length> ] [ USING ... ] )
     | Substring of Expression * Expression * Expression option * string option
-    // 6.31 <string overlay function> ::= OVERLAY ( <character value expression> PLACING <replacement> FROM <start> [ FOR <length> ] )
+    // 6.32 <character overlay function> ::= OVERLAY ( <character value expression> PLACING <replacement> FROM <start> [ FOR <length> ] )
     | Overlay of Expression * Expression * Expression * Expression option
-    // 5.4 <default specification> ::= DEFAULT
+    // 6.5 <default specification> ::= DEFAULT
     | Default
     // 6.14 <next value expression> ::= NEXT VALUE FOR <sequence generator name>
     | NextValueFor of Expression
@@ -264,7 +264,7 @@ and ExpressionKind =
     | User
     | Value
     | CollationFor of Expression
-    // 6.42 / 6.45 <collection value constructor>
+    // 6.42 <array value constructor> / 6.45 <multiset value constructor>
     | ArrayConstructor of Expression list
     | ArrayQuery of Query
     | MultisetConstructor of Expression list
@@ -299,7 +299,7 @@ and ExpressionKind =
     // 8.23 <JSON exists predicate>
     | JsonExists of JsonApiCommon * JsonExistsErrorBehavior option
     // 6.27 <JSON value function> / 6.34 <JSON query> / 6.33 <JSON value constructor>
-    //     / 6.36 <JSON aggregate function>
+    //     / 10.11 <JSON aggregate function>
     | JsonValue of JsonApiCommon * JsonReturning option * JsonValueBehavior option * JsonValueBehavior option
     | JsonQuery of
         JsonApiCommon *
@@ -320,7 +320,7 @@ and ExpressionKind =
     | NestedRowNumber of RowMarker
     | ValueOf of Expression * RowMarkerExpression * Expression option
 
-// 6.3 <value expression> — wrapper carrying source position
+// 6.28 <value expression> — wrapper carrying source position
 and Expression = { Kind: ExpressionKind; Pos: Position }
 
 // 8.12 <normal form> ::= NFC | NFD | NFKC | NFKD
@@ -782,36 +782,36 @@ and SelectStatement =
       Fetch: FetchClause option
       Locking: LockingClause option }
 
-// 14.8 <insert statement> — <from constructor> / <from subquery> / DEFAULT VALUES
+// 14.11 <insert statement> — <from constructor> / <from subquery> / DEFAULT VALUES
 and InsertSource =
     | Values of Expression list list
     | Query of Query
     | DefaultValues
 
-// 14.8 <insert statement> ::= INSERT INTO <table name> [ <insert column list> ] [ <overriding clause> ] <insert source>
+// 14.11 <insert statement> ::= INSERT INTO <table name> [ <insert column list> ] [ <overriding clause> ] <insert source>
 and InsertStatement =
     { Table: Expression
       Columns: Expression list option
       Source: InsertSource
       Override: bool option }
 
-// 14.10 <set clause> ::= <set clause> | <multiple column assignment> | <mutated set clause>
+// 14.15 <set clause> ::= <set clause> | <multiple column assignment> | <mutated set clause>
 and SetClause =
     | SingleSet of Expression * Expression
     | MultipleSet of Expression list * Expression list
-    // 10.4 <mutated set clause> ::= <mutated target> <period> <method name>
+    // 14.15 <mutated set clause> ::= <mutated target> <period> <method name>
     //                      <equals operator> <update source>
     // MutatedSet (mutated target, method name, value)
     | MutatedSet of Expression * Expression * Expression
 
-// 14.9/14.14 <application time period specification>
+// 14.9/14.14 <application time period name>
 // FOR PORTION OF <period name> FROM <point in time 1> TO <point in time 2>
 and PortionOfSpec =
     { PeriodName: Expression
       From: Expression
       To: Expression }
 
-// 14.10 <update statement: searched> ::= UPDATE <target table> SET <set clause list> [ WHERE <search condition> ]
+// 14.14 <update statement: searched> ::= UPDATE <target table> SET <set clause list> [ WHERE <search condition> ]
 and UpdateStatement =
     { Table: Expression
       TableAlias: Expression option
@@ -820,7 +820,7 @@ and UpdateStatement =
       PortionOf: PortionOfSpec option
       Cursor: Expression option }
 
-// 14.11 <delete statement: searched> ::= DELETE FROM <target table> [ WHERE <search condition> ]
+// 14.9 <delete statement: searched> ::= DELETE FROM <target table> [ WHERE <search condition> ]
 and DeleteStatement =
     { Table: Expression
       TableAlias: Expression option
@@ -828,25 +828,25 @@ and DeleteStatement =
       PortionOf: PortionOfSpec option
       Cursor: Expression option }
 
-// 15.5 <merge when clause> — MATCHED | NOT MATCHED
+// 14.12 <merge when clause> — MATCHED | NOT MATCHED
 and MergeMatchCondition =
     | Matched
     | NotMatched
 
-// 15.5 <merge update specification> | <merge delete specification> | <merge insert specification>
+// 14.12 <merge update specification> | <merge delete specification> | <merge insert specification>
 and MergeAction =
     | MergeUpdate of (Expression * Expression) list
     | MergeDelete
     // MergeInsert (insert column list, override, values)
     | MergeInsert of Expression list option * bool option * Expression list
 
-// 15.5 <merge when clause> ::= WHEN { MATCHED | NOT MATCHED } [ AND <search condition> ] THEN <merge operation>
+// 14.12 <merge when clause> ::= WHEN { MATCHED | NOT MATCHED } [ AND <search condition> ] THEN <merge operation>
 and MergeWhenClause =
     { MatchCondition: MergeMatchCondition
       Condition: Expression option
       Action: MergeAction }
 
-// 15.5 <merge statement> ::= MERGE INTO <target> [ [ AS ] <alias> ] USING <source> ON <search condition> <merge when clause>...
+// 14.12 <merge statement> ::= MERGE INTO <target> [ [ AS ] <alias> ] USING <source> ON <search condition> <merge when clause>...
 and MergeStatement =
     { Target: Expression
       TargetAlias: Expression option
@@ -871,13 +871,13 @@ and ForeignKeyConstraint =
       OnUpdate: ReferentialAction option
       OnDelete: ReferentialAction option }
 
-// 11.1 <table scope> ::= GLOBAL TEMPORARY | LOCAL TEMPORARY
+// 11.3 <table scope> ::= GLOBAL TEMPORARY | LOCAL TEMPORARY
 // (None covers the absent case, i.e. a persistent base table)
 and TableScope =
     | Global
     | Local
 
-// 11.54 <sequence generator option> — options shared by CREATE/ALTER SEQUENCE
+// 11.72 <sequence generator option> — options shared by CREATE/ALTER SEQUENCE
 // and the <identity column specification> (11.2).
 // MaxValue/MinValue: None means NO MAXVALUE / NO MINVALUE.
 // Cycle: true = CYCLE, false = NO CYCLE.
@@ -891,7 +891,7 @@ and SequenceOption =
     | Cycle of bool
     | Restart of decimal option
 
-// 11.2 <identity column specification> ::= GENERATED { ALWAYS | BY DEFAULT }
+// 11.4 <identity column specification> ::= GENERATED { ALWAYS | BY DEFAULT }
 //     AS IDENTITY [ ( <common sequence generator options> ) ]
 and IdentitySpec =
     { IsAlways: bool
@@ -917,7 +917,7 @@ and TableConstraint =
     | ForeignKey of ForeignKeyConstraint
     | Check of Expression option * Expression
 
-// 11.1 <table definition> ::= CREATE [ <table scope> ] TABLE <table name> <table contents source> [ <typed table clause> ]
+// 11.3 <table definition> ::= CREATE [ <table scope> ] TABLE <table name> <table contents source> [ <typed table clause> ]
 and CreateTableStatement =
     { Table: Expression
       TableScope: TableScope option
@@ -926,7 +926,7 @@ and CreateTableStatement =
       AsQuery: Query option
       AsColumns: Expression list option
       WithData: bool option
-      // 11.1 <typed table clause> ::= OF <UDT name> [ UNDER <supertable> ]
+      // 11.3 <typed table clause> ::= OF <UDT name> [ UNDER <supertable> ]
       OfType: Expression option }
 
 // 11.32 <view definition> ::= CREATE VIEW <table name> [ <view column list> ] [ <referenceable view specification> ] AS <query expression> [ <view check option> ]
@@ -940,7 +940,7 @@ and CreateViewStatement =
       // 11.32 <referenceable view specification> ::= OF <UDT name> [ UNDER <supertable> ]
       OfType: Expression option }
 
-// 11.2 <drop table statement> / 11.32 <drop view> / 11.39 <drop trigger> etc. — unified DROP
+// 11.31 <drop table statement> / 11.33 <drop view statement> / 11.50 <drop trigger statement> etc. — unified DROP
 and DropStatement =
     | DropTable of Expression * bool
     | DropView of Expression * bool
@@ -959,7 +959,7 @@ and DropStatement =
     | DropTrigger of Expression
     | DropType of Expression * bool
 
-// 11.21 <alter column definition> ::= SET <default clause> | DROP DEFAULT | SET NOT NULL | DROP NOT NULL | SET DATA TYPE <data type>
+// 11.12 <alter column definition> ::= SET <default clause> | DROP DEFAULT | SET NOT NULL | DROP NOT NULL | SET DATA TYPE <data type>
 and ColumnAlteration =
     | SetDefault of Expression
     | DropDefault
@@ -967,7 +967,7 @@ and ColumnAlteration =
     | DropNotNull
     | SetDataType of DataType
 
-// 11.21 <alter table action> ::= ADD COLUMN <column definition> | DROP COLUMN <column name> | ALTER COLUMN ... | ADD <table constraint> | DROP CONSTRAINT ...
+// 11.10 <alter table action> ::= ADD COLUMN <column definition> | DROP COLUMN <column name> | ALTER COLUMN ... | ADD <table constraint> | DROP CONSTRAINT ...
 and AlterTableAction =
     | AddColumn of ColumnDefinition
     | DropColumn of Expression
@@ -975,7 +975,7 @@ and AlterTableAction =
     | AddConstraint of TableConstraint
     | DropConstraint of Expression
 
-// 11.21 <alter table statement> ::= ALTER TABLE <table name> <alter table action>
+// 11.10 <alter table statement> ::= ALTER TABLE <table name> <alter table action>
 and AlterTableStatement =
     { Table: Expression
       Action: AlterTableAction }
@@ -1023,14 +1023,14 @@ and RevokeStatement =
     // 12.7: (roles, grantees, adminOptionFor, cascade)
     | RevokeRoles of Expression list * Expression list * bool * bool
 
-// 16.3 <isolation level> ::= READ UNCOMMITTED | READ COMMITTED | REPEATABLE READ | SERIALIZABLE
+// 17.3 <isolation level> ::= READ UNCOMMITTED | READ COMMITTED | REPEATABLE READ | SERIALIZABLE
 and IsolationLevel =
     | ReadUncommitted
     | ReadCommitted
     | RepeatableRead
     | Serializable
 
-// 16.3 <transaction access mode> ::= READ ONLY | READ WRITE
+// 17.3 <transaction access mode> ::= READ ONLY | READ WRITE
 and TransactionAccessMode =
     | ReadOnly
     | ReadWrite
@@ -1057,7 +1057,7 @@ and DomainConstraint =
       Check: Expression
       Characteristics: ConstraintCharacteristics }
 
-// 11.1 <constraint characteristics> ::= [ <constraint check time> ] [ [ NOT ] DEFERRABLE ] [ <constraint enforcement> ]
+// 10.8 <constraint characteristics> ::= [ <constraint check time> ] [ [ NOT ] DEFERRABLE ] [ <constraint enforcement> ]
 and ConstraintCharacteristics =
     { InitiallyDeferred: bool option
       Deferrable: bool option
@@ -1099,7 +1099,7 @@ and TransformGroup =
     { Name: Expression
       Elements: TransformElement list }
 
-// 11.68 <transform kind> ::= TO SQL | FROM SQL
+// 11.70 <transform kind> ::= TO SQL | FROM SQL
 and TransformKind =
     | ToSqlKind
     | FromSqlKind
@@ -1119,13 +1119,13 @@ and TransformDropTarget =
     | AllTransforms
     | TransformGroup of Expression
 
-// 11.50 <parameter mode> ::= IN | OUT | INOUT
+// 11.60 <parameter mode> ::= IN | OUT | INOUT
 and ParameterMode =
     | In
     | Out
     | InOut
 
-// 11.50 <SQL parameter declaration>
+// 11.60 <SQL parameter declaration>
 and ParameterDeclaration =
     { Mode: ParameterMode option
       Name: Expression option
@@ -1133,14 +1133,14 @@ and ParameterDeclaration =
       IsResult: bool
       Default: Expression option }
 
-// 11.50 <SQL-data access indication>
+// 11.60 <SQL-data access indication>
 and SqlDataAccess =
     | NoSql
     | ContainsSql
     | ReadsSqlData
     | ModifiesSqlData
 
-// 11.50 <routine characteristic>
+// 11.60 <routine characteristic>
 and RoutineCharacteristic =
     | Language of string
     | ParameterStyle of string
@@ -1152,13 +1152,13 @@ and RoutineCharacteristic =
     | SavepointLevel of bool
     | ExternalName of Expression
 
-// 11.50 <routine body>
+// 11.60 <routine body>
 and RoutineBody =
     | SqlRoutine of StatementKind
     | BeginAtomic of StatementKind list
     | ExternalRoutine of Expression option
 
-// 11.50 <SQL-invoked routine> — shared by CREATE FUNCTION / CREATE PROCEDURE
+// 11.60 <SQL-invoked routine> — shared by CREATE FUNCTION / CREATE PROCEDURE
 and CreateRoutine =
     { Name: Expression
       Parameters: ParameterDeclaration list
@@ -1166,42 +1166,42 @@ and CreateRoutine =
       Characteristics: RoutineCharacteristic list
       Body: RoutineBody }
 
-// 11.57 <alter routine statement>
+// 11.61 <alter routine statement>
 and AlterRoutineStatement =
     { Routine: Expression
       Characteristics: RoutineCharacteristic list }
 
-// 11.39 <trigger action time> ::= BEFORE | AFTER | INSTEAD OF
+// 11.49 <trigger action time> ::= BEFORE | AFTER | INSTEAD OF
 and TriggerActionTime =
     | Before
     | After
     | InsteadOf
 
-// 11.39 <trigger event>
+// 11.49 <trigger event>
 and TriggerEvent =
     | Insert
     | Delete
     | Update of Expression list option
 
-// 11.39 <transition table or variable>
+// 11.49 <transition table or variable>
 and TransitionTableOrVariable =
     | OldRow of Expression
     | NewRow of Expression
     | OldTable of Expression
     | NewTable of Expression
 
-// 11.39 <triggered SQL statement>
+// 11.49 <triggered SQL statement>
 and TriggeredStatement =
     | SingleStatement of StatementKind
     | BeginAtomic of StatementKind list
 
-// 11.39 <triggered action>
+// 11.49 <triggered action>
 and TriggeredAction =
     { ForEach: bool option
       When: Expression option
       Statement: TriggeredStatement }
 
-// 11.39 <trigger definition>
+// 11.49 <trigger definition>
 and CreateTriggerStatement =
     { Name: Expression
       ActionTime: TriggerActionTime
@@ -1356,9 +1356,9 @@ and ExecuteUsing =
     | UsingArguments of Expression list
     | UsingDescriptor of Expression
 
-// 7.17 <query expression> / 14.8 <insert statement> / 14.10 <update statement: searched>
-// 14.11 <delete statement: searched> / 15.5 <merge statement> / 11.1 <table definition>
-// 11.32 <view definition> / 11.21 <alter table statement> / 12.x <grant/revoke>
+// 7.17 <query expression> / 14.11 <insert statement> / 14.14 <update statement: searched>
+// 14.9 <delete statement: searched> / 14.12 <merge statement> / 11.3 <table definition>
+// 11.32 <view definition> / 11.10 <alter table statement> / 12.x <grant/revoke>
 // 16.x <transaction statement> / 11.5x <sequence/domain> / 19.x <session> / 20.x <dynamic SQL>
 // <SQL statement> — top-level statement variants
 and StatementKind =
@@ -1371,7 +1371,7 @@ and StatementKind =
     | CreateView of CreateViewStatement
     | Drop of DropStatement
     | AlterTable of AlterTableStatement
-    // 11.22 <truncate table statement> ::= TRUNCATE TABLE <table name>
+    // 14.10 <truncate table statement> ::= TRUNCATE TABLE <table name>
     | Truncate of Expression * bool option
     | Grant of GrantStatement
     | Revoke of RevokeStatement
@@ -1385,27 +1385,27 @@ and StatementKind =
     | CreateDomain of DomainDefinition
     // 11.35 <alter domain statement> ::= ALTER DOMAIN ...
     | AlterDomain of Expression * DomainAlteration
-    // 11.33 <collation definition> ::= CREATE COLLATION ...
+    // 11.43 <collation definition> ::= CREATE COLLATION ...
     | CreateCollation of Expression * Expression * Expression * bool option
-    // 11.36 <character set definition> ::= CREATE CHARACTER SET ...
+    // 11.41 <character set definition> ::= CREATE CHARACTER SET ...
     | CreateCharacterSet of Expression * Expression * Expression option
-    // 11.37 <transliteration definition> ::= CREATE TRANSLITERATION ...
+    // 11.45 <transliteration definition> ::= CREATE TRANSLITERATION ...
     | CreateTransliteration of Expression * Expression * Expression * Expression
-    // 11.38 <assertion definition> ::= CREATE ASSERTION ...
+    // 11.47 <assertion definition> ::= CREATE ASSERTION ...
     | CreateAssertion of Expression * Expression * ConstraintCharacteristics
-    // 11.64 <cast definition> ::= CREATE CAST ...
+    // 11.63 <user-defined cast definition> ::= CREATE CAST ...
     | CreateCast of DataType * DataType * Expression * bool
-    // 11.65 <ordering definition> ::= CREATE ORDERING ...
+    // 11.65 <user-defined ordering definition> ::= CREATE ORDERING ...
     | CreateOrdering of Expression * OrderingForm
     // 11.67 <transform definition> ::= CREATE TRANSFORM ...
     | CreateTransform of Expression * TransformGroup list
     // 11.68 <alter transform statement> ::= ALTER TRANSFORM ...
     | AlterTransform of Expression * AlterTransformGroup list
-    // 11.62 <sequence generator definition> ::= CREATE SEQUENCE ...
+    // 11.72 <sequence generator definition> ::= CREATE SEQUENCE ...
     | CreateSequence of Expression * SequenceOption list
     // 11.73 <alter sequence generator statement> ::= ALTER SEQUENCE ...
     | AlterSequence of Expression * SequenceOption list
-    // 19.4 <set role statement> ::= SET ROLE ...
+    // 19.3 <set role statement> ::= SET ROLE ...
     | SetRole of Expression option
     // 16.1 <call statement> ::= CALL <routine invocation>
     | Call of Expression * Expression list
@@ -1415,7 +1415,7 @@ and StatementKind =
     | StartTransaction of TransactionMode list
     // 17.2 <set transaction statement> ::= SET [ LOCAL ] TRANSACTION ...
     | SetTransaction of bool * TransactionMode list
-    // 17.4 <set constraints statement> ::= SET CONSTRAINTS ...
+    // 17.4 <set constraints mode statement> ::= SET CONSTRAINTS ...
     | SetConstraints of Expression list option * bool
     // 17.5 <savepoint statement> ::= SAVEPOINT <savepoint specifier>
     | Savepoint of Expression
@@ -1427,12 +1427,12 @@ and StatementKind =
     | Rollback of bool option * Expression option
     // 7.17 <with clause> + <SQL statement>
     | WithStatement of bool * Cte list * StatementKind
-    // 11.50 <SQL-invoked routine> — CREATE PROCEDURE / FUNCTION
+    // 11.60 <SQL-invoked routine> — CREATE PROCEDURE / FUNCTION
     | CreateProcedure of CreateRoutine
     | CreateFunction of CreateRoutine
-    // 11.57 <alter routine statement> ::= ALTER <specific routine designator> ...
+    // 11.61 <alter routine statement> ::= ALTER <specific routine designator> ...
     | AlterRoutine of AlterRoutineStatement
-    // 11.39 <trigger definition> ::= CREATE TRIGGER ...
+    // 11.49 <trigger definition> ::= CREATE TRIGGER ...
     | CreateTrigger of CreateTriggerStatement
     // 11.51 <user-defined type definition> ::= CREATE TYPE ...
     | CreateType of CreateTypeStatement

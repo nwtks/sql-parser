@@ -8,7 +8,7 @@ module QueryParser =
     // 7.17 <query expression> — re-export (actual definition is pQueryExpression at bottom)
     let pQuery = ExpressionParser.pQuery
 
-    // 7.17 <sort specification> ::= <sort key> [ <ordering specification> ] [ <null ordering> ]
+    // 10.10 <sort specification> ::= <sort key> [ <ordering specification> ] [ <null ordering> ]
     let pOrderByItem = ExpressionParser.pOrderByItem
 
     let withTablePosition p =
@@ -693,18 +693,18 @@ module QueryParser =
         <|> (pstring "*" .>> ws >>% ExpressionKind.Star |> withExprPosition
              |>> fun e -> Column(e, None))
 
-    // 7.6 <from clause> ::= FROM <table reference list>
+    // 7.5 <from clause> ::= FROM <table reference list>
     let pFromClause = pKeyword "FROM" >>. sepBy1 pTableReference (token (pstring ","))
 
-    // 7.6 <where clause> ::= WHERE <search condition>
+    // 7.12 <where clause> ::= WHERE <search condition>
     let pWhereClause = pKeyword "WHERE" >>. pExpression
 
-    // 7.6 <group by clause> ::= GROUP BY [ <set quantifier> ] <grouping element list>
+    // 7.13 <group by clause> ::= GROUP BY [ <set quantifier> ] <grouping element list>
     let pGroupByClause =
         pKeyword "GROUP" >>. pKeyword "BY" >>. pSetQuantifier
         .>>. sepBy1 pGroupingElement (token (pstring ","))
 
-    // 7.6 <having clause> ::= HAVING <search condition>
+    // 7.14 <having clause> ::= HAVING <search condition>
     let pHavingClause = pKeyword "HAVING" >>. pExpression
 
     // <query specification> — the SELECT core without ORDER BY/OFFSET/FETCH/LOCKING.
@@ -745,7 +745,7 @@ module QueryParser =
               Fetch = None
               Locking = None })
 
-    // 7.6 <simple table> ::= <query specification> | <table value constructor> | <explicit table>
+    // 7.17 <simple table> ::= <query specification> | <table value constructor> | <explicit table>
     // Set-operation operands do not consume ORDER BY/OFFSET/FETCH/LOCKING so those apply to the whole expression.
     let pSimpleTable =
         choice
@@ -788,7 +788,7 @@ module QueryParser =
               |>> fun (o, f) -> Some o, f
               attempt pFetchFirstClause |>> fun f -> None, Some f ]
 
-    // 7.17 <updatability clause> ::= FOR { READ ONLY | UPDATE [ OF <column name list> ] }
+    // 14.3 <updatability clause> ::= FOR { READ ONLY | UPDATE [ OF <column name list> ] }
     let pLockingClause =
         pKeyword "FOR"
         >>. (attempt (pKeyword "UPDATE" >>% ForUpdate)

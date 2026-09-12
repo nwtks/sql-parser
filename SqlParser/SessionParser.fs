@@ -6,7 +6,7 @@ open SqlParser.ExpressionParser
 open SqlParser.TransactionParser
 
 module SessionParser =
-    //   17.9 <set role statement> ::= SET ROLE <role specification>
+    //   19.3 <set role statement> ::= SET ROLE <role specification>
     //   <role specification> ::= <value specification> | NONE
     let pSetRoleStatement =
         pKeyword "SET"

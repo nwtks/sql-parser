@@ -7,14 +7,14 @@ open SqlParser.Types
 open SqlParser.DdlParser
 
 module RoutineParser =
-    // 11.50 <SQL procedure statement> / 11.39 <triggered SQL statement> — forward ref
+    // 13.4 <SQL procedure statement> / 11.49 <triggered SQL statement> — forward ref
     // Forward reference to the full statement parser, wired in SqlParser.fs so
     // that <SQL procedure statement> / <triggered SQL statement> can contain any
     // statement (including nested routine/trigger definitions).
     let pRoutineBodyStatementRef, pRoutineBodyStatementRefImpl =
         createParserForwardedToRef<Statement, unit> ()
 
-    // 11.50 <parameter mode> ::= IN | OUT | INOUT
+    // 11.60 <parameter mode> ::= IN | OUT | INOUT
     let pParameterMode =
         choice
             [ attempt (pKeyword "INOUT" >>% ParameterMode.InOut)
@@ -157,7 +157,7 @@ module RoutineParser =
                   Characteristics = characteristics
                   Body = body }
 
-    // 11.60 <alter routine statement> ::= ALTER <specific routine designator> <routine characteristic>... [ RESTRICT ]
+    // 11.61 <alter routine statement> ::= ALTER <specific routine designator> <routine characteristic>... [ RESTRICT ]
     let pAlterRoutineStatement =
         pKeyword "ALTER" >>. pSpecificRoutineDesignator
         .>>. pRoutineCharacteristics
@@ -167,7 +167,7 @@ module RoutineParser =
                 { Routine = routine
                   Characteristics = characteristics }
 
-    // 11.39 <trigger action time> ::= BEFORE | AFTER | INSTEAD OF
+    // 11.49 <trigger action time> ::= BEFORE | AFTER | INSTEAD OF
     let pTriggerActionTime =
         choice
             [ attempt (pKeyword "BEFORE" >>% TriggerActionTime.Before)

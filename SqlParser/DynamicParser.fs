@@ -214,7 +214,7 @@ module DynamicParser =
                                    Nesting = nesting })
             |>> Describe
 
-    // 20.13 <output using clause> ::= INTO <into argument> [ { <comma> <into argument> }... ] | INTO [ SQL ] DESCRIPTOR <descriptor name>
+    // 20.12 <output using clause> ::= INTO <into argument> [ { <comma> <into argument> }... ] | INTO [ SQL ] DESCRIPTOR <descriptor name>
     let pIntoClause =
         pKeyword "INTO"
         >>. (attempt (
@@ -223,7 +223,7 @@ module DynamicParser =
              )
              <|> (sepBy1 pQualifiedNameExpr (token (pstring ",")) |>> UsingArguments))
 
-    // 20.13 <input using clause> ::= USING <using argument> [ { <comma> <using argument> }... ] | USING [ SQL ] DESCRIPTOR <descriptor name>
+    // 20.11 <input using clause> ::= USING <using argument> [ { <comma> <using argument> }... ] | USING [ SQL ] DESCRIPTOR <descriptor name>
     let pUsingClause =
         pKeyword "USING"
         >>. (attempt (

@@ -15,7 +15,7 @@ module DmlParser =
             .>> pKeyword "VALUE"
         )
 
-    // 14.9/14.14 <application time period specification> ::= FOR PORTION OF <application time period name>
+    // 14.9/14.14 FOR PORTION OF <application time period name> FROM <point in time 1> TO <point in time 2>
     //     FROM <point in time 1> TO <point in time 2>
     let pPortionOf =
         pKeyword "FOR" >>. pKeyword "PORTION" >>. pKeyword "OF" >>. pIdentifierExpr
@@ -26,7 +26,7 @@ module DmlParser =
               From = fromPoint
               To = toPoint }
 
-    // 14.8/14.9/14.13/14.14 <where clause> (positioned vs searched)
+    // 7.12 <where clause> (positioned 14.8/14.13, searched 14.9/14.14)
     //   positioned: WHERE CURRENT OF <cursor name>
     //   searched:   WHERE <search condition>
     // Returns (cursor, search condition) — exactly one is Some.

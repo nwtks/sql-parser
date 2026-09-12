@@ -86,7 +86,7 @@ module DdlParser =
                   |>> Restart
               ) ]
 
-    // 11.2 <identity column specification> ::= GENERATED { ALWAYS | BY DEFAULT }
+    // 11.4 <identity column specification> ::= GENERATED { ALWAYS | BY DEFAULT }
     //     AS IDENTITY [ ( <common sequence generator options> ) ]
     let pIdentitySpec =
         pKeyword "GENERATED"
@@ -196,13 +196,13 @@ module DdlParser =
         .>>. many1 pSequenceOption
         |>> fun (name, opts) -> AlterSequence(name, opts)
 
-    // 11.1 <table definition> ::= CREATE [ <table scope> ] TABLE <table name> <table contents source> [ <typed table clause> ]
+    // 11.3 <table definition> ::= CREATE [ <table scope> ] TABLE <table name> <table contents source> [ <typed table clause> ]
     let pCreateTableStatement =
-        // 11.1 <table element> ::= <column definition> | <table constraint definition>
+        // 11.3 <table element> ::= <column definition> | <table constraint definition>
         let pTableElement =
             attempt (pColumnDefinition |>> Choice1Of2) <|> (pTableConstraint |>> Choice2Of2)
 
-        // 11.1 <as subquery clause> ::= AS <query expression> [ WITH [ NO ] DATA ]
+        // 11.3 <as subquery clause> ::= AS <query expression> [ WITH [ NO ] DATA ]
         let pAsSubquery =
             pKeyword "AS" >>. pQuery
             .>>. opt (pKeyword "WITH" >>. opt (pKeyword "NO") .>> pKeyword "DATA" |>> Option.isNone)
@@ -213,7 +213,7 @@ module DdlParser =
             attempt (pKeyword "GLOBAL" >>. pKeyword "TEMPORARY" >>% TableScope.Global)
             <|> (pKeyword "LOCAL" >>. pKeyword "TEMPORARY" >>% TableScope.Local)
 
-        // 11.1 <typed table clause> ::= OF <UDT name> [ UNDER <supertable> ]
+        // 11.3 <typed table clause> ::= OF <UDT name> [ UNDER <supertable> ]
         // (the <subtable clause> is parsed and discarded; the <typed table element
         // list> is not supported — see docs/trade-off.md)
         let pTypedTableClause =
@@ -582,7 +582,7 @@ module DdlParser =
         pKeyword "ALTER" >>. pKeyword "TABLE" >>. pQualifiedNameExpr .>>. pAction
         |>> fun (name, action) -> { Table = name; Action = action } |> AlterTable
 
-    // 17.12 <truncate table statement> ::= TRUNCATE TABLE <target table> [ <identity column restart option> ]
+    // 14.10 <truncate table statement> ::= TRUNCATE TABLE <target table> [ <identity column restart option> ]
     let pTruncateStatement =
         pKeyword "TRUNCATE" >>. opt (pKeyword "TABLE") >>. pQualifiedNameExpr
         .>>. opt (
@@ -667,7 +667,7 @@ module DdlParser =
                 >>. pKeyword "SET"
                 >>. pQualifiedNameExpr
 
-            // 11.1 <path specification> ::= PATH <path-resolved user-defined type name> [ { <comma> ... }... ]
+            // 10.3 <path specification> ::= PATH <path-resolved user-defined type name> [ { <comma> ... }... ]
             let pPath = pKeyword "PATH" >>. sepBy1 pQualifiedNameExpr (token (pstring ","))
 
             choice
@@ -838,7 +838,7 @@ module DdlParser =
         .>>. many1 pTransformGroup
         |>> fun (name, groups) -> CreateTransform(name, groups)
 
-    // 11.68 <transform kind> ::= TO SQL | FROM SQL
+    // 11.70 <transform kind> ::= TO SQL | FROM SQL
     let pTransformKind =
         pKeyword "TO" >>. pKeyword "SQL" >>% TransformKind.ToSqlKind
         <|> (pKeyword "FROM" >>. pKeyword "SQL" >>% TransformKind.FromSqlKind)

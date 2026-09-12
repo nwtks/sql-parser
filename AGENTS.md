@@ -21,6 +21,14 @@ This file provides guidance for AI agents working in this repository.
 
 ---
 
+## Rule-numbering convention
+
+- Comments in `SqlParser/*.fs` cite grammar rules as `// <clause> <rule name>` (e.g. `// 11.3 <table definition>`).
+- `<clause>` is the **ISO/IEC 9075-2:2016 clause number** used by [`sql-2016-grammar.txt`](sql-2016-grammar.txt) — not an ad-hoc number. Match both the clause number and the rule name.
+- `SqlParser.Tests/RuleNumberingTests.fs` enforces this; run `dotnet test` after editing rule comments.
+
+---
+
 ## Cross-Platform Compatibility
 
 All code — including test code — must work on **both Windows and Linux**. Avoid:
