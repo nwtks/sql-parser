@@ -81,7 +81,20 @@ match SqlParser.parse sql with
     printfn "Parse error: %s at line %d, col %d" msg pos.Line pos.Column
 ```
 
-The trailing `<semicolon>` is required — `parse` accepts a 22.1 `<direct SQL statement> ::= <directly executable statement> <semicolon>`.
+The trailing `<semicolon>` is required.
+
+`parse` accepts a 22.1 `<direct SQL statement>` — a `<directly executable statement>` plus `<semicolon>`. That covers the `<direct SQL data statement>` family (searched `DELETE`, `SELECT`, `INSERT`, searched `UPDATE`, `TRUNCATE`, `MERGE`, `DECLARE LOCAL TEMPORARY TABLE`, `WITH ... <query>`), plus `<SQL schema statement>`, `<SQL transaction statement>`, `<SQL connection statement>` and `<SQL session statement>`.
+
+Statements outside that set — `DECLARE CURSOR`, `OPEN`/`FETCH`/`CLOSE`, `SELECT ... INTO`, `FREE`/`HOLD LOCATOR`, positioned `DELETE`/`UPDATE` (`WHERE CURRENT OF`), `CALL`/`RETURN`, `GET DIAGNOSTICS` and all dynamic SQL (`PREPARE`, `EXECUTE`, descriptors, …) — are parsed with the general entry point:
+
+```fsharp
+match SqlParser.parseStatement "DECLARE cur CURSOR FOR SELECT a FROM t;" with
+| Ok stmt -> printfn "Successfully parsed statement of kind: %A" stmt.Kind
+| Error (ParseError(msg, pos)) ->
+    printfn "Parse error: %s at line %d, col %d" msg pos.Line pos.Column
+```
+
+`parseStatement` is a superset of 13.4 `<SQL procedure statement>`: it also accepts `DECLARE CURSOR` (14.1) and `<temporary table declaration>` (14.16). Both entry points require the trailing `<semicolon>`.
 
 ## Project Structure
 

@@ -227,6 +227,22 @@ let ``FOR SYSTEM_TIME point in time rejects non datetime operators`` () =
     parseFails "SELECT * FROM t FOR SYSTEM_TIME AS OF a = b"
 
 [<Fact>]
+let ``interval term accepts a numeric factor on the right of an operator (6.37)`` () =
+    match parse "SELECT * FROM t FOR SYSTEM_TIME AS OF CURRENT_DATE + INTERVAL '1' DAY * 2" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = SystemTime(_, SystemTimeSpec.AsOf { Kind = BinaryOp(Add, _, { Kind = BinaryOp(Multiply, _, _) }) }) } ] ->
+            ()
+        | res -> Assert.Fail(sprintf "Expected an interval term with a numeric factor, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
+let ``interval term rejects an interval factor on the right of an operator (6.37)`` () =
+    // <factor> (6.29) has no [ <interval qualifier> ] suffix, unlike <interval factor>.
+    parseFails "SELECT * FROM t FOR SYSTEM_TIME AS OF CURRENT_DATE + INTERVAL '1' DAY * ? DAY"
+    parseFails "SELECT * FROM t FOR SYSTEM_TIME AS OF CURRENT_DATE + INTERVAL '1' DAY * x DAY"
+
+[<Fact>]
 let ``Data change delta table verification`` () =
     match parse "SELECT * FROM NEW TABLE (INSERT INTO t VALUES (1))" with
     | Select(SelectQuery s) ->
@@ -540,6 +556,11 @@ let ``PARTITION BY join verification`` () =
             ()
         | res -> Assert.Fail(sprintf "Expected PARTITION BY join, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
+let ``PARTITION BY join rejects an expression (7.10)`` () =
+    // <partitioned join column reference list> is a list of <column reference>s.
+    parseFails "SELECT * FROM t1 JOIN t2 PARTITION BY (a + b) ON t1.id = t2.id"
 
 [<Fact>]
 let ``Locking clause verification`` () =

@@ -291,9 +291,9 @@ Both `QueryParser.fs` (line 467) and `DmlParser.fs` define a module-level `pWher
 
 Because `IMMEDIATE` is not a reserved word, `pExecuteStatement` (`EXECUTE <name>`) would greedily consume `IMMEDIATE` as the statement name in `EXECUTE IMMEDIATE ...`. Place `pExecuteImmediateStatement` at the head of the `pDynamic` `choice`.
 
-## `GET DIAGNOSTICS x = ALL` is ambiguous with the statement-information form
+## `GET DIAGNOSTICS x = ALL` must be tried before the statement-information form
 
-`pIdentifierRaw` accepts reserved words too (including `ALL`), so `x = ALL` could also be parsed as the statement-information item name `ALL`. In `pGetDiagnosticsStatement`, the order must be CONDITION form → ALL form → statement-information form.
+`x = ALL` is the all-information form, while the statement-information form expects a `<statement information item name>` on the right of `=`. That item name is now a closed `pKeyword` enumeration which excludes `ALL`, so the two forms are no longer ambiguous — but `pGetDiagnosticsStatement` still lists CONDITION → ALL → statement-information (each branch `attempt`ed) so a partially consumed `ALL` cannot shadow the all-information form.
 
 ## `SELECT INTO` must be tried before `pQuery`
 
@@ -473,6 +473,10 @@ A new `ExpressionKind` case compiles without a validation branch, so a standalon
 
 6.37 — `pIntervalPrimary` returns the inner `<value expression primary>` unchanged when no `<interval qualifier>` follows, so `IntervalPrimary` only appears for forms like `? DAY` and `INTERVAL '1' DAY` (a `<literal>`) keeps its AST shape. That transparence is also what lets the early `pIntervalValueExpression` reference the `pDatetimeValueExpression` **forward ref** without a cycle.
 
+## `<interval term>` needs two different operand parsers (6.37)
+
+`<interval term>`'s `*`/`/` right operand is `<factor>` (6.29) — `[ <sign> ] <numeric primary>` — not the `<interval factor>` used on the left. `chainl1` cannot vary the operand after an operator, so `pIntervalTerm` is `pIntervalFactor .>>. many (attempt (pMulOp .>>. pNumericFactor))` folded with `List.fold`. Because `<numeric primary>` is approximated by `<value expression primary>`, the 4th alternative (`<term> * <interval factor>`) still parses; only the `[ <interval qualifier> ]` suffix is rejected on the right, so `INTERVAL '1' DAY * ? DAY` now fails while `INTERVAL '1' DAY * 2` and `? DAY` (as a `<factor>`) keep working.
+
 ## `INSERT` must keep using `pQualifiedNameExpr` for its target
 
 14.11 `<insertion target> ::= <table name>` has no `ONLY` form, unlike 14.8/14.9/14.13/14.14 `<target table>`. Only `UPDATE` / `DELETE` / `MERGE` use `DmlParser.pTargetTable`; wiring it into `INSERT` as well would accept `INSERT INTO ONLY (t) …`.
@@ -533,6 +537,8 @@ F# provides `Choice1Of4`…`Choice4Of4`. The four-way choice keeps `<column defi
 
 In `sql-2016-grammar.txt` the `<semicolon> ::= ;` production sits under the `5.1 <SQL terminal character>` heading (`5.2 <token>` comes later in the file). `RuleNumberingTests` matches a citation against the clauses that actually mention the name, so `// 5.2 <semicolon>` fails and `// 5.1 <semicolon>` is correct.
 
-## Test-only: the `parse` helpers now append `;`
+## Test-only: the `parse` helpers append `;` and pick the right entry point
 
 Every test file's `parse` / `parseFails` / `parseExpr` helper is `let parse (sql: string) = SqlParser.parse (sql.TrimEnd() + ";")`. The explicit `string` annotation is required — without it F# cannot infer the receiver of `.TrimEnd()` (FS0072). A test that calls `SqlParser.parse` directly must append the semicolon itself, otherwise it can pass for the wrong reason: `OFFSET without ROW or ROWS fails verification` would still succeed if the `OFFSET` rule itself broke.
+
+Because 22.1 is now enforced, `SqlParser.parse` accepts only `<directly executable statement>`s, so the helpers in `CursorTests` / `DynamicTests` / `DiagnosticsTests` / `ControlTests` use `SqlParser.parseStatement` (13.4) instead, and `DmlTests` keeps a second `parseStatement` / `parseStatementFails` pair for the positioned 20.25 / 20.27 forms. Use `parse` when the test is about a directly executable statement; use `parseStatement` otherwise.

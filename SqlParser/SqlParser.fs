@@ -119,6 +119,26 @@ module SqlParser =
               pDeleteStatement
               pMergeStatement ]
 
+    // 22.1 <directly executable statement> — only the *searched* forms of <update statement>
+    // (14.14) and <delete statement> (14.9) are directly executable. The positioned forms
+    // (14.13 / 14.8, entered through WHERE CURRENT OF) are reachable only from a
+    // <SQL procedure statement> (13.4), so they are excluded from pDirectSqlStatement.
+    let pSearchedUpdateStatement =
+        pUpdateStatement
+        >>= fun stmt ->
+            match stmt with
+            | StatementKind.Update { Cursor = Some _ } ->
+                fail "a positioned <update statement> (14.13) is not directly executable (22.1)."
+            | _ -> preturn stmt
+
+    let pSearchedDeleteStatement =
+        pDeleteStatement
+        >>= fun stmt ->
+            match stmt with
+            | StatementKind.Delete { Cursor = Some _ } ->
+                fail "a positioned <delete statement> (14.8) is not directly executable (22.1)."
+            | _ -> preturn stmt
+
     // 16 <SQL control statement> ::= <call statement> | <return statement>
     let pControl = choice [ attempt pCallStatement; attempt pReturnStatement ]
 
@@ -177,9 +197,12 @@ module SqlParser =
     // 23.1 <get diagnostics statement> ::= GET DIAGNOSTICS <SQL diagnostics information>
     let pDiagnostics = choice [ attempt pGetDiagnosticsStatement ]
 
-    // 7.17 <with clause> + <query expression> — WITH [ RECURSIVE ] <with list> <query expression body>
+    // 7.17 <with clause> + <query expression> — WITH [ RECURSIVE ] <with list>
+    // <query expression body>. The body is a query only: <with clause> is a prefix of
+    // <query expression> (7.17), so `WITH ... INSERT/UPDATE/DELETE/MERGE` is not a valid
+    // <SQL statement> and is rejected by both entry points.
     let pWithStatement =
-        pWithClause .>>. (pDml |> withStmtPosition)
+        pWithClause .>>. ((pQuery |>> Select) |> withStmtPosition)
         |>> fun ((recu, ctes), stmt) ->
             { Kind = WithStatement(recu, ctes, stmt.Kind)
               Pos = stmt.Pos }
@@ -201,13 +224,33 @@ module SqlParser =
     let pSemicolon = token (pstring ";")
 
     // 22.1 <direct SQL statement> ::= <directly executable statement> <semicolon>
-    // The semicolon is mandatory; <directly executable statement> is not enforced —
-    // every <SQL statement> the dispatcher accepts is also accepted here (see
-    // docs/trade-off.md).
-    let pDirectSqlStatement = pStatement .>> pSemicolon
+    // <directly executable statement> ::= <direct SQL data statement> | <SQL schema statement>
+    //     | <SQL transaction statement> | <SQL connection statement> | <SQL session statement>
+    //     | <direct implementation-defined statement>
+    // <direct SQL data statement> ::= <delete statement: searched> | <direct select statement:
+    //     multiple rows> | <insert statement> | <update statement: searched> | <truncate table
+    //     statement> | <merge statement> | <temporary table declaration>
+    // The final alternative (<direct implementation-defined statement>) is not implemented, so
+    // it is omitted. OPEN/FETCH/CLOSE, SELECT INTO, FREE/HOLD LOCATOR, DECLARE CURSOR,
+    // CALL/RETURN, GET DIAGNOSTICS and every dynamic-SQL statement are NOT directly executable
+    // — use `parseStatement` (13.4) for those.
+    let pDirectSqlStatement =
+        choice
+            [ attempt pWithStatement
+              attempt ((pQuery |>> Select) |> withStmtPosition)
+              attempt (pInsertStatement |> withStmtPosition)
+              attempt (pSearchedUpdateStatement |> withStmtPosition)
+              attempt (pSearchedDeleteStatement |> withStmtPosition)
+              attempt (pMergeStatement |> withStmtPosition)
+              attempt (pTemporaryTableDeclarationStatement |> withStmtPosition)
+              attempt (pDdl |> withStmtPosition)
+              attempt (pTransactionStatement |> withStmtPosition)
+              attempt (pConnection |> withStmtPosition)
+              attempt (pSession |> withStmtPosition) ]
+        .>> pSemicolon
 
-    let parse sql =
-        match run (ws >>. pDirectSqlStatement .>> eof) sql with
+    let private runParser (p: Parser<Statement, unit>) sql =
+        match run p sql with
         | Success(res, _, _) -> Result.Ok res
         | Failure(msg, error, _) ->
             Result.Error(
@@ -217,3 +260,13 @@ module SqlParser =
                       Column = int64 error.Position.Column }
                 )
             )
+
+    /// 22.1 — parses a <direct SQL statement> (the directly executable statement families).
+    let parse sql =
+        runParser (ws >>. pDirectSqlStatement .>> eof) sql
+
+    /// 13.4 — parses any <SQL statement> the library supports: a superset of the grammar's
+    /// <SQL executable statement>, which also accepts DECLARE CURSOR (14.1) and
+    /// <temporary table declaration> (14.16). The trailing <semicolon> is mandatory.
+    let parseStatement sql =
+        runParser (ws >>. pStatement .>> pSemicolon .>> eof) sql

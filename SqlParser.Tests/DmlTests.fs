@@ -14,6 +14,18 @@ let parseFails (sql: string) =
     | Ok _ -> failwithf "Expected parse failure for %s" sql
     | Error _ -> ()
 
+// Positioned DELETE / UPDATE (14.8 / 14.13, 20.25 / 20.27) are <SQL procedure statement>s
+// (13.4), not directly executable (22.1), so they use the general entry point.
+let parseStatement (sql: string) =
+    match SqlParser.parseStatement (sql.TrimEnd() + ";") with
+    | Ok res -> res.Kind
+    | Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
+
+let parseStatementFails (sql: string) =
+    match SqlParser.parseStatement (sql.TrimEnd() + ";") with
+    | Ok _ -> failwithf "Expected parse failure for %s" sql
+    | Error _ -> ()
+
 [<Fact>]
 let ``INSERT verification`` () =
     match parse "INSERT INTO users (id, name) VALUES (1, 'alice')" with
@@ -92,7 +104,7 @@ let ``UPDATE with alias verification`` () =
 
 [<Fact>]
 let ``UPDATE positioned (WHERE CURRENT OF) verification`` () =
-    match parse "UPDATE users SET name = 'x' WHERE CURRENT OF cur" with
+    match parseStatement "UPDATE users SET name = 'x' WHERE CURRENT OF cur" with
     | Update { Target = TableTarget({ Kind = Identifier "USERS" }, false)
                Cursor = Some { Kind = Identifier "CUR" }
                Where = None } -> ()
@@ -101,7 +113,7 @@ let ``UPDATE positioned (WHERE CURRENT OF) verification`` () =
 [<Fact>]
 let ``UPDATE without target table (20.27) verification`` () =
     // 20.27 <preparable dynamic update statement: positioned>
-    match parse "UPDATE SET name = 'x' WHERE CURRENT OF cur" with
+    match parseStatement "UPDATE SET name = 'x' WHERE CURRENT OF cur" with
     | Update { Target = OmittedTarget
                Cursor = Some { Kind = Identifier "CUR" }
                Where = None } -> ()
@@ -135,19 +147,20 @@ let ``UPDATE nested mutated set clause verification`` () =
 let ``UPDATE mutated set clause error`` () = parseFails "UPDATE users SET a. = 1"
 
 [<Fact>]
-let ``UPDATE without target table and no CURRENT OF is rejected`` () = parseFails "UPDATE SET name = 'x'"
+let ``UPDATE without target table and no CURRENT OF is rejected`` () =
+    parseStatementFails "UPDATE SET name = 'x'"
 
 [<Fact>]
 let ``UPDATE without target table and search WHERE is rejected`` () =
-    parseFails "UPDATE SET name = 'x' WHERE id = 1"
+    parseStatementFails "UPDATE SET name = 'x' WHERE id = 1"
 
 [<Fact>]
 let ``UPDATE without target table and alias is rejected`` () =
-    parseFails "UPDATE AS u SET name = 'x' WHERE CURRENT OF cur"
+    parseStatementFails "UPDATE AS u SET name = 'x' WHERE CURRENT OF cur"
 
 [<Fact>]
 let ``UPDATE without target table and FOR PORTION OF is rejected`` () =
-    parseFails "UPDATE FOR PORTION OF p FROM x TO y SET name = 'x' WHERE CURRENT OF cur"
+    parseStatementFails "UPDATE FOR PORTION OF p FROM x TO y SET name = 'x' WHERE CURRENT OF cur"
 
 [<Fact>]
 let ``DELETE with alias verification`` () =
@@ -172,7 +185,7 @@ let ``DELETE ONLY target table verification`` () =
 
 [<Fact>]
 let ``DELETE positioned (WHERE CURRENT OF) verification`` () =
-    match parse "DELETE FROM users WHERE CURRENT OF cur" with
+    match parseStatement "DELETE FROM users WHERE CURRENT OF cur" with
     | Delete { Target = TableTarget({ Kind = Identifier "USERS" }, false)
                Cursor = Some { Kind = Identifier "CUR" }
                Where = None } -> ()
@@ -181,22 +194,23 @@ let ``DELETE positioned (WHERE CURRENT OF) verification`` () =
 [<Fact>]
 let ``DELETE without target table (20.25) verification`` () =
     // 20.25 <preparable dynamic delete statement: positioned>
-    match parse "DELETE WHERE CURRENT OF cur" with
+    match parseStatement "DELETE WHERE CURRENT OF cur" with
     | Delete { Target = OmittedTarget
                Cursor = Some { Kind = Identifier "CUR" }
                Where = None } -> ()
     | res -> Assert.Fail(sprintf "Expected Delete without target table, got %A" res)
 
 [<Fact>]
-let ``DELETE without target table and search WHERE is rejected`` () = parseFails "DELETE WHERE id = 1"
+let ``DELETE without target table and search WHERE is rejected`` () =
+    parseStatementFails "DELETE WHERE id = 1"
 
 [<Fact>]
 let ``DELETE without target table and alias is rejected`` () =
-    parseFails "DELETE AS u WHERE CURRENT OF cur"
+    parseStatementFails "DELETE AS u WHERE CURRENT OF cur"
 
 [<Fact>]
 let ``DELETE without target table and FOR PORTION OF is rejected`` () =
-    parseFails "DELETE FOR PORTION OF p FROM x TO y WHERE CURRENT OF cur"
+    parseStatementFails "DELETE FOR PORTION OF p FROM x TO y WHERE CURRENT OF cur"
 
 [<Fact>]
 let ``DELETE without FROM and without CURRENT OF is rejected`` () = parseFails "DELETE"

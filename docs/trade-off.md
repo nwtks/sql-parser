@@ -37,7 +37,7 @@ The type grammar is mutually recursive (`<data type>` can be a collection of `<d
 
 `CURRENT_DATE`/`CURRENT_TIME`/`CURRENT_TIMESTAMP`/`LOCALTIME`/`LOCALTIMESTAMP` are reserved words, so they cannot be parsed as identifiers or generic function calls. They get dedicated `ExpressionKind` cases (`CurrentDate`, `CurrentTime of int option`, ...) with optional precision. Likewise `SUBSTRING(x FROM a FOR b)` and `OVERLAY(x PLACING y FROM n)` get dedicated cases.
 
-- **Trade-off:** More AST cases vs. forcing these into `FunctionCall` (which would lose the FROM/FOR structure and require reserved-word identifiers). `SUBSTRING`/`OVERLAY`/`TRIM`/`POSITION`/`EXTRACT` are deliberately **not** in the `pRoutineInvocation` reserved-function whitelist, so the non-standard comma form (`SUBSTRING(x, a, b)`) is now rejected (see "Over-permissiveness tightened" below).
+- **Trade-off:** More AST cases vs. forcing these into `FunctionCall` (which would lose the FROM/FOR structure and require reserved-word identifiers). `SUBSTRING`/`OVERLAY`/`TRIM`/`POSITION`/`EXTRACT` are deliberately **not** in the `pRoutineInvocation` reserved-function whitelist, so the non-standard comma form (`SUBSTRING(x, a, b)`) is now rejected (see "`functionKeywords` trimmed to the shapes that have no dedicated parser" below).
 
 ## `FETCH` quantity optional, `OFFSET` ROW/ROWS required
 
@@ -251,7 +251,7 @@ Per 7.17 `<simple table> ::= <query specification> | <table value constructor> |
 
 6.35 `<datetime value expression>` is implemented as `pDatetimeTerm` (`<datetime primary> [ AT TIME ZONE … ]`) left-folded over `+`/`-`. `<point in time>` (7.6 `FOR SYSTEM_TIME`, 14.9/14.14 `FOR PORTION OF`) now uses it instead of `pValueExpressionNoBoolean`, so `a * b`, `a || b` and `a = b` are rejected where a point in time is expected, while `CURRENT_DATE - INTERVAL '1' DAY`, `CURRENT_TIMESTAMP AT TIME ZONE x` and `? DAY` work.
 
-- **Trade-off:** The right operand of `+`/`-` may be an `<interval term>` or a `<datetime term>` and the two are syntactically indistinguishable, so `attempt pIntervalTerm <|> pDatetimeTerm` is tried in that order. `<interval term>`'s `*`/`/` right operand is approximated by an `<interval factor>` instead of a numeric `<factor>` (a mild superset). `pValueExpressionNoBoolean` is kept for the JSON slots, which are still permissive by design.
+- **Trade-off:** The right operand of `+`/`-` may be an `<interval term>` or a `<datetime term>` and the two are syntactically indistinguishable, so `attempt pIntervalTerm <|> pDatetimeTerm` is tried in that order. `<interval term>`'s `*`/`/` right operand is the grammar's `<factor>` (6.29) — `[ <sign> ] <numeric primary>`, approximated by `[ <sign> ] <value expression primary>` — not an `<interval factor>`, so the `[ <interval qualifier> ]` suffix is rejected there (`INTERVAL '1' DAY * ? DAY`). `pValueExpressionNoBoolean` is used by the JSON slots, which is deliberately stricter than the grammar's `<value expression>`.
 
 ## DML `<target table>` supports `ONLY ( <table name> )`
 
@@ -289,11 +289,11 @@ Per 7.17 `<simple table> ::= <query specification> | <table value constructor> |
 
 - **Trade-off:** A tuple return keeps the `ON`/`USING` choice and the optional alias in one parser; the caller (`pJoinedTableSuffix`) destructures it into the `JoinSource` fields.
 
-## Reserved-word forms must precede `pRoutineInvocation`
+## `pRoutineInvocation` accepts only reserved *function* keywords
 
-`pRoutineInvocation` uses `pIdentifierRaw`, which accepts reserved words. So `EXISTS (SELECT ...)`, `UNIQUE (...)`, `JSON_EXISTS(...)`, and `PERIOD (s, e)` would all be greedily parsed as generic function calls (`FunctionCall(EXISTS, [], ...)`) if their dedicated parsers came after it. `pValueExpressionPrimary` therefore lists `pExistsPredicate`, `pUniquePredicate`, `pJsonExistsPredicate`, and `pPeriodValue` BEFORE `pRoutineInvocation`.
+`pRoutineInvocation` derives the routine name from `pReservedFunctionName`, an explicit whitelist of the reserved keywords the grammar spells as functions: the `<aggregate function>` names, `<inverse distribution function type>`, `<window function type>`, and the built-ins that have no dedicated parser. Every other reserved word is rejected by `pRegularIdentifier` (`Lexer.fs`), so `EXISTS (SELECT ...)`, `UNIQUE (...)`, `JSON_EXISTS(...)`, `PERIOD (s, e)` and `VALUE_OF(...)` cannot degrade to a generic function call; their dedicated parsers are also listed BEFORE `pRoutineInvocation` in `pValueExpressionPrimary`.
 
-- **Trade-off:** This was a latent bug for `EXISTS`/`UNIQUE` (no prior test exercised them as standalone expressions); the `PERIOD`/`JSON_EXISTS` tests exposed it. Ordering the choice is the fix — no AST change needed.
+- **Trade-off:** Adding a new built-in or vendor function whose name is reserved requires adding it to `functionKeywords` in `ExpressionParser.fs` (see docs/gotchas.md). Non-reserved names (`foo(...)`, `app.foo(...)`) are unaffected.
 
 ## `JSON_ARRAY(NULL ON NULL ...)` ambiguity
 
@@ -323,7 +323,7 @@ The `<JSON predicate type constraint>` (`VALUE | ARRAY | OBJECT | SCALAR`) would
 
 `<JSON API common syntax>`'s context item, `<JSON name and value>` name/value, `<JSON passing argument>`, and the `DEFAULT <value expression>` behavior use `pValueExpressionNoBoolean` (the grammar's `<JSON value expression>` is a value expression, not a boolean one). `<JSON path specification>` is a `<character string literal>`, so `JsonApiCommon.Path`, `JsonRegularColumn.Path`, `JsonFormattedColumn.Path`, and `JsonNestedColumns.Path` are now `string`/`string option` rather than `Expression`.
 
-- **Trade-off:** The AST no longer wraps the JSON path in a synthetic `Literal(String ...)` node, so consumers read the path directly. Boolean expressions (`a AND b`) are rejected in these slots instead of being silently accepted. The dedicated JSON parsers still use full `pExpression` where the grammar genuinely allows a value expression that the operator-precedence parser cannot cover — see the JSON value/path clauses in `ExpressionParser.fs`.
+- **Trade-off:** The AST no longer wraps the JSON path in a synthetic `Literal(String ...)` node, so consumers read the path directly. Because `pValueExpressionNoBoolean` is the operator-precedence parser without the boolean operators, boolean expressions (`a AND b`) are rejected in these slots — deliberately *stricter* than the grammar, which permits `<boolean value expression>` inside `<JSON value expression>`, because a comma-separated argument list must stay unambiguous.
 
 ## `JSON_QUERY` wrapper/quotes/behavior clauses
 
@@ -625,7 +625,7 @@ The three forms `DESCRIBE INPUT` / `DESCRIBE OUTPUT CURSOR ... STRUCTURE` / `DES
 
 `GET DIAGNOSTICS` has three forms: statement information / condition information / all information.
 
-- **Trade-off:** Modeled as a `StatementInfo of (Expression * string) list | ConditionInfo of Expression * (Expression * string) list | AllInfo of Expression * AllQualifier option` DU. The information item names (`NUMBER` / `ROW_COUNT` / `MESSAGE_TEXT` etc.) include reserved words, so they are parsed with `pIdentifierRaw` (kept as `string`).
+- **Trade-off:** Modeled as a `StatementInfo of (Expression * string) list | ConditionInfo of Expression * (Expression * string) list | AllInfo of Expression * AllQualifier option` DU. The information item names (`NUMBER` / `ROW_COUNT` / `MESSAGE_TEXT` etc.) include reserved words but are a closed enumeration, so they are parsed by `choice` lists of `pKeyword`s (`pStatementInfoItemName` / `pConditionInfoItemName`) and kept as `string` — `pIdentifierRaw` would also accept `ALL`, `SELECT`, ….
 
 ## `pJsonTableColumn` tries the NESTED branch before the regular-column branch
 
@@ -798,12 +798,14 @@ The `[ <default clause> | <identity column specification> | <generation clause> 
 - **Trade-off:** `OmittedTarget` is accepted only for a positioned statement with no `<portion of>`, correlation name or search condition (`pOmittedTargetGuard`).
 - **Trade-off:** `DELETE` builds the target as `opt (attempt (pKeyword "FROM" >>. pTargetTable))` and maps `None` to `OmittedTarget`, so a `FROM` with no table name is still rejected rather than silently becoming the omitted form.
 
-## `<direct SQL statement>` requires the trailing `<semicolon>` (22.1)
+## `<direct SQL statement>` requires a `<semicolon>` and a directly executable statement (22.1)
 
-`SqlParser.parse` runs `ws >>. pDirectSqlStatement .>> eof`, where `pDirectSqlStatement = pStatement .>> pSemicolon`.
+`SqlParser.parse` runs `ws >>. pDirectSqlStatement .>> eof`, where `pDirectSqlStatement` accepts only the grammar's `<directly executable statement>` families — `<direct SQL data statement>`, `<SQL schema statement>`, `<SQL transaction statement>`, `<SQL connection statement>`, `<SQL session statement>` — followed by `<semicolon>`. `SqlParser.parseStatement` is the general entry point (`ws >>. pStatement .>> pSemicolon .>> eof`).
 
-- **Trade-off:** This is a breaking change for callers: `SqlParser.parse "SELECT 1"` no longer parses, and every test file's `parse` / `parseFails` / `parseExpr` helper appends the semicolon. Requiring it also makes `SELECT 1;;` and a bare `;` fail.
-- **Not tightened:** 22.1's `<directly executable statement>` is not enforced — `parse` still accepts `<SQL procedure statement>`s (`DECLARE CURSOR`, `OPEN`, `FETCH`, `GET DIAGNOSTICS`, dynamic SQL), so the entry point remains a general `<SQL statement>` parser.
+- **Trade-off:** Requiring the `<semicolon>` is a breaking change for callers: `SqlParser.parse "SELECT 1"` no longer parses, and every test file's `parse` / `parseFails` / `parseExpr` helper appends it. Requiring it also makes `SELECT 1;;` and a bare `;` fail.
+- **Trade-off:** `parse` rejects `DECLARE CURSOR` (14.1), `OPEN`/`FETCH`/`CLOSE` (14.4–14.6), `SELECT ... INTO` (14.7), `FREE`/`HOLD LOCATOR` (14.17/14.18), positioned `DELETE`/`UPDATE` (14.8/14.13, 20.25/20.27), `CALL`/`RETURN` (16.1/16.2), `GET DIAGNOSTICS` (23.1) and every dynamic-SQL statement (20.x) — those are `<SQL procedure statement>`s (13.4), reachable through `parseStatement`. A `<temporary table declaration>` (14.16) **is** part of `<direct SQL data statement>`, so it stays in `parse`.
+- **Trade-off:** `pWithStatement` requires the `<with list>` to be followed by a query (`<query expression>`, 7.17), so `WITH ... INSERT/UPDATE/DELETE/MERGE` is rejected by **both** `parse` and `parseStatement` — `<with clause>` is a prefix of `<query expression>`, not a general statement prefix. The earlier `pDml`-based form that accepted those was removed, along with the now-redundant `pDirectWithStatement` duplicate.
+- **Not implemented:** 22.1's `<direct implementation-defined statement>` has no parser, so it is omitted from the choice.
 
 ## `[ SQL ]` is optional in `<using descriptor>` / `<into descriptor>`
 

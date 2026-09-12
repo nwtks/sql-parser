@@ -3,14 +3,15 @@ module SqlParser.Tests.DiagnosticsTests
 open Xunit
 open SqlParser
 
-// 22.1 <direct SQL statement> requires a trailing <semicolon>.
+// GET DIAGNOSTICS is a <SQL procedure statement> (13.4), not directly executable (22.1),
+// so these use the general entry point.
 let parse (sql: string) =
-    match SqlParser.parse (sql.TrimEnd() + ";") with
+    match SqlParser.parseStatement (sql.TrimEnd() + ";") with
     | Ok res -> res.Kind
     | Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
 
 let parseFails (sql: string) =
-    match SqlParser.parse (sql.TrimEnd() + ";") with
+    match SqlParser.parseStatement (sql.TrimEnd() + ";") with
     | Ok _ -> failwithf "Expected parse failure for %s" sql
     | Error _ -> ()
 
@@ -48,3 +49,9 @@ let ``GET DIAGNOSTICS all statement verification`` () =
 
 [<Fact>]
 let ``GET DIAGNOSTICS without information is rejected`` () = parseFails "GET DIAGNOSTICS"
+
+[<Fact>]
+let ``GET DIAGNOSTICS rejects a non-enumerated statement information item name`` () =
+    // 23.1 <statement information item name> is a closed enumeration.
+    parseFails "GET DIAGNOSTICS x = FOO"
+    parseFails "GET DIAGNOSTICS x = DATA"

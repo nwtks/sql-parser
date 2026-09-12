@@ -357,6 +357,21 @@ let ``Reserved function name cannot be called with an unexpected shape`` () =
     parseFails "SELECT SET()"
 
 [<Fact>]
+let ``Reserved words that are not function keywords are rejected as routine names`` () =
+    // 6.3 / 10.4 — the routine name is an explicit whitelist of reserved *function*
+    // keywords, so a reserved word that starts a dedicated construct cannot degrade to a
+    // generic <routine invocation>.
+    parseFails "SELECT EXISTS(x)"
+    parseFails "SELECT UNIQUE(x)"
+    parseFails "SELECT VALUE_OF(x)"
+
+[<Fact>]
+let ``Non reserved names are accepted as routine names`` () =
+    match parse "SELECT foo(x)" with
+    | FunctionCall({ Kind = Identifier "FOO" }, false, [ { Kind = Identifier "X" } ], None, None, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected a FunctionCall for foo, got %A" res)
+
+[<Fact>]
 let ``Datetime value functions verification`` () =
     match parse "SELECT CURRENT_DATE" with
     | CurrentDate -> ()
@@ -883,6 +898,10 @@ let ``JSON_VALUE function verification`` () =
                 None) -> ()
     | res -> Assert.Fail(sprintf "Expected JsonValue, got %A" res)
 
+[<Fact>]
+let ``JSON path must be a character string literal (10.14)`` () =
+    parseFails "SELECT JSON_VALUE(a, b)"
+
     match parse "SELECT JSON_VALUE(doc, '$.x' RETURNING INT DEFAULT 0 ON EMPTY ERROR ON ERROR)" with
     | JsonValue({ Context = { Kind = Identifier "DOC" } },
                 Some Integer,
@@ -1106,6 +1125,7 @@ let ``Window frame row pattern measures verification`` () =
 [<Fact>]
 let ``Nested window function invalid syntax is rejected`` () =
     parseFails "SELECT ROW_NUMBER(BEGIN)"
-    // VALUE_OF(x) without AT parses as a plain function call, so use a form that
-    // cannot be consumed by the routine-invocation fallback either.
+    // VALUE_OF is not a whitelisted function keyword, so omitting AT cannot fall through
+    // to a generic <routine invocation>.
+    parseFails "SELECT VALUE_OF(x)"
     parseFails "SELECT VALUE_OF(x AT 5)"

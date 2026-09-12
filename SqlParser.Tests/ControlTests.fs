@@ -3,14 +3,15 @@ module SqlParser.Tests.ControlTests
 open Xunit
 open SqlParser
 
-// 22.1 <direct SQL statement> requires a trailing <semicolon>.
+// CALL / RETURN are <SQL procedure statement>s (13.4), not directly executable (22.1),
+// so these use the general entry point.
 let parse (sql: string) =
-    match SqlParser.parse (sql.TrimEnd() + ";") with
+    match SqlParser.parseStatement (sql.TrimEnd() + ";") with
     | Ok res -> res.Kind
     | Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
 
 let parseFails (sql: string) =
-    match SqlParser.parse (sql.TrimEnd() + ";") with
+    match SqlParser.parseStatement (sql.TrimEnd() + ";") with
     | Ok _ -> failwithf "Expected parse failure for %s" sql
     | Error _ -> ()
 

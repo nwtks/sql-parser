@@ -1853,12 +1853,27 @@ module ExpressionParser =
         (pchar '-' .>> notFollowedBy (pchar '>') .>> ws >>% false)
         <|> (pchar '+' .>> ws >>% true)
 
+    let pIntervalSigned sign e =
+        match sign with
+        | Some true ->
+            { Expression.Kind = UnaryOp(UnaryOperator.Plus, e)
+              Pos = e.Pos }
+        | Some false ->
+            { Expression.Kind = UnaryOp(UnaryOperator.Minus, e)
+              Pos = e.Pos }
+        | None -> e
+
     // 6.37 <interval term> ::= <interval factor>
     //     | <interval term> <asterisk> <factor>
     //     | <interval term> <solidus> <factor>
     //     | <term> <asterisk> <interval factor>
-    // The <factor> operand of the '*'/'/' forms is approximated by an <interval factor>
-    // (see docs/trade-off.md).
+    // The '*'/'/' right operand is the grammar's <factor> (6.29), i.e. [ <sign> ]
+    // <numeric primary>. <numeric primary> is approximated by <value expression primary>
+    // (it already subsumes <numeric value function>, while <interval value function> is
+    // syntactically identical to it — see pNumericValueFunction). Unlike <interval factor>,
+    // <factor> has no [ <interval qualifier> ] suffix, so `INTERVAL '1' DAY * ? DAY` is
+    // rejected. The 4th alternative is still covered: <value expression primary> accepts an
+    // interval literal on the right of `*`.
     let pIntervalTerm =
         let pMul =
             (attempt (pchar '*' .>> ws))
@@ -1872,19 +1887,16 @@ module ExpressionParser =
                 { Expression.Kind = BinaryOp(Divide, l, r)
                   Pos = l.Pos }
 
-        let pFactor =
+        let pIntervalFactor =
             (opt (attempt pIntervalSign) .>>. pIntervalPrimary)
-            |>> fun (sign, e) ->
-                match sign with
-                | Some true ->
-                    { Expression.Kind = UnaryOp(UnaryOperator.Plus, e)
-                      Pos = e.Pos }
-                | Some false ->
-                    { Expression.Kind = UnaryOp(UnaryOperator.Minus, e)
-                      Pos = e.Pos }
-                | None -> e
+            |>> fun (sign, e) -> pIntervalSigned sign e
 
-        chainl1 pFactor (pMul <|> pDiv)
+        let pNumericFactor =
+            (opt (attempt pIntervalSign) .>>. pValueExpressionPrimary)
+            |>> fun (sign, e) -> pIntervalSigned sign e
+
+        pIntervalFactor .>>. many (attempt ((pMul <|> pDiv) .>>. pNumericFactor))
+        |>> fun (first, rest) -> rest |> List.fold (fun acc (op, operand) -> op acc operand) first
 
     // 6.35 <datetime term> ::= <datetime factor>
     //   <datetime factor> ::= <datetime primary> [ <time zone> ]
