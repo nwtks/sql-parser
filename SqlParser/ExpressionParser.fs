@@ -741,6 +741,29 @@ module ExpressionParser =
                   attempt (between (token (pstring "(")) (token (pstring ")")) pQuery |>> MultisetQuery) ]
         |> withExprPosition
 
+    // 6.45 <multiset value constructor> ::= <multiset value constructor by enumeration>
+    //     | <multiset value constructor by query> | <table value constructor by query>
+    //   <table value constructor by query> ::= TABLE <table subquery>
+    let pTableValueConstructorByQuery =
+        pKeyword "TABLE" >>. between (token (pstring "(")) (token (pstring ")")) pQuery
+        |>> TableQuery
+        |> withExprPosition
+
+    // 6.37 <interval value expression> ::= ... | ( <datetime value expression> <minus sign> <datetime term> ) <interval qualifier>
+    // The difference of two datetimes, qualified as an interval. Tried ahead of the plain
+    // parenthesized <value expression> alternative; `attempt` backtracks when no
+    // <interval qualifier> follows the closing paren.
+    let pIntervalValueExpression =
+        attempt (
+            between (token (pstring "(")) (token (pstring ")")) pExpression
+            .>>. pIntervalQualifier
+            >>= fun (e, qualifier) ->
+                match e.Kind with
+                | BinaryOp(Subtract, l, r) -> preturn (DatetimeDifference(l, r, qualifier))
+                | _ -> fail "expected <datetime value expression> - <datetime term>"
+        )
+        |> withExprPosition
+
     // 6.24 <array element reference> — postfix [ <numeric value expression> ]
     let pArrayElementReference =
         between (token pLeftBracket) (token pRightBracket) pExpression
@@ -1690,6 +1713,7 @@ module ExpressionParser =
               attempt pElementExpression
               attempt pArrayValueConstructor
               attempt pMultisetValueConstructor
+              attempt pTableValueConstructorByQuery
               attempt pTrimArrayFunction
               attempt pMultisetSetFunction
               attempt pJsonValueFunction
@@ -1716,6 +1740,7 @@ module ExpressionParser =
               attempt pStarExpr
               attempt pQuantifiedSubqueryTerm
               attempt pGeneralizedInvocation
+              attempt pIntervalValueExpression
               pColumnReferenceExpr
               between (token (pstring "(")) (token (pstring ")")) pExpression ]
         .>>. many (attempt pDereferenceReference <|> pMethodOrFieldReference)
@@ -1972,6 +1997,7 @@ module ExpressionParser =
         | CollationFor x -> containsStandaloneQuantifiedSubquery x
         | ArrayConstructor xs -> List.exists containsStandaloneQuantifiedSubquery xs
         | MultisetConstructor xs -> List.exists containsStandaloneQuantifiedSubquery xs
+        | TableQuery _ -> false
         | ArrayElement(x, idx) ->
             containsStandaloneQuantifiedSubquery x
             || containsStandaloneQuantifiedSubquery idx
@@ -2062,6 +2088,8 @@ module ExpressionParser =
         | TrimArray(x, count) ->
             containsStandaloneQuantifiedSubquery x
             || containsStandaloneQuantifiedSubquery count
+        | DatetimeDifference(l, r, _) ->
+            containsStandaloneQuantifiedSubquery l || containsStandaloneQuantifiedSubquery r
         | MultisetSetOperation(_, _, l, r) ->
             containsStandaloneQuantifiedSubquery l || containsStandaloneQuantifiedSubquery r
         | MultisetSetFunction x -> containsStandaloneQuantifiedSubquery x

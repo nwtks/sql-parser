@@ -145,14 +145,20 @@ module Types =
         createParserForwardedToRef<DataType, unit> ()
 
     // 6.1 <collection type> ::= <array type> | <multiset type> — <array type> ::= <data type> ARRAY [ [ <maximum cardinality> ] ] — <multiset type> ::= <data type> MULTISET
+    // The suffixes are applied left-to-right and may nest (`INT ARRAY ARRAY` =
+    // `ArrayType(ArrayType(Integer, None), None)`), because <data type> on the left of
+    // ARRAY/MULTISET may itself be a collection type.
     let pCollectionType =
-        pDataTypeElement
-        .>>. choice
-            [ pKeyword "ARRAY"
-              .>>. opt (between (token (pstring "[")) (token (pstring "]")) pUnsignedInteger)
-              |>> fun (_, len) -> fun t -> ArrayType(t, Option.map int len)
-              pKeyword "MULTISET" >>% MultisetType ]
-        |>> fun (t, f) -> f t
+        let pArraySuffix =
+            pKeyword "ARRAY"
+            .>>. opt (between (token (pstring "[")) (token (pstring "]")) pUnsignedInteger)
+            |>> fun (_, len) -> fun t -> ArrayType(t, Option.map int len)
+
+        let pMultisetSuffix: Parser<DataType -> DataType, unit> =
+            pKeyword "MULTISET" >>% (fun t -> MultisetType t)
+
+        pDataTypeElement .>>. many (choice [ pArraySuffix; pMultisetSuffix ])
+        |>> fun (t, suffixes) -> List.fold (fun acc f -> f acc) t suffixes
 
     pDataTypeElementRef.Value <-
         choice
@@ -179,8 +185,7 @@ module Types =
               // NESTED PATH column form of JSON_TABLE, where NESTED would be read as a
               // column name and PATH as a UDT).
               attempt (
-                  pSchemaQualifiedName
-                  .>>? notFollowedBy pIdentifier
+                  pSchemaQualifiedName .>>? notFollowedBy pIdentifier
                   >>= fun parts ->
                       getPosition
                       |>> fun pos ->
@@ -189,7 +194,9 @@ module Types =
                               | [ s ] -> Identifier s
                               | ps -> ColumnReference ps
 
-                          UserDefinedType { Kind = expr; Pos = { Line = pos.Line; Column = pos.Column } }
+                          UserDefinedType
+                              { Kind = expr
+                                Pos = { Line = pos.Line; Column = pos.Column } }
               ) ]
 
     pDataTypeRef.Value <- choice [ attempt pCollectionType; pDataTypeElement ]

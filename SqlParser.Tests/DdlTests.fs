@@ -92,6 +92,16 @@ let ``Array type is parsed`` () =
     | res -> Assert.Fail(sprintf "Expected ArrayType, got %A" res)
 
 [<Fact>]
+let ``Nested collection types are parsed`` () =
+    match parse "CREATE TABLE t (c INT ARRAY ARRAY)" with
+    | CreateTable { Columns = [ { DataType = ArrayType(ArrayType(Integer, None), None) } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected nested ArrayType, got %A" res)
+
+    match parse "CREATE TABLE t (c INT MULTISET ARRAY [3])" with
+    | CreateTable { Columns = [ { DataType = ArrayType(MultisetType Integer, Some 3) } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected ArrayType of MultisetType, got %A" res)
+
+[<Fact>]
 let ``CREATE TABLE with table constraints verification`` () =
     match
         parse

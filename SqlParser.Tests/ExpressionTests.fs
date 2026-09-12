@@ -384,6 +384,27 @@ let ``AT TIME ZONE and AT LOCAL verification`` () =
     | res -> Assert.Fail(sprintf "Expected AT TIME ZONE interval, got %A" res)
 
 [<Fact>]
+let ``Datetime difference interval verification`` () =
+    match parse "SELECT (ts1 - ts2) DAY TO SECOND" with
+    | DatetimeDifference({ Kind = Identifier "TS1" },
+                         { Kind = Identifier "TS2" },
+                         IntervalQualifier.Range(Day, Second, None)) -> ()
+    | res -> Assert.Fail(sprintf "Expected a datetime difference, got %A" res)
+
+    // Without a trailing <interval qualifier> the parenthesized subtraction is unchanged.
+    match parse "SELECT (ts1 - ts2)" with
+    | BinaryOp(Subtract, { Kind = Identifier "TS1" }, { Kind = Identifier "TS2" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected plain subtraction, got %A" res)
+
+    match parse "SELECT (ts1 - ts2) * 2" with
+    | BinaryOp(Multiply, { Kind = BinaryOp(Subtract, _, _) }, { Kind = Literal(Number 2m) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected parenthesized subtraction, got %A" res)
+
+    // Only a difference of two datetimes may carry the qualifier: `(a + b) DAY`
+    // is not an <interval value expression> and must be rejected.
+    parseFails "SELECT ((a + b) DAY)"
+
+[<Fact>]
 let ``NEXT VALUE FOR verification`` () =
     match parse "SELECT NEXT VALUE FOR order_seq" with
     | NextValueFor({ Kind = Identifier "ORDER_SEQ" }) -> ()
@@ -637,6 +658,12 @@ let ``MULTISET value constructor verification`` () =
     match parse "SELECT MULTISET(SELECT id FROM t)" with
     | MultisetQuery _ -> ()
     | res -> Assert.Fail(sprintf "Expected MultisetQuery, got %A" res)
+
+[<Fact>]
+let ``TABLE table value constructor by query verification`` () =
+    match parse "SELECT TABLE (SELECT id FROM t)" with
+    | TableQuery _ -> ()
+    | res -> Assert.Fail(sprintf "Expected TableQuery, got %A" res)
 
 [<Fact>]
 let ``Empty collection specification verification`` () =

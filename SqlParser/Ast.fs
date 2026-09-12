@@ -266,6 +266,9 @@ and ExpressionKind =
     | ArrayQuery of Query
     | MultisetConstructor of Expression list
     | MultisetQuery of Query
+    // 6.45 <multiset value constructor> ::= ... | <table value constructor by query>
+    //   <table value constructor by query> ::= TABLE <table subquery>
+    | TableQuery of Query
     // 6.24 <array element reference> ::= <array value expression> [ <numeric value expression> ]
     | ArrayElement of Expression * Expression
     // 6.16 <subtype treatment> / 6.23 <reference resolution> / 6.25 <multiset element reference>
@@ -353,6 +356,8 @@ and ExpressionKind =
     | Classifier of Expression option
     // 6.35 <time zone> ::= AT <time zone specifier>
     | AtTimeZone of Expression * TimeZoneSpecifier
+    // 6.37 <interval value expression> ::= ... | ( <datetime value expression> <minus sign> <datetime term> ) <interval qualifier>
+    | DatetimeDifference of Expression * Expression * IntervalQualifier
     // 6.41 <trim array function> ::= TRIM_ARRAY ( <array value expression> , <numeric value expression> )
     | TrimArray of Expression * Expression
     // 6.43 <multiset value expression> ::= ... MULTISET { UNION | INTERSECT | EXCEPT } [ ALL | DISTINCT ] ...

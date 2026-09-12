@@ -436,3 +436,15 @@ A new `ExpressionKind` case compiles without a validation branch, so a standalon
 ## `SET ( ... )` and `<multiset value expression>` are mutually recursive
 
 6.44 `SET ( <multiset value expression> )` is itself a `<value expression primary>`, while `<multiset value expression>` is built from `pValueExpressionPrimary`. `pMultisetValueExpression` is therefore declared as a forward ref next to `pExpressionRef` and wired *after* `pValueExpressionPrimary` (via `pMultisetValueExpressionRef.Value <- ...`). Use the forwarding **parser** (`pMultisetValueExpression`), never `pMultisetValueExpressionRef.Value`, in a combinator — reading `.Value` at module-initialisation time captures FParsec's dummy parser.
+
+## Collection-type suffixes must be folded, not parsed once
+
+`<collection type>` is a postfix chain over `<data type>`, so `Types.pCollectionType` is `pDataTypeElement .>>. many (ARRAY … | MULTISET) |> List.fold`. Writing the same rule self-referentially (`pDataType ARRAY …`) makes `pDataType` left-recursive and recurses forever on the same position. The element parser must stay collection-free (`pDataTypeElement`) and only the *left* operand of the postfix may nest.
+
+## The 6.37 interval alternative must precede, and be an `attempt` sibling of, the parenthesized `pExpression` branch
+
+`(ts1 - ts2) DAY TO SECOND` and `(ts1 - ts2)` share a prefix, and the plain parenthesized branch of `pValueExpressionPrimary` is itself a prefix of the interval form. `attempt pIntervalValueExpression` must therefore be listed **before** `between "(" ")" pExpression`, and it must reject a non-`Subtract` inner expression with `fail` *inside* the `attempt` so the fallback still runs. Placed after, the generic branch would consume `(ts1 - ts2)` and strand the qualifier; without `attempt`, the `fail` would abort the whole `choice` instead of falling through.
+
+## `TABLE ( <query> )` is reachable from an expression only
+
+`pTableValueConstructorByQuery` (6.45) is an alternative of `pValueExpressionPrimary`, so `SELECT TABLE (SELECT ...)` yields `TableQuery`. `QueryParser.pTablePrimary` has its own `TABLE ( <value expression> )` branch for `<collection derived table>` and consumes `TABLE` *before* calling `pExpression`, so that branch never sees `pTableValueConstructorByQuery` and `FROM TABLE (arr) AS t` keeps behaving exactly as before.

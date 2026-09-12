@@ -695,3 +695,25 @@ Both statements share the `<JSON API common syntax>` (context expression / PATH 
 The grammar admits `DESCRIPTOR ( <descriptor column list> )` in two slots: `<descriptor argument>` (PTF `<copartition specification>`, not implemented) and `<parameter default>` (11.60). Only the latter is reachable, so `RoutineParser.pDescriptorValueConstructor` is used there and the result is carried as `ExpressionKind.DescriptorValueConstructor`.
 
 - **Trade-off:** The constructor is intentionally **not** an alternative of `<value expression primary>` — the grammar does not allow it as a general value expression, and adding it would make `DESCRIPTOR` (a non-reserved word) bind more eagerly than the existing identifier fallback.
+
+## Nested collection types (6.1)
+
+`<collection type>` is a postfix chain: `<array type>` / `<multiset type>` wrap a `<data type>`, and that inner `<data type>` may itself be a collection. `Types.pCollectionType` parses the collection-free element with `pDataTypeElement` and then folds `many (ARRAY [ [ <maximum cardinality> ] ] | MULTISET)` left-to-right with `List.fold`.
+
+- **Trade-off:** The previous shape (`pDataTypeElement .>>. choice [...]`) accepted a single suffix, so `INT ARRAY ARRAY` and `INT MULTISET ARRAY[3]` failed. Folding keeps the parser free of left recursion — a self-referential `<data type> ARRAY` production would recurse on the same input position forever, which is why `pDataTypeElement` deliberately excludes collection types.
+- **Trade-off:** An arbitrary identifier is still accepted as a `<path-resolved user-defined type name>` (the over-permissiveness recorded in §5.3 of the audit); the collection suffix is only recognised after a complete element type.
+
+## `<interval value expression>` from a datetime difference (6.37)
+
+The fourth alternative of 6.37 — `( <datetime value expression> <minus sign> <datetime term> ) <interval qualifier>` — is parsed by `ExpressionParser.pIntervalValueExpression`: it parses `( <value expression> )`, requires an `<interval qualifier>` (10.1, the same parser used by `INTERVAL` literals) and accepts the node only if the parenthesised expression is a subtraction. The AST is `ExpressionKind.DatetimeDifference of Expression * Expression * IntervalQualifier`.
+
+- **Trade-off:** The qualifier is kept in the AST, so `(ts1 - ts2) DAY TO SECOND` is distinguishable from a plain subtraction. The other three alternatives of 6.37 are ordinary interval arithmetic and remain `BinaryOp`/literals.
+- **Trade-off:** The parser is an `attempt` alternative placed **before** the generic parenthesised `pExpression` branch of `pValueExpressionPrimary`, so the inner expression is parsed twice whenever no qualifier follows (and the qualifier attempt itself runs after every parenthesised expression). A non-subtraction such as `(a + b) DAY` fails the guard and falls back to the plain parenthesised expression, leaving `DAY` to be rejected by the enclosing rule.
+- **Not modelled:** `<interval primary> ::= <value expression primary> [ <interval qualifier> ]` — a qualifier attached to an arbitrary primary, as in the embedded-SQL `? DAY` — has no AST case; only the datetime-difference form of 6.37 is recognised.
+
+## `<table value constructor by query>` (6.45) as a value expression primary
+
+The third alternative of `<multiset value constructor>` is `<table value constructor by query>`, i.e. `TABLE <table subquery>`. `ExpressionParser.pTableValueConstructorByQuery` parses `TABLE ( <query expression> )` and yields `ExpressionKind.TableQuery of Query`, reachable from `<value expression primary>` — so `SELECT TABLE (SELECT ...)` is accepted.
+
+- **Trade-off:** `Query` is reused for the subquery and the node is a distinct case rather than `MultisetQuery`, because 6.45 lists it as a constructor by query independently of the `MULTISET` keyword.
+- **Trade-off:** The node is only reachable from an expression. The `<table reference>` position (`FROM ...`, 7.6) is handled by `QueryParser.pTablePrimary`, whose own `TABLE ( <value expression> )` branch for `<collection derived table>` consumes `TABLE` before calling `pExpression`; that path is unaffected and does not consult the new parser. Note that in `sql-2016-grammar.txt` the 7.3 `<table value constructor>` production is `VALUES`-only, so a `TABLE ( <query> )` table reference is not required by the design document.
