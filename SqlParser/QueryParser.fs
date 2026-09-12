@@ -69,25 +69,26 @@ module QueryParser =
     //     FOR SYSTEM_TIME AS OF <point in time>
     //   | FOR SYSTEM_TIME BETWEEN [ ASYMMETRIC | SYMMETRIC ] <p1> AND <p2>
     //   | FOR SYSTEM_TIME FROM <p1> TO <p2>
-    // <point in time> is a <datetime value expression> — parsed with
-    // pValueExpressionNoBoolean so that BETWEEN's AND is not consumed as a boolean op.
+    // <point in time> is a <datetime value expression> (6.35), whose '+'/'-' chain has no
+    // boolean operators, so BETWEEN's AND is not consumed as a boolean operator.
     let pSystemTimeSpec =
+        let pPointInTime = pDatetimeValueExpression
+
         pKeyword "FOR"
         >>. pKeyword "SYSTEM_TIME"
-        >>. (attempt (
-                 pKeyword "AS" >>. pKeyword "OF" >>. pValueExpressionNoBoolean
-                 |>> SystemTimeSpec.AsOf
-             )
+        >>. (attempt (pKeyword "AS" >>. pKeyword "OF" >>. pPointInTime |>> SystemTimeSpec.AsOf)
              <|> attempt (
                  pKeyword "BETWEEN"
-                 >>. opt (pKeyword "ASYMMETRIC" <|> pKeyword "SYMMETRIC")
-                 >>. pValueExpressionNoBoolean
+                 >>. opt (
+                     (pKeyword "ASYMMETRIC" >>% SystemTimeSymmetry.Asymmetric)
+                     <|> (pKeyword "SYMMETRIC" >>% SystemTimeSymmetry.Symmetric)
+                 )
+                 .>>. pPointInTime
                  .>> pKeyword "AND"
-                 .>>. pValueExpressionNoBoolean
-                 |>> fun (lo, hi) -> SystemTimeSpec.Between(lo, hi)
+                 .>>. pPointInTime
+                 |>> fun ((symmetry, lo), hi) -> SystemTimeSpec.Between(lo, hi, symmetry)
              )
-             <|> (pKeyword "FROM" >>. pValueExpressionNoBoolean .>> pKeyword "TO"
-                  .>>. pValueExpressionNoBoolean
+             <|> (pKeyword "FROM" >>. pPointInTime .>> pKeyword "TO" .>>. pPointInTime
                   |>> fun (lo, hi) -> SystemTimeSpec.FromTo(lo, hi)))
 
     // 7.11 <JSON table column empty/error behavior> ::= ERROR | NULL | DEFAULT <value expression>
@@ -366,7 +367,13 @@ module QueryParser =
                       pKeyword "ONLY"
                       >>. between (token (pstring "(")) (token (pstring ")")) pQualifiedNameExpr
                       .>>. opt (attempt pCorrelationOrRecognition)
-                      |>> fun (name, _) -> Only name
+                      |>> fun (name, corr) ->
+                          let alias, cols =
+                              match corr with
+                              | Some(name, cols) -> Some name, cols
+                              | None -> None, None
+
+                          Only(name, alias, cols)
                   )
                   |> withTablePosition
                   // <table function derived table> / <PTF derived table> ::= TABLE ( <expr> )
@@ -395,7 +402,13 @@ module QueryParser =
                       .>> pKeyword "TABLE"
                       .>>. between (token (pstring "(")) (token (pstring ")")) pDataChangeStatement
                       .>>. opt (attempt pCorrelationOrRecognition)
-                      |>> fun ((result, stmt), _) -> DataChangeDelta(result, stmt)
+                      |>> fun ((result, stmt), corr) ->
+                          let alias, cols =
+                              match corr with
+                              | Some(name, cols) -> Some name, cols
+                              | None -> None, None
+
+                          DataChangeDelta(result, stmt, alias, cols)
                   )
                   |> withTablePosition
                   // <JSON table> <correlation or recognition>
@@ -633,11 +646,20 @@ module QueryParser =
         attempt (pExpression .>>. opt (attempt pCorrelationName)) |>> Column
 
     // 7.16 <qualified asterisk> ::= <asterisked identifier chain> <period> <asterisk>
+    //                            | <all fields reference>
     // 7.16 <all fields reference> ::= <value expression primary> <period> <asterisk>
-    // <all fields reference> ::= <value expression primary> <period> <asterisk>
     //                            [ AS ( <all fields column name list> ) ]
-    // An identifier chain without the AS (cols) suffix yields QualifiedStar; with
-    // the suffix it yields AllFieldsReference.
+    // The <asterisked identifier chain> form is tried first so that a plain `t.*` keeps
+    // yielding QualifiedStar; the general <all fields reference> form then handles any other
+    // <value expression primary> (e.g. `(a + b).*`) and yields AllFieldsReference.
+    let pAllFieldsAsClause =
+        opt (
+            attempt (
+                pKeyword "AS"
+                >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
+            )
+        )
+
     let pQualifiedAsterisk =
         attempt (
             getPosition
@@ -645,15 +667,7 @@ module QueryParser =
                   .>> token (pstring ".")
                   .>> pchar '*'
                   .>> ws)
-            .>>. opt (
-                attempt (
-                    pKeyword "AS"
-                    >>. between
-                            (token (pstring "("))
-                            (token (pstring ")"))
-                            (sepBy1 pIdentifierExpr (token (pstring ",")))
-                )
-            )
+            .>>. pAllFieldsAsClause
             .>> ws
             |>> fun ((pos, (first, rest)), fieldList) ->
                 let pos' = { Line = pos.Line; Column = pos.Column }
@@ -680,6 +694,18 @@ module QueryParser =
                           Pos = pos' },
                         None
                     )
+        )
+        <|> attempt (
+            getPosition
+            .>>. (pValueExpressionPrimary .>> token (pstring ".") .>> pchar '*' .>> ws)
+            .>>. pAllFieldsAsClause
+            .>> ws
+            |>> fun ((pos, expr), cols) ->
+                Column(
+                    { Expression.Kind = AllFieldsReference(expr, cols)
+                      Pos = { Line = pos.Line; Column = pos.Column } },
+                    None
+                )
         )
 
     // 7.16 <select list> ::= <asterisk> | <select sublist> [ { <comma> <select sublist> }... ]

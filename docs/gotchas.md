@@ -117,9 +117,9 @@ F# requires definitions before use. Adding `Identity` to `pColumnDefinition` mea
 
 5.2 `<reserved word>` — `FINAL` is not in `reservedWords`, so `pKeyword "FINAL"` works — but the `DataChangeDelta` alternative (`FINAL|NEW|OLD TABLE (...)`) must precede the plain `Table` alternative in `pTablePrimary`, otherwise `FINAL TABLE (...)` would parse `FINAL` as a table name.
 
-## `pExpression` includes boolean ops — use `pValueExpressionNoBoolean`
+## `pExpression` includes boolean ops — use a boolean-free parser
 
-6.3 `<value expression primary>` — for `<point in time>` in `FOR SYSTEM_TIME`, the full `pExpression` would consume `BETWEEN ... AND ...`'s `AND` as a boolean operator. Use `pValueExpressionNoBoolean = opp.ExpressionParser` (the `OperatorPrecedenceParser` without boolean `AND`/`OR`) for non-boolean value-expression slots.
+6.3 `<value expression primary>` — the full `pExpression` would consume `BETWEEN ... AND ...`'s `AND` as a boolean operator, so boolean-free slots need a dedicated parser: `<point in time>` (7.6 `FOR SYSTEM_TIME`, 14.9/14.14 `FOR PORTION OF`) uses `pDatetimeValueExpression` (6.35), and the JSON slots use `pValueExpressionNoBoolean = opp.ExpressionParser` (the `OperatorPrecedenceParser` without boolean `AND`/`OR`).
 
 ## F# record patterns with newline-separated fields require same-column alignment
 
@@ -337,9 +337,9 @@ Diagnostics / descriptor item names (`NUMBER` / `ROW_COUNT` / `COUNT` / `DATA` /
 
 `pDataTypeElementRef.Value` includes a `pSchemaQualifiedName` branch that maps to `UserDefinedType`, so any identifier is a valid UDT name. Without a guard, `NESTED PATH '$.items'` is misread as a regular column (name `NESTED`, type `PATH`). The UDT branch now uses `pSchemaQualifiedName .>>? notFollowedBy pIdentifier`, so a name immediately followed by another identifier is rejected; `pJsonTableColumn` still tries the NESTED branch before the regular-column branch (`QueryParser.fs`).
 
-## `OUT` is a reserved word — cannot be used as a MATCH_RECOGNIZE output name
+## `OUT` is a reserved word — `MATCH_RECOGNIZE (...) AS out` is correctly rejected
 
-`MATCH_RECOGNIZE (...) AS out` fails because `pIdentifierExpr` rejects the reserved word `OUT`. Tests must use non-reserved output names (e.g. `out_t`).
+`MATCH_RECOGNIZE (...) AS out` fails because §5.2 makes `OUT` reserved and 7.6 defines `<row pattern output name>` as `<correlation name>` → `<identifier>`. The rejection is required by the grammar, not a gap; use a non-reserved name (e.g. `out_t`) or a delimited identifier.
 
 ## `VALUE_OF(x)` without `AT` is rejected
 
@@ -448,3 +448,35 @@ A new `ExpressionKind` case compiles without a validation branch, so a standalon
 ## `TABLE ( <query> )` is reachable from an expression only
 
 `pTableValueConstructorByQuery` (6.45) is an alternative of `pValueExpressionPrimary`, so `SELECT TABLE (SELECT ...)` yields `TableQuery`. `QueryParser.pTablePrimary` has its own `TABLE ( <value expression> )` branch for `<collection derived table>` and consumes `TABLE` *before* calling `pExpression`, so that branch never sees `pTableValueConstructorByQuery` and `FROM TABLE (arr) AS t` keeps behaving exactly as before.
+
+## The `.` postfix loop must be backtracking
+
+7.16 — `pValueExpressionPrimary` ends with `many (attempt pDereferenceReference <|> attempt pMethodOrFieldReference)`. `pMethodOrFieldReference` starts with `.` and then requires an identifier, so on `(a + b).*` it consumed `.` and failed on `*`; without `attempt` that failure aborts the whole primary instead of leaving the `.` for the enclosing parser (`<all fields reference>`'s `<period> <asterisk>`).
+
+## `pExplicitRowValueConstructor` needs `attempt` to let `(a)` through
+
+7.1 — the parenthesized form is `pExpression .>>. many1 ("," >>. pExpression)`, i.e. two or more elements. Without `attempt`, `(a)` would consume `(` and `a` and then fail on the missing `,`, aborting this alternative instead of falling through to the plain parenthesized `<value expression>` branch. `ROW ( … )` uses `sepBy1`, so a one-element list is fine there.
+
+## `>>.` silently discards a result — the `BETWEEN` symmetry bug
+
+7.6 — in `pKeyword "BETWEEN" >>. opt (<symmetry>) >>. pPointInTime …` the second `>>.` drops the value the `opt` just produced, so the parser compiles while the qualifier is never seen (the previous code bound the pattern `fun (lo, hi)` and looked correct). Use `.>>.` after `opt` when the value must survive: `>>. opt (…) .>>. pPointInTime`.
+
+## `|>> List.fold f` is not a left fold
+
+`List.fold` takes the folder, the initial state **and** the list, so `p |>> List.fold (fun acc x -> …)` type-checks as a partial application and yields a function, not an `Expression`. Bind the pair and fold explicitly: `|>> fun (first, rest) -> rest |> List.fold folder first`.
+
+## `pIntervalSign` must not swallow `->`
+
+6.37 — `<interval factor> ::= [ <sign> ] <interval primary>`, but the dereference operator (6.20/6.21) also starts with `-`. Guard the minus alternative with `notFollowedBy (pchar '>')`; otherwise a `-` followed by `>` makes the sign branch consume `-` and fail fatally instead of yielding `None`.
+
+## `<interval primary>` is transparent without a qualifier
+
+6.37 — `pIntervalPrimary` returns the inner `<value expression primary>` unchanged when no `<interval qualifier>` follows, so `IntervalPrimary` only appears for forms like `? DAY` and `INTERVAL '1' DAY` (a `<literal>`) keeps its AST shape. That transparence is also what lets the early `pIntervalValueExpression` reference the `pDatetimeValueExpression` **forward ref** without a cycle.
+
+## `INSERT` must keep using `pQualifiedNameExpr` for its target
+
+14.11 `<insertion target> ::= <table name>` has no `ONLY` form, unlike 14.8/14.9/14.13/14.14 `<target table>`. Only `UPDATE` / `DELETE` / `MERGE` use `DmlParser.pTargetTable`; wiring it into `INSERT` as well would accept `INSERT INTO ONLY (t) …`.
+
+## The DML `ONLY` flag fields are named per record
+
+14.8/14.9/14.13/14.14 — `pTargetTable` returns `Expression * bool`, and the flag is stored as `UpdateStatement.TableIsOnly`, `DeleteStatement.TableIsOnly` and `MergeStatement.TargetIsOnly` (the merge record's name field is `Target`, not `Table`). Pattern-matching on `Table` still compiles without mentioning the flag, which is why no existing test needed updating.

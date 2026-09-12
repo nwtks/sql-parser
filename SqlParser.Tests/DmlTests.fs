@@ -37,6 +37,19 @@ let ``UPDATE verification`` () =
     | res -> Assert.Fail(sprintf "Expected Update, got %A" res)
 
 [<Fact>]
+let ``UPDATE ONLY target table verification`` () =
+    // 14.13/14.14 <target table> ::= <table name> | ONLY ( <table name> )
+    match parse "UPDATE ONLY (users) SET name = 'bob'" with
+    | Update { Table = { Kind = Identifier "USERS" }
+               TableIsOnly = true } -> ()
+    | res -> Assert.Fail(sprintf "Expected UPDATE ONLY, got %A" res)
+
+    match parse "UPDATE app.users SET name = 'bob'" with
+    | Update { Table = { Kind = ColumnReference [ "APP"; "USERS" ] }
+               TableIsOnly = false } -> ()
+    | res -> Assert.Fail(sprintf "Expected UPDATE without ONLY, got %A" res)
+
+[<Fact>]
 let ``INSERT DEFAULT VALUES verification`` () =
     match parse "INSERT INTO users DEFAULT VALUES" with
     | Insert { Table = { Kind = Identifier "USERS" }
@@ -129,6 +142,13 @@ let ``DELETE verification`` () =
     | res -> Assert.Fail(sprintf "Expected Delete, got %A" res)
 
 [<Fact>]
+let ``DELETE ONLY target table verification`` () =
+    match parse "DELETE FROM ONLY (app.users)" with
+    | Delete { Table = { Kind = ColumnReference [ "APP"; "USERS" ] }
+               TableIsOnly = true } -> ()
+    | res -> Assert.Fail(sprintf "Expected DELETE ONLY, got %A" res)
+
+[<Fact>]
 let ``MERGE verification`` () =
     match
         parse
@@ -158,6 +178,18 @@ let ``MERGE INSERT OVERRIDING SYSTEM VALUE verification`` () =
             | _ -> Assert.Fail(sprintf "Expected insert column list, got %A" cols)
         | res -> Assert.Fail(sprintf "Expected MergeInsert, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)
+
+[<Fact>]
+let ``MERGE ONLY target table verification`` () =
+    match parse "MERGE INTO ONLY (target) USING source ON target.id = source.id WHEN MATCHED THEN DELETE" with
+    | Merge { Target = { Kind = Identifier "TARGET" }
+              TargetIsOnly = true } -> ()
+    | res -> Assert.Fail(sprintf "Expected MERGE ONLY, got %A" res)
+
+[<Fact>]
+let ``INSERT insertion target does not accept ONLY`` () =
+    // <insertion target> is a plain <table name> (14.11), unlike <target table>.
+    parseFails "INSERT INTO ONLY (users) VALUES (1)"
 
 [<Fact>]
 let ``MERGE INSERT OVERRIDING USER VALUE verification`` () =

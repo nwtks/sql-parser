@@ -229,11 +229,11 @@ Per 7.17 `<simple table> ::= <query specification> | <table value constructor> |
 
 - **Trade-off:** The parenthesized branch is now a 4-tuple pipeline; the trailing clauses are folded into the inner query (or wrapped in `QueryExpression` for set operations), keeping scope correct.
 
-## `ONLY` / data-change-delta drop the optional correlation name
+## `ONLY` / data-change-delta keep the optional correlation name
 
-`ONLY (t)` and `FINAL|NEW|OLD TABLE (dml)` both allow an optional `[ AS <correlation name> ]` / `[ <correlation or recognition> ]` suffix in the grammar, but `TableSourceKind.Only of Expression` and `TableSourceKind.DataChangeDelta of ResultOption * StatementKind` discard it.
+7.6 `<only spec>` / `<data change delta table>` allow an optional `<correlation or recognition>` suffix. `TableSourceKind.Only` and `TableSourceKind.DataChangeDelta` now carry the correlation name plus the parenthesized derived column list, so `FROM ONLY (t) AS u (a)` and `FROM OLD TABLE (DELETE FROM t) AS d (x)` no longer discard them.
 
-- **Trade-off:** The alias has no consumer yet, so keeping the cases minimal wins. `TableFunction`/`PtfTable` (likewise) *do* keep the alias because the grammar's `<table function derived table>` commonly uses it.
+- **Trade-off:** Both cases now hold one more field than `Table` (which keeps only the alias), because `pCorrelationOrRecognition` yields the pair. The other half of `<correlation or recognition>` — a `<row pattern recognition clause>` — is still not accepted in this slot.
 
 ## `TABLE (expr)` classified as `TableFunction` vs `PtfTable` by a `FunctionCall` check
 
@@ -241,29 +241,41 @@ Per 7.17 `<simple table> ::= <query specification> | <table value constructor> |
 
 - **Trade-off:** A shape-based heuristic. A PTF that is not a plain routine invocation would be misclassified, but in practice PTFs are function calls. A dedicated parser cannot distinguish the two without semantic knowledge.
 
-## `ASYMMETRIC` / `SYMMETRIC` parsed and discarded
+## `SYMMETRIC` / `ASYMMETRIC` modelled by a `SystemTimeSymmetry` DU
 
-`FOR SYSTEM_TIME BETWEEN [ ASYMMETRIC | SYMMETRIC ] p1 AND p2` accepts the optional qualifier but discards it — `SystemTimeSpec.Between` does not carry it.
+7.6 `<query system time period specification>` — `FOR SYSTEM_TIME BETWEEN [ ASYMMETRIC | SYMMETRIC ] p1 AND p2` stores the qualifier as `SystemTimeSymmetry option` on `SystemTimeSpec.Between` (`None` = unspecified).
 
-- **Trade-off:** The qualifier is semantic metadata (which side is inclusive) with no consumer; surfacing it would add a field to `Between` for no current benefit.
+- **Trade-off:** The qualifier is semantic metadata with no consumer yet, but carrying it is cheap and stops the parser from accepting and silently dropping a token. A DU `option` is used instead of a bare `bool` so that "absent" and "explicitly asymmetric" stay distinguishable.
 
-## Point-in-time parsed with `pValueExpressionNoBoolean`
+## `<point in time>` uses a dedicated `<datetime value expression>` parser
 
-`<point in time>` is a `<datetime value expression>`, which must not include boolean `AND`/`OR`. The full `pExpression` would consume `BETWEEN ... AND ...`'s `AND` as a boolean operator. `pValueExpressionNoBoolean = opp.ExpressionParser` (the `OperatorPrecedenceParser` without boolean operators) is used instead.
+6.35 `<datetime value expression>` is implemented as `pDatetimeTerm` (`<datetime primary> [ AT TIME ZONE … ]`) left-folded over `+`/`-`. `<point in time>` (7.6 `FOR SYSTEM_TIME`, 14.9/14.14 `FOR PORTION OF`) now uses it instead of `pValueExpressionNoBoolean`, so `a * b`, `a || b` and `a = b` are rejected where a point in time is expected, while `CURRENT_DATE - INTERVAL '1' DAY`, `CURRENT_TIMESTAMP AT TIME ZONE x` and `? DAY` work.
 
-- **Trade-off:** An approximation — it accepts any non-boolean value expression, not just datetime ones. A dedicated `<datetime value expression>` parser would be stricter but is overkill for the point-in-time slot.
+- **Trade-off:** The right operand of `+`/`-` may be an `<interval term>` or a `<datetime term>` and the two are syntactically indistinguishable, so `attempt pIntervalTerm <|> pDatetimeTerm` is tried in that order. `<interval term>`'s `*`/`/` right operand is approximated by an `<interval factor>` instead of a numeric `<factor>` (a mild superset). `pValueExpressionNoBoolean` is kept for the JSON slots, which are still permissive by design.
 
-## DML target `ONLY (t)` not implemented
+## DML `<target table>` supports `ONLY ( <table name> )`
 
-The grammar's `<target table>` allows `ONLY ( <table or query name> )`, but DML statements (`UPDATE`/`DELETE`/`MERGE`) still use `Table: Expression` (a plain qualified name).
+`UPDATE` / `DELETE` / `MERGE` parse their target with `DmlParser.pTargetTable`, which accepts `ONLY ( <table name> )` and records it in the new `TableIsOnly` / `TargetIsOnly` record fields. `INSERT` deliberately keeps `pQualifiedNameExpr`: its `<insertion target>` is a plain `<table name>` (14.11).
 
-- **Trade-off:** `ONLY` in DML targets is deferred; the `ONLY` support added for the FROM-clause covers the table primary only. Implementing the DML-target form would require threading an `Only` flag through the DML target parsers.
+- **Trade-off:** A `bool` flag is used instead of a dedicated target DU so that the existing record patterns in the tests keep compiling; the flag is only meaningful next to the name it qualifies.
 
-## `AllFieldsReference` only for identifier chains
+## `<all fields reference>` accepts any `<value expression primary>`
 
-`<all fields reference> ::= <value expression primary> <period> <asterisk> [ AS ( <all fields column name list> ) ]` technically allows any value expression primary (e.g. `(a + b).*`), but `pQualifiedAsterisk` only handles identifier chains (`t.*`, `s.t.*`).
+7.16 `<all fields reference> ::= <value expression primary> <period> <asterisk> [ AS ( <all fields column name list> ) ]` is parsed by a second branch of `pQualifiedAsterisk`, so `(a + b).*`, `f(x).*` and `ROW(a, b).*` work. The `<asterisked identifier chain>` branch is still tried first, which keeps `t.*` a `QualifiedStar` and `t.* AS (x)` an `AllFieldsReference` — both shapes predate the general form.
 
-- **Trade-off:** `(a + b).*` is rejected; the common qualified-asterisk form is supported. `pQualifiedAsterisk` yields `QualifiedStar` when the `AS (cols)` suffix is absent and `AllFieldsReference` when present, so the two shapes share one parser.
+- **Trade-off:** The general branch parses a full `<value expression primary>` before discovering that no `.` follows, so a select sublist is parsed twice. It is `attempt`ed, so this only costs time. `AllFieldsReference`'s column list is now optional (`None` = no `AS` clause), which the type already allowed.
+
+## `<explicit row value constructor>` (7.1) is an expression case
+
+`(e1, e2, …)` and `ROW(e1, …)` are `ExpressionKind.RowValueConstructor`, added to `pValueExpressionPrimary` so that `<row value predicand>` positions work: `SELECT (1, 2)`, `SELECT (1, 2) = (3, 4)` and `SELECT (1, 2) IN ((1, 2), (3, 4))`.
+
+- **Trade-off:** The parenthesized form needs two or more elements (`pExpression .>>. many1`) and is wrapped in `attempt`, so `(a)` still falls through to the plain parenthesized `<value expression>` branch; `ROW ( … )` uses `sepBy1`, so one element is accepted there. `<row subquery>` stays `SubqueryExpression`, and the `<contextually typed row value constructor>` uses in `VALUES` / `SET (a, b) = …` keep their existing `Expression list` shapes.
+
+## `<interval primary>` (6.37) wraps only when a qualifier is present
+
+`<interval primary> ::= <value expression primary> [ <interval qualifier> ]` is `IntervalPrimary(expr, qualifier)`, produced only when a qualifier actually follows (`? DAY`). A qualifier-less `<interval primary>` returns its inner `<value expression primary>` unchanged, so `INTERVAL '1' DAY` and plain operands keep their previous AST shapes.
+
+- **Trade-off:** `<interval primary>` is reachable only through `<datetime value expression>` (the point-in-time slots and the `( <datetime value expression> - <datetime term> ) <interval qualifier>` alternative); a general-expression `<interval primary>` such as `SELECT ? DAY` is still rejected. `pTimeZoneSuffix` now reuses `pIntervalPrimary` for its `<time zone specifier>`, which is what its grammar comment always claimed.
 
 ## `pPartitionBy` accepts only column references
 
@@ -437,7 +449,7 @@ Positioned `DELETE`/`UPDATE` (`WHERE CURRENT OF <cursor>`) and the searched form
 
 14.9/14.14 `<application time period specification> ::= FOR PORTION OF <period name> FROM <point in time 1> TO <point in time 2>` is modeled as `PortionOfSpec = { PeriodName; From; To }` (all `Expression`), stored in `UpdateStatement.PortionOf`/`DeleteStatement.PortionOf` as an option.
 
-- **Trade-off:** A record keeps the three components named. The point-in-time operands use `pValueExpressionNoBoolean` (not `pExpression`) so a `BETWEEN ... AND ...` inside the value isn't consumed as a boolean — the same decision as the `<point in time>` for `FOR SYSTEM_TIME`. `pPortionOf` is `attempt`-wrapped at the call sites so a plain `UPDATE t SET ...` isn't broken when `FOR` fails.
+- **Trade-off:** A record keeps the three components named. The point-in-time operands use `pDatetimeValueExpression` (6.35) so a `BETWEEN ... AND ...` inside the value isn't consumed as a boolean and only datetime/interval arithmetic is accepted — the same decision as the `<point in time>` for `FOR SYSTEM_TIME`. `pPortionOf` is `attempt`-wrapped at the call sites so a plain `UPDATE t SET ...` isn't broken when `FOR` fails.
 
 ## Mutated set clause folds the target into a `FieldReference` chain
 
@@ -632,11 +644,11 @@ In the `<window name or specification>` `( <existing window name> ... )` branch,
 
 - **Trade-off:** When the inner parser succeeds, `notFollowedBy` marks the failure as **fatal**, so inside `opt` it cannot be caught and `opt pWindowFrame` is never reached. Wrapping it in `attempt` converts the fatal error back into an ordinary failure so `opt` can return `None`.
 
-## `OUT` is a reserved word — cannot be used as a MATCH_RECOGNIZE output name
+## `OUT` is a reserved word — `MATCH_RECOGNIZE (...) AS out` is correctly rejected
 
-The output correlation name of `MATCH_RECOGNIZE (...) AS out` is parsed with `pIdentifierExpr`, so the reserved word `OUT` is rejected (fails at Col 72).
+7.6/7.7 — `<row pattern output name> ::= <correlation name> ::= <identifier>`, and §5.2 makes `OUT` a reserved word, so `AS out` is **not** valid SQL and `pCorrelationName` (via `pIdentifierExpr`) must fail on it; `MATCH_RECOGNIZE (...) AS out_t` is the valid spelling.
 
-- **Trade-off:** Tests use non-reserved output names (e.g. `out_t`). `OUT` is in `reservedWords` (Lexer.fs line 237).
+- **Trade-off:** None — this matches the grammar. To use the literal name `out` it must be delimited (`"out"`).
 
 ## `VALUE_OF(x)` without `AT` is rejected
 

@@ -28,6 +28,11 @@ module ExpressionParser =
     let pRowPatternCommon, pRowPatternCommonRef =
         createParserForwardedToRef<RowPatternCommon, unit> ()
 
+    // 6.35 <datetime value expression> — forward ref. Defined after pTimeZoneSuffix,
+    // but needed by the 6.37 <interval value expression> 4th alternative above.
+    let pDatetimeValueExpression, pDatetimeValueExpressionRef =
+        createParserForwardedToRef<Expression, unit> ()
+
     // 6.43 <multiset value expression> / 6.44 <multiset set function> — forward ref.
     // Defined after pValueExpressionPrimary, but needed by the 6.44 SET (...) parser
     // (which is itself a <value expression primary>), hence the indirection.
@@ -755,7 +760,7 @@ module ExpressionParser =
     // <interval qualifier> follows the closing paren.
     let pIntervalValueExpression =
         attempt (
-            between (token (pstring "(")) (token (pstring ")")) pExpression
+            between (token (pstring "(")) (token (pstring ")")) pDatetimeValueExpression
             .>>. pIntervalQualifier
             >>= fun (e, qualifier) ->
                 match e.Kind with
@@ -1681,6 +1686,24 @@ module ExpressionParser =
         |>> fun ((operand, typ), (name, args)) -> GeneralizedInvocation(operand, typ, name, args)
         |> withExprPosition
 
+    // 7.1 <explicit row value constructor> ::= ( <row value constructor element> <comma>
+    //     <row value constructor element list> ) | ROW ( <row value constructor element list> )
+    // The parenthesized form requires at least two elements (one element is just a
+    // parenthesized <value expression>), so `attempt` backtracks on `(a)` and lets the
+    // plain parenthesized branch of pValueExpressionPrimary below handle it.
+    let pExplicitRowValueConstructor =
+        attempt (
+            between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (pExpression .>>. many1 (token (pstring ",") >>. pExpression))
+            |>> fun (first, rest) -> RowValueConstructor(first :: rest)
+        )
+        <|> (pKeyword "ROW"
+             >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ",")))
+             |>> RowValueConstructor)
+        |> withExprPosition
+
     // — the atomic building block of every <value expression>, used as the term parser of the operator-precedence parser below.
     // 6.3 <value expression primary> — the atomic building block of every <value expression>
     let pValueExpressionPrimary =
@@ -1741,9 +1764,12 @@ module ExpressionParser =
               attempt pQuantifiedSubqueryTerm
               attempt pGeneralizedInvocation
               attempt pIntervalValueExpression
+              attempt pExplicitRowValueConstructor
               pColumnReferenceExpr
               between (token (pstring "(")) (token (pstring ")")) pExpression ]
-        .>>. many (attempt pDereferenceReference <|> pMethodOrFieldReference)
+        // The postfix loop must be able to leave a '.' behind (e.g. the `.*` of
+        // <all fields reference>, 7.16), so both alternatives are backtracking.
+        .>>. many (attempt pDereferenceReference <|> attempt pMethodOrFieldReference)
         |>> fun (e, refs) -> List.fold (fun acc f -> f acc) e refs
 
     // 6.43 <multiset value expression>
@@ -1795,18 +1821,102 @@ module ExpressionParser =
         (pValueExpressionPrimary .>>. many (attempt pMultisetSetOperatorSuffix)
          |>> fun (first, rest) -> rest |> List.fold (fun acc f -> f acc) first)
 
+    // 6.37 <interval primary> ::= <value expression primary> [ <interval qualifier> ]
+    //     | <interval value function>
+    // A qualifier-less <interval primary> is represented by its <value expression primary>,
+    // so wrapping only happens when an <interval qualifier> is actually present.
+    let pIntervalPrimary =
+        (pValueExpressionPrimary .>>. opt (attempt pIntervalQualifier))
+        |>> fun (e, qualifier) ->
+            match qualifier with
+            | Some qual ->
+                { Expression.Kind = IntervalPrimary(e, qual)
+                  Pos = e.Pos }
+            | None -> e
+
     // 6.35 <time zone> ::= AT <time zone specifier>
     //   <time zone specifier> ::= LOCAL | TIME ZONE <interval primary>
     let pTimeZoneSuffix =
         pKeyword "AT"
         >>. choice
                 [ pKeyword "LOCAL" >>% TimeZoneSpecifier.TimeZoneLocal
-                  pKeyword "TIME" >>. pKeyword "ZONE" >>. pValueExpressionPrimary
+                  pKeyword "TIME" >>. pKeyword "ZONE" >>. pIntervalPrimary
                   |>> TimeZoneSpecifier.TimeZoneOffset ]
         |>> fun spec ->
             fun e ->
                 { Expression.Kind = AtTimeZone(e, spec)
                   Pos = e.Pos }
+
+    // 6.37 <interval factor> ::= [ <sign> ] <interval primary>
+    // The '-' alternative must not swallow the start of the '->' dereference operator.
+    let pIntervalSign =
+        (pchar '-' .>> notFollowedBy (pchar '>') .>> ws >>% false)
+        <|> (pchar '+' .>> ws >>% true)
+
+    // 6.37 <interval term> ::= <interval factor>
+    //     | <interval term> <asterisk> <factor>
+    //     | <interval term> <solidus> <factor>
+    //     | <term> <asterisk> <interval factor>
+    // The <factor> operand of the '*'/'/' forms is approximated by an <interval factor>
+    // (see docs/trade-off.md).
+    let pIntervalTerm =
+        let pMul =
+            (attempt (pchar '*' .>> ws))
+            >>% fun l r ->
+                { Expression.Kind = BinaryOp(Multiply, l, r)
+                  Pos = l.Pos }
+
+        let pDiv =
+            (attempt (pchar '/' .>> ws))
+            >>% fun l r ->
+                { Expression.Kind = BinaryOp(Divide, l, r)
+                  Pos = l.Pos }
+
+        let pFactor =
+            (opt (attempt pIntervalSign) .>>. pIntervalPrimary)
+            |>> fun (sign, e) ->
+                match sign with
+                | Some true ->
+                    { Expression.Kind = UnaryOp(UnaryOperator.Plus, e)
+                      Pos = e.Pos }
+                | Some false ->
+                    { Expression.Kind = UnaryOp(UnaryOperator.Minus, e)
+                      Pos = e.Pos }
+                | None -> e
+
+        chainl1 pFactor (pMul <|> pDiv)
+
+    // 6.35 <datetime term> ::= <datetime factor>
+    //   <datetime factor> ::= <datetime primary> [ <time zone> ]
+    //   <datetime primary> ::= <value expression primary> | <datetime value function>
+    // (<datetime value function> is one of the pValueExpressionPrimary alternatives.)
+    let pDatetimeTerm =
+        (pValueExpressionPrimary .>>. opt (attempt pTimeZoneSuffix))
+        |>> fun (e, timeZone) ->
+            match timeZone with
+            | Some applyTimeZone -> applyTimeZone e
+            | None -> e
+
+    // 6.35 <datetime value expression> ::= <datetime term>
+    //     | <interval value expression> <plus sign> <datetime term>
+    //     | <datetime value expression> <plus sign> <interval term>
+    //     | <datetime value expression> <minus sign> <interval term>
+    // Left-folded so that 'a + b - c' associates to the left. The right-hand operand may be
+    // an <interval term> or a <datetime term> — the two are syntactically indistinguishable.
+    pDatetimeValueExpressionRef.Value <-
+        (let pOperator =
+            (attempt (pchar '+' .>> ws) >>% BinaryOperator.Add)
+            <|> (pchar '-' .>> notFollowedBy (pchar '>') .>> ws >>% BinaryOperator.Subtract)
+
+         pDatetimeTerm
+         .>>. many (attempt (pOperator .>>. (attempt pIntervalTerm <|> pDatetimeTerm))))
+        |>> fun (first, rest) ->
+            rest
+            |> List.fold
+                (fun acc (op, rhs) ->
+                    { Expression.Kind = BinaryOp(op, acc, rhs)
+                      Pos = acc.Pos })
+                first
 
     // 6.5 <default specification> ::= DEFAULT — only valid in specific contexts (INSERT VALUES, UPDATE SET), not as a general expression. This parser is used by the DML parser for those contexts.
     let pDefaultValue: Parser<Expression, unit> =
@@ -2090,6 +2200,8 @@ module ExpressionParser =
             || containsStandaloneQuantifiedSubquery count
         | DatetimeDifference(l, r, _) ->
             containsStandaloneQuantifiedSubquery l || containsStandaloneQuantifiedSubquery r
+        | IntervalPrimary(x, _) -> containsStandaloneQuantifiedSubquery x
+        | RowValueConstructor items -> List.exists containsStandaloneQuantifiedSubquery items
         | MultisetSetOperation(_, _, l, r) ->
             containsStandaloneQuantifiedSubquery l || containsStandaloneQuantifiedSubquery r
         | MultisetSetFunction x -> containsStandaloneQuantifiedSubquery x

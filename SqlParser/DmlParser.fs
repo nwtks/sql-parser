@@ -19,8 +19,8 @@ module DmlParser =
     //     FROM <point in time 1> TO <point in time 2>
     let pPortionOf =
         pKeyword "FOR" >>. pKeyword "PORTION" >>. pKeyword "OF" >>. pIdentifierExpr
-        .>>. (pKeyword "FROM" >>. (pValueExpressionNoBoolean .>> ws))
-        .>>. (pKeyword "TO" >>. (pValueExpressionNoBoolean .>> ws))
+        .>>. (pKeyword "FROM" >>. (pDatetimeValueExpression .>> ws))
+        .>>. (pKeyword "TO" >>. (pDatetimeValueExpression .>> ws))
         |>> fun ((period, fromPoint), toPoint) ->
             { PeriodName = period
               From = fromPoint
@@ -37,6 +37,16 @@ module DmlParser =
                  |>> fun c -> Some c, None
              )
              <|> (pExpression |>> fun e -> None, Some e))
+
+    // 14.8/14.9/14.13/14.14 <target table> ::= <table name> | ONLY ( <table name> )
+    // Returns (name, isOnly).
+    let pTargetTable =
+        attempt (
+            pKeyword "ONLY"
+            >>. between (token (pstring "(")) (token (pstring ")")) pQualifiedNameExpr
+            |>> fun name -> (name, true)
+        )
+        <|> (pQualifiedNameExpr |>> fun name -> (name, false))
 
     // 14.11 <insert statement> ::= INSERT INTO <insertion target> <insert columns and source>
     // 14.11 <insertion target> ::= <table name>
@@ -111,19 +121,20 @@ module DmlParser =
             pIdentifierExpr .>> token (pstring "=") .>>. (pDefaultValue <|> pExpression)
             |>> SingleSet)
 
-        pKeyword "UPDATE" >>. pQualifiedNameExpr
+        pKeyword "UPDATE" >>. pTargetTable
         .>>. opt (attempt pPortionOf)
         .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
         .>> pKeyword "SET"
         .>>. sepBy1 pSetClause (token (pstring ","))
         .>>. opt pWhereClause
-        |>> fun ((((table, portion), alias), sets), whr) ->
+        |>> fun (((((table, isOnly), portion), alias), sets), whr) ->
             let cursor, where =
                 match whr with
                 | Some(c, w) -> c, w
                 | None -> None, None
 
             { Table = table
+              TableIsOnly = isOnly
               TableAlias = alias
               Set = sets
               Where = where
@@ -136,17 +147,18 @@ module DmlParser =
     //     [ FOR PORTION OF <application time period name> FROM <point in time 1> TO <point in time 2> ]
     //     [ [ AS ] <correlation name> ] [ WHERE <search condition> ]
     let pDeleteStatement =
-        pKeyword "DELETE" >>. pKeyword "FROM" >>. pQualifiedNameExpr
+        pKeyword "DELETE" >>. pKeyword "FROM" >>. pTargetTable
         .>>. opt (attempt pPortionOf)
         .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
         .>>. opt pWhereClause
-        |>> fun (((table, portion), alias), whr) ->
+        |>> fun ((((table, isOnly), portion), alias), whr) ->
             let cursor, where =
                 match whr with
                 | Some(c, w) -> c, w
                 | None -> None, None
 
             { Table = table
+              TableIsOnly = isOnly
               TableAlias = alias
               Where = where
               PortionOf = portion
@@ -197,15 +209,16 @@ module DmlParser =
                   Condition = filter
                   Action = action }
 
-        pKeyword "MERGE" >>. pKeyword "INTO" >>. pQualifiedNameExpr
+        pKeyword "MERGE" >>. pKeyword "INTO" >>. pTargetTable
         .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
         .>> pKeyword "USING"
         .>>. pTableReference
         .>> pKeyword "ON"
         .>>. pExpression
         .>>. many1 pWhenMatch
-        |>> fun ((((target, alias), source), on), whens) ->
+        |>> fun (((((target, targetIsOnly), alias), source), on), whens) ->
             { Target = target
+              TargetIsOnly = targetIsOnly
               TargetAlias = alias
               Source = source
               On = on

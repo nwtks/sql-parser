@@ -680,6 +680,43 @@ let ``Empty collection specification verification`` () =
     | res -> Assert.Fail(sprintf "Expected ArrayConstructor [1], got %A" res)
 
 [<Fact>]
+let ``Row value constructor verification`` () =
+    // 7.1 <explicit row value constructor> ::= ( <row value constructor element> <comma>
+    //     <row value constructor element list> ) | ROW ( <row value constructor element list> )
+    match parse "SELECT (1, 2)" with
+    | RowValueConstructor [ { Kind = Literal(Number 1m) }; { Kind = Literal(Number 2m) } ] -> ()
+    | res -> Assert.Fail(sprintf "Expected (1, 2), got %A" res)
+
+    match parse "SELECT ROW(a, b, 3)" with
+    | RowValueConstructor [ { Kind = Identifier "A" }; { Kind = Identifier "B" }; { Kind = Literal(Number 3m) } ] -> ()
+    | res -> Assert.Fail(sprintf "Expected ROW(a, b, 3), got %A" res)
+
+    // ROW ( ) takes a one-element list; the parenthesized form needs two elements.
+    match parse "SELECT ROW(a)" with
+    | RowValueConstructor [ { Kind = Identifier "A" } ] -> ()
+    | res -> Assert.Fail(sprintf "Expected ROW(a), got %A" res)
+
+    // A one-element parenthesized expression is not a row value constructor.
+    match parse "SELECT (a)" with
+    | Identifier "A" -> ()
+    | res -> Assert.Fail(sprintf "Expected a, got %A" res)
+
+    // 8.2 <comparison predicate> — <row value predicand> on both sides.
+    match parse "SELECT (1, 2) = (3, 4)" with
+    | BinaryOp(Equal, { Kind = RowValueConstructor [ _; _ ] }, { Kind = RowValueConstructor [ _; _ ] }) -> ()
+    | res -> Assert.Fail(sprintf "Expected row comparison, got %A" res)
+
+    // 8.4 <in predicate> — an <in predicate value list> of row value constructors.
+    match parse "SELECT (1, 2) IN ((1, 2), (3, 4))" with
+    | InList(_, false, [ { Kind = RowValueConstructor [ _; _ ] }; { Kind = RowValueConstructor [ _; _ ] } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected row IN list, got %A" res)
+
+[<Fact>]
+let ``Row value constructor invalid forms are rejected`` () =
+    parseFails "SELECT ROW()"
+    parseFails "SELECT ROW(a,)"
+
+[<Fact>]
 let ``MULTISET set operations verification`` () =
     match parse "SELECT m1 MULTISET UNION ALL m2" with
     | MultisetSetOperation(MultisetUnion, Some true, { Kind = Identifier "M1" }, { Kind = Identifier "M2" }) -> ()

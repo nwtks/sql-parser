@@ -10,6 +10,9 @@ A SQL parser implemented in F# using [FParsec](https://www.quanttec.com/fparsec/
 - **Set Operations**: `UNION`, `INTERSECT`, `EXCEPT` (with `ALL`/`DISTINCT` and `CORRESPONDING`).
 - **Window Functions**: Full support for `OVER` clauses, partition by, order by, and frame definitions (`ROWS`/`RANGE` between boundaries).
 - **Common Table Expressions (CTEs)**: Support for `WITH` and `WITH RECURSIVE`.
+- **Row Value Constructors**: `(e1, e2, ...)` and `ROW(e1, ...)` as expressions, so row comparisons (`(a, b) = (c, d)`) and row `IN` lists work.
+- **Select List**: `*`, `t.*`, `t.* AS (cols)`, and the general `<all fields reference>` (`(a + b).*`, `f(x).* AS (cols)`).
+- **Table References**: `ONLY ( t ) [ AS alias [ (cols) ] ]`, `FOR SYSTEM_TIME AS OF | BETWEEN [SYMMETRIC|ASYMMETRIC] ... AND ... | FROM ... TO ...` (point-in-time expressions support `+`/`-` with intervals and `AT TIME ZONE`), `UNNEST ... [WITH ORDINALITY]`, `TABLE (...)`, `LATERAL (...)`, `TABLESAMPLE`, data-change delta tables (`FINAL|NEW|OLD TABLE ( <dml statement> ) [ AS alias [ (cols) ] ]`), and `MATCH_RECOGNIZE`.
 
 ### 📝 Data Manipulation (DML)
 - `INSERT INTO ... VALUES / SELECT`
@@ -17,6 +20,8 @@ A SQL parser implemented in F# using [FParsec](https://www.quanttec.com/fparsec/
 - `DELETE FROM ... WHERE`
 - `MERGE INTO ... USING ... ON ...`
 - `TRUNCATE TABLE`
+- `<target table>` accepts `ONLY ( <table> )`: `UPDATE ONLY (t) ...`, `DELETE FROM ONLY (t) ...`, `MERGE INTO ONLY (t) ...`.
+- `FOR PORTION OF <period> FROM <point in time> TO <point in time>` for `UPDATE` / `DELETE`.
 
 ### ↕️ Cursors & Locators
 - `DECLARE <cursor> [SENSITIVE|INSENSITIVE|ASENSITIVE] [SCROLL|NO SCROLL] CURSOR [WITH|WITHOUT HOLD] [WITH|WITHOUT RETURN] FOR <query expression> [FOR READ ONLY | FOR UPDATE [OF <columns>]]`.

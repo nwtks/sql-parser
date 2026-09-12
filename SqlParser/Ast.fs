@@ -186,6 +186,8 @@ and ExpressionKind =
     | Case of Expression option * (Expression * Expression) list * Expression option
     // 7.19 <scalar subquery> ::= <subquery>
     | SubqueryExpression of Query
+    // 7.1 <explicit row value constructor> ::= ( <row value constructor element> <comma> <list> ) | ROW ( <list> )
+    | RowValueConstructor of Expression list
     // 7.16 <asterisk> ::= *
     | Star
     // 7.16 <qualified asterisk> ::= <identifier chain> . *
@@ -358,6 +360,10 @@ and ExpressionKind =
     | AtTimeZone of Expression * TimeZoneSpecifier
     // 6.37 <interval value expression> ::= ... | ( <datetime value expression> <minus sign> <datetime term> ) <interval qualifier>
     | DatetimeDifference of Expression * Expression * IntervalQualifier
+    // 6.37 <interval primary> ::= <value expression primary> [ <interval qualifier> ]
+    // Only built when an <interval qualifier> is present; a qualifier-less
+    // <interval primary> is represented by its <value expression primary>.
+    | IntervalPrimary of Expression * IntervalQualifier
     // 6.41 <trim array function> ::= TRIM_ARRAY ( <array value expression> , <numeric value expression> )
     | TrimArray of Expression * Expression
     // 6.43 <multiset value expression> ::= ... MULTISET { UNION | INTERSECT | EXCEPT } [ ALL | DISTINCT ] ...
@@ -837,9 +843,14 @@ and Cte =
       CycleClause: CycleClause option }
 
 // 7.6 <query system time period specification>
+// <query system time period specification> ::= FOR SYSTEM_TIME BETWEEN [ ASYMMETRIC | SYMMETRIC ] <p1> AND <p2>
+and SystemTimeSymmetry =
+    | Symmetric
+    | Asymmetric
+
 and SystemTimeSpec =
     | AsOf of Expression
-    | Between of Expression * Expression
+    | Between of Expression * Expression * SystemTimeSymmetry option
     | FromTo of Expression * Expression
 
 // 7.6 <result option> ::= FINAL | NEW | OLD
@@ -857,11 +868,11 @@ and TableSourceKind =
     | Lateral of Query * Expression * Expression list option
     | Unnest of Expression * bool * Expression * Expression list option
     | TableSample of TableSource * string * Expression * Expression option
-    | Only of Expression
+    | Only of Expression * Expression option * Expression list option
     | SystemTime of TableSource * SystemTimeSpec
     | TableFunction of Expression * Expression option * Expression list option
     | PtfTable of Expression * Expression option * Expression list option
-    | DataChangeDelta of ResultOption * StatementKind
+    | DataChangeDelta of ResultOption * StatementKind * Expression option * Expression list option
     // 7.11 <JSON table> <correlation or recognition>
     | JsonTable of JsonTableStatement * (Expression * Expression list option) option
     // 7.11 <JSON table primitive> <correlation name>
@@ -959,6 +970,8 @@ and PortionOfSpec =
 // 14.14 <update statement: searched> ::= UPDATE <target table> SET <set clause list> [ WHERE <search condition> ]
 and UpdateStatement =
     { Table: Expression
+      // 14.8/14.9 <target table> ::= <table name> | ONLY ( <table name> )
+      TableIsOnly: bool
       TableAlias: Expression option
       Set: SetClause list
       Where: Expression option
@@ -968,6 +981,8 @@ and UpdateStatement =
 // 14.9 <delete statement: searched> ::= DELETE FROM <target table> [ WHERE <search condition> ]
 and DeleteStatement =
     { Table: Expression
+      // 14.8/14.9 <target table> ::= <table name> | ONLY ( <table name> )
+      TableIsOnly: bool
       TableAlias: Expression option
       Where: Expression option
       PortionOf: PortionOfSpec option
@@ -994,6 +1009,8 @@ and MergeWhenClause =
 // 14.12 <merge statement> ::= MERGE INTO <target> [ [ AS ] <alias> ] USING <source> ON <search condition> <merge when clause>...
 and MergeStatement =
     { Target: Expression
+      // 14.12 <target table> ::= <table name> | ONLY ( <table name> )
+      TargetIsOnly: bool
       TargetAlias: Expression option
       Source: TableSource
       On: Expression

@@ -99,14 +99,26 @@ let ``ONLY table reference verification`` () =
     match parse "SELECT * FROM ONLY (users)" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = Only({ Kind = Identifier "USERS" }) } ] -> ()
+        | [ { Kind = Only({ Kind = Identifier "USERS" }, None, None) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected Only, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
-    match parse "SELECT * FROM ONLY (app.users) AS u" with
+    // 7.6 <only spec> [ <correlation or recognition> ] — the correlation name is kept.
+    match parse "SELECT * FROM ONLY (app.users) AS u (a, b)" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = Only({ Kind = ColumnReference [ "APP"; "USERS" ] }) } ] -> ()
+        | [ { Kind = Only(name, alias, cols) } ] ->
+            match name with
+            | { Kind = ColumnReference [ "APP"; "USERS" ] } -> ()
+            | res -> Assert.Fail(sprintf "Expected ONLY name, got %A" res)
+
+            match alias with
+            | Some { Kind = Identifier "U" } -> ()
+            | res -> Assert.Fail(sprintf "Expected ONLY alias U, got %A" res)
+
+            match cols with
+            | Some [ { Kind = Identifier "A" }; { Kind = Identifier "B" } ] -> ()
+            | res -> Assert.Fail(sprintf "Expected ONLY column list, got %A" res)
         | res -> Assert.Fail(sprintf "Expected Only with alias, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
@@ -135,11 +147,69 @@ let ``FOR SYSTEM_TIME verification`` () =
         | res -> Assert.Fail(sprintf "Expected SystemTime AsOf, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
+    // 6.35 <datetime value expression> — arithmetic on a point in time.
+    match parse "SELECT * FROM t FOR SYSTEM_TIME AS OF CURRENT_DATE - INTERVAL '1' DAY" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = SystemTime(_, SystemTimeSpec.AsOf e) } ] ->
+            match e.Kind with
+            | BinaryOp(Subtract, _, _) -> ()
+            | res -> Assert.Fail(sprintf "Expected datetime arithmetic, got %A" res)
+        | res -> Assert.Fail(sprintf "Expected SystemTime AsOf, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    // 6.37 <interval primary> — a parameter qualified by an <interval qualifier>.
+    match parse "SELECT * FROM t FOR SYSTEM_TIME AS OF CURRENT_DATE - ? DAY" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = SystemTime(_, SystemTimeSpec.AsOf e) } ] ->
+            match e.Kind with
+            | BinaryOp(Subtract, _, { Kind = IntervalPrimary(_, _) }) -> ()
+            | res -> Assert.Fail(sprintf "Expected IntervalPrimary point in time, got %A" res)
+        | res -> Assert.Fail(sprintf "Expected SystemTime AsOf, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    // 6.37 <interval factor> ::= [ <sign> ] <interval primary>
+    match parse "SELECT * FROM t FOR SYSTEM_TIME AS OF CURRENT_DATE + -INTERVAL '1' DAY" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = SystemTime(_, SystemTimeSpec.AsOf e) } ] ->
+            match e.Kind with
+            | BinaryOp(Add, _, { Kind = UnaryOp(Minus, _) }) -> ()
+            | res -> Assert.Fail(sprintf "Expected signed interval, got %A" res)
+        | res -> Assert.Fail(sprintf "Expected SystemTime AsOf, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    // 6.35 <time zone> ::= AT <time zone specifier>
+    match parse "SELECT * FROM t FOR SYSTEM_TIME AS OF CURRENT_TIMESTAMP AT TIME ZONE INTERVAL '1' HOUR" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = SystemTime(_, SystemTimeSpec.AsOf e) } ] ->
+            match e.Kind with
+            | AtTimeZone(_, TimeZoneSpecifier.TimeZoneOffset _) -> ()
+            | res -> Assert.Fail(sprintf "Expected AT TIME ZONE point in time, got %A" res)
+        | res -> Assert.Fail(sprintf "Expected SystemTime AsOf, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
     match parse "SELECT * FROM t FOR SYSTEM_TIME BETWEEN '2020-01-01' AND '2020-02-01'" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = SystemTime(_, SystemTimeSpec.Between(_, _)) } ] -> ()
+        | [ { Kind = SystemTime(_, SystemTimeSpec.Between(_, _, None)) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected SystemTime Between, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    match parse "SELECT * FROM t FOR SYSTEM_TIME BETWEEN SYMMETRIC '2020-01-01' AND '2020-02-01'" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = SystemTime(_, SystemTimeSpec.Between(_, _, Some SystemTimeSymmetry.Symmetric)) } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected SystemTime Between Symmetric, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    match parse "SELECT * FROM t FOR SYSTEM_TIME BETWEEN ASYMMETRIC '2020-01-01' AND '2020-02-01'" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = SystemTime(_, SystemTimeSpec.Between(_, _, Some SystemTimeSymmetry.Asymmetric)) } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected SystemTime Between Asymmetric, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
     match parse "SELECT * FROM t FOR SYSTEM_TIME FROM '2020-01-01' TO '2020-02-01'" with
@@ -150,26 +220,48 @@ let ``FOR SYSTEM_TIME verification`` () =
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
+let ``FOR SYSTEM_TIME point in time rejects non datetime operators`` () =
+    parseFails "SELECT * FROM t FOR SYSTEM_TIME AS OF a * b"
+    parseFails "SELECT * FROM t FOR SYSTEM_TIME AS OF a || b"
+    parseFails "SELECT * FROM t FOR SYSTEM_TIME AS OF a = b"
+
+[<Fact>]
 let ``Data change delta table verification`` () =
     match parse "SELECT * FROM NEW TABLE (INSERT INTO t VALUES (1))" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = DataChangeDelta(ResultOption.New, Insert _) } ] -> ()
+        | [ { Kind = DataChangeDelta(ResultOption.New, Insert _, None, None) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected DataChangeDelta New, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
     match parse "SELECT * FROM OLD TABLE (DELETE FROM t WHERE id = 1)" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = DataChangeDelta(ResultOption.Old, Delete _) } ] -> ()
+        | [ { Kind = DataChangeDelta(ResultOption.Old, Delete _, None, None) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected DataChangeDelta Old, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
     match parse "SELECT * FROM FINAL TABLE (UPDATE t SET id = 1)" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = DataChangeDelta(ResultOption.Final, Update _) } ] -> ()
+        | [ { Kind = DataChangeDelta(ResultOption.Final, Update _, None, None) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected DataChangeDelta Final, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    // 7.6 <data change delta table> [ <correlation or recognition> ] — the correlation
+    // name is kept.
+    match parse "SELECT * FROM OLD TABLE (DELETE FROM t WHERE id = 1) AS d (x)" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = DataChangeDelta(ResultOption.Old, Delete _, alias, cols) } ] ->
+            match alias with
+            | Some { Kind = Identifier "D" } -> ()
+            | res -> Assert.Fail(sprintf "Expected delta alias D, got %A" res)
+
+            match cols with
+            | Some [ { Kind = Identifier "X" } ] -> ()
+            | res -> Assert.Fail(sprintf "Expected delta column list, got %A" res)
+        | res -> Assert.Fail(sprintf "Expected DataChangeDelta with alias, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
@@ -199,6 +291,23 @@ let ``All fields reference verification`` () =
                                                Some [ { Kind = Identifier "X" } ]) },
                    None) ] -> ()
         | res -> Assert.Fail(sprintf "Expected AllFieldsReference qualified, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    // 7.16 <all fields reference> ::= <value expression primary> <period> <asterisk>
+    //     [ AS ( <all fields column name list> ) ]
+    match parse "SELECT (a + b).* FROM t" with
+    | Select(SelectQuery s) ->
+        match s.Columns with
+        | [ Column({ Kind = AllFieldsReference({ Kind = BinaryOp(Add, _, _) }, None) }, None) ] -> ()
+        | res -> Assert.Fail(sprintf "Expected AllFieldsReference for (a + b).*, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    match parse "SELECT f(x).* AS (y) FROM t" with
+    | Select(SelectQuery s) ->
+        match s.Columns with
+        | [ Column({ Kind = AllFieldsReference({ Kind = FunctionCall _ }, Some [ { Kind = Identifier "Y" } ]) }, None) ] ->
+            ()
+        | res -> Assert.Fail(sprintf "Expected AllFieldsReference for f(x).*, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
