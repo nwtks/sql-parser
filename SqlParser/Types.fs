@@ -144,6 +144,12 @@ module Types =
     let pDataTypeElement, pDataTypeElementRef =
         createParserForwardedToRef<DataType, unit> ()
 
+    // 6.1 <scope clause> ::= SCOPE <table name>
+    // Shared by <reference type> (6.1), <column option list> (11.3) and
+    // <add column scope clause> (11.17); it lives here because Types.fs is
+    // compiled before DdlParser.fs.
+    let pScopeClause: Parser<Expression, unit> = pKeyword "SCOPE" >>. pQualifiedNameExpr
+
     // 6.1 <collection type> ::= <array type> | <multiset type> — <array type> ::= <data type> ARRAY [ [ <maximum cardinality> ] ] — <multiset type> ::= <data type> MULTISET
     // The suffixes are applied left-to-right and may nest (`INT ARRAY ARRAY` =
     // `ArrayType(ArrayType(Integer, None), None)`), because <data type> on the left of
@@ -176,7 +182,7 @@ module Types =
               // <path-resolved user-defined type name> fallback below)
               attempt (
                   pKeyword "REF" >>. between (token (pstring "(")) (token (pstring ")")) pDataType
-                  .>>. opt (pKeyword "SCOPE" >>. pQualifiedNameExpr)
+                  .>>. opt pScopeClause
                   |>> fun (t, scope) -> ReferenceType(t, scope)
               )
               // 6.1 <path-resolved user-defined type name> ::= [ <schema name> <period> ] <qualified identifier>

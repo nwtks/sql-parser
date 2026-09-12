@@ -511,11 +511,17 @@ The original `pColumnReferenceExpr` used `sepBy1 pIdentifier (attempt (token "."
 
 - **Trade-off:** The rewrite is the correct `sepBy1`-equivalent (separator parses only the `.`), and the `notFollowedBy "("` keeps `a.b.c(x)` from being misread as a column reference (it becomes a method invocation). This was a latent bug exposed by the method-invocation work.
 
-## Typed tables / views keep only `OfType`
+## Typed tables / views surface `OfType`, `Under` and the element lists (11.3 / 11.32)
 
-`<typed table clause> ::= OF <UDT name> [ UNDER <supertable> ]` and `<referenceable view specification> ::= OF <UDT name> [ UNDER <supertable> ]`. `CreateTableStatement.OfType` and `CreateViewStatement.OfType` are `Expression option`; the `UNDER <supertable>` part is parsed and discarded.
+`<typed table clause> ::= OF <UDT name> [ <subtable clause> ] [ <typed table element list> ]` and `<referenceable view specification> ::= OF <UDT name> [ <subview clause> ] [ <view element list> ]`. `CreateTableStatement` and `CreateViewStatement` both carry `OfType: Expression option` and `Under: Expression option`, plus `TypedElements: TypedTableElement list` / `ViewElements: ViewElement list` (an empty list means the element list is absent, mirroring `Columns` / `Periods`).
 
-- **Trade-off:** The supertable is not surfaced in the AST (no consumer yet). `pCreateTableStatement`'s content-source alternatives now produce a 4-tuple `(elems, asCols, asQuery, ofType)` with the typed-table clause as the fourth alternative; `pCreateViewStatement`'s `pViewSpecification` is `Choice1Of2 (column list) | Choice2Of2 (OF type)`.
+- **Trade-off:** `<column options>` (`<column name> WITH OPTIONS <column option list>`) has **no data type** — the UDT supplies it — so it is its own record (`ColumnOptions`) rather than a `ColumnDefinition`. The same holds for `<view column option>` (`ViewColumnOptions`), whose `<scope clause>` is mandatory (unlike 11.3's optional one).
+- **Trade-off:** `TypedTableElement` / `ViewElement` are DUs rather than the `Choice<...>`-plus-separate-lists style used by `<table element>` (11.3), because splitting the elements into separate fields would lose their order.
+- **Trade-off:** `<typed table element>` needs no lookahead: a `<column options>` element is recognised by the mandatory `WITH OPTIONS` after the column name (`OPTIONS` is *not* a reserved word), while `<self-referencing column specification>` and `<table constraint definition>` start with reserved words (`REF`/`CONSTRAINT`/`PRIMARY`/`UNIQUE`/`FOREIGN`/`CHECK`) that `pIdentifierExpr` rejects. Every alternative is nevertheless `attempt`ed.
+- **Trade-off:** `<reference generation>` is modelled by `ReferenceGeneration = SystemGenerated | UserGenerated | Derived`. `DERIVED` is not a reserved word, so `(REF IS derived)` parses as a column named `DERIVED` with no generation, while `(REF IS r DERIVED)` is generation `DERIVED`.
+- **Trade-off:** `pCreateTableStatement`'s content-source alternatives now produce a 6-tuple `(elems, asCols, asQuery, ofType, under, typedElements)`; `pCreateViewStatement`'s `pViewSpecification` is `Choice1Of2 (column list) | Choice2Of2 ((OF type, UNDER superview), view elements option)`.
+- **Trade-off:** the two `pCreateTableStatement`-internal parsers `<reference generation>` / `<self-referencing column specification>` were hoisted to module level in `DdlParser.fs` so 11.32 can reuse them.
+- **Trade-off:** `<scope clause>` (6.1) is now one parser, `pScopeClause`, shared by `<reference type>` (6.1), `<column option list>` (11.3) and `<add column scope clause>` (11.17). It lives in `Types.fs`, not `DdlParser.fs`, because the compile order requires `Types.fs` first.
 
 ## `REF(type)` data type
 
@@ -767,7 +773,6 @@ The `[ <default clause> | <identity column specification> | <generation clause> 
 - **Trade-off:** `pTimePeriodSpecification` / `pTablePeriodDefinition` moved above `pCreateTableStatement` so `<table period definition>` can be a table element; `pAddSystemTimePeriodColumnList` (11.27) stayed put because it only depends on `pColumnDefinition`.
 - **Trade-off:** `WITH SYSTEM VERSIONING` and `ON COMMIT ... ROWS` are `attempt`ed suffixes, because `WITH` also starts `<with or without data>` and `ON` is a join keyword.
 - **Trade-off:** The `<like option>` keywords are `INCLUDING` / `EXCLUDING` + `IDENTITY` / `DEFAULTS` / `GENERATED`. Only `IDENTITY` is reserved; `LIKE` is reserved, so `pColumnDefinition` can never swallow a `<like clause>`.
-- **Not modelled:** `<typed table element list>` (`OF <UDT> ( <table element>... )`) and `<view element list>` (11.32) remain unsupported.
 
 ## `<with or without data>` is mandatory (11.3)
 

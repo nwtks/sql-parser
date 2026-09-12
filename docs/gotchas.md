@@ -501,6 +501,26 @@ Moving `ColumnConstraintKind` from `DdlParser.fs` into `Ast.fs` widened its scop
 
 F# provides `Choice1Of4`…`Choice4Of4`. The four-way choice keeps `<column definition>`, `<table period definition>`, `<table constraint definition>` and `<like clause>` distinguishable; nesting two `Choice` levels of the same arity would not.
 
+## `<scope clause>` lives in `Types.fs`, not `DdlParser.fs`
+
+`pScopeClause` (6.1 `<scope clause> ::= SCOPE <table name>`) is needed by `<reference type>` (6.1), `<column option list>` (11.3) and `<add column scope clause>` (11.17). `SqlParser.fsproj` compiles `Types.fs` before `DdlParser.fs`, and `DdlParser` opens `SqlParser.Types`, so `Types.fs` is the only home all three can reach — do not move it next to the 11.3 parsers.
+
+## Productions shared by 11.3 and 11.32 must be module-level in `DdlParser.fs`
+
+`pReferenceGeneration` and `pSelfReferencingColumn` were first written inside `pCreateTableStatement`, but 11.32's `<view element>` needs the same production. They are now declared above `pCreateTableStatement`. `pCreateTableStatement`'s other `let` bindings stay local on purpose — a binding that only 11.3 uses cannot be reached from `pCreateViewStatement` either way, so hoist deliberately.
+
+## `OPTIONS` is not a reserved word — `<column options>` is recognised by `WITH OPTIONS`
+
+`pRegularIdentifier` rejects only the entries of `Lexer.reservedWords`, and `OPTIONS`, `DERIVED`, `GENERATED` and `UNDER` are not in it. So a `<typed table element>` cannot be dispatched on its first token: `<column options>` is recognised only once the mandatory `WITH OPTIONS` has been consumed. `<self-referencing column specification>` (`REF IS`) and `<table constraint definition>` (`CONSTRAINT` / `PRIMARY` / `UNIQUE` / `FOREIGN` / `CHECK`) do start with reserved words and fail cleanly on an identifier — but every alternative still needs `attempt`, because the `<column options>` branch consumes the column name before failing on a missing `WITH`.
+
+## `<view column option>` has a mandatory `<scope clause>`
+
+11.32's `<view column option> ::= <column name> WITH OPTIONS <scope clause>` has no optional brackets, unlike 11.3's `<column option list> ::= [ <scope clause> ] [ <default clause> ] [ <column constraint definition>... ]`. `ViewColumnOptions.Scope` is therefore an `Expression`, not an `Expression option`, and `CREATE VIEW v OF my_type (a WITH OPTIONS DEFAULT 5) AS ...` is rejected (with an error pointing at `AS`, since the `<view element list>` is simply not consumed).
+
+## `.>>.` produces nested 2-tuples — destructure `((a, b), c)`
+
+`pTypedTableClause` is `… .>>. opt pTypedTableElementList`, so the result is `(Expression * Expression option) * TypedTableElement list option`, not a flat 3-tuple: write `fun ((typ, supertable), typedElements) -> …`. The same applies to `Choice2Of2` in 11.32's `pViewSpecification`.
+
 ## `DESCRIPTOR` is not a reserved word (11.60)
 
 `pParameterType` must try `<generic table parameter type>` / `<descriptor parameter type>` **before** `<data type>`, otherwise `pDataType`'s `<path-resolved user-defined type name>` branch consumes `DESCRIPTOR` and `(d DESCRIPTOR)` parses as a parameter named `d` whose type is a UDT called `DESCRIPTOR`. `TABLE` is reserved, so it is unaffected.

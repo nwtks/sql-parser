@@ -1148,6 +1148,50 @@ and LikeOption =
     | IncludingGenerated
     | ExcludingGenerated
 
+// 11.3 <reference generation> ::= SYSTEM GENERATED | USER GENERATED | DERIVED
+and ReferenceGeneration =
+    | SystemGenerated
+    | UserGenerated
+    | Derived
+
+// 11.3 <self-referencing column specification> ::=
+//     REF IS <self-referencing column name> [ <reference generation> ]
+and SelfReferencingColumnSpecification =
+    { Name: Expression
+      Generation: ReferenceGeneration option }
+
+// 11.3 <column options> ::= <column name> WITH OPTIONS <column option list>
+// 11.3 <column option list> ::= [ <scope clause> ] [ <default clause> ] [ <column constraint definition>... ]
+// There is no data type: a typed table's columns take their type from the UDT,
+// which is why this is not a ColumnDefinition.
+and ColumnOptions =
+    { Name: Expression
+      // 6.1 <scope clause> ::= SCOPE <table name>
+      Scope: Expression option
+      // 11.5 <default clause> ::= DEFAULT <default option>
+      DefaultValue: Expression option
+      // 11.4 <column constraint definition>...
+      Constraints: ColumnConstraint list }
+
+// 11.3 <typed table element> ::=
+//     <column options> | <table constraint definition> | <self-referencing column specification>
+and TypedTableElement =
+    | TypedColumnOptions of ColumnOptions
+    | TypedTableConstraint of TableConstraintDefinition
+    | TypedSelfReference of SelfReferencingColumnSpecification
+
+// 11.32 <view column option> ::= <column name> WITH OPTIONS <scope clause>
+// (the <scope clause> is mandatory here, unlike in 11.3's <column option list>)
+and ViewColumnOptions =
+    { Name: Expression
+      // 6.1 <scope clause> ::= SCOPE <table name>
+      Scope: Expression }
+
+// 11.32 <view element> ::= <self-referencing column specification> | <view column option>
+and ViewElement =
+    | ViewColumnOption of ViewColumnOptions
+    | ViewSelfReference of SelfReferencingColumnSpecification
+
 // 11.3 <table definition> ::= CREATE [ <table scope> ] TABLE <table name> <table contents source>
 //       [ WITH <system versioning clause> ] [ ON COMMIT <table commit action> ROWS ]
 // 11.3 <table contents source> ::= <table element list> | <typed table clause> | <as subquery clause>
@@ -1161,10 +1205,13 @@ and CreateTableStatement =
       // <with or without data>: None = the <as subquery clause> is absent,
       // Some true = WITH DATA, Some false = WITH NO DATA
       WithData: bool option
-      // 11.3 <typed table clause> ::= OF <UDT name> [ <subtable clause> ]
+      // 11.3 <typed table clause> ::= OF <UDT name> [ <subtable clause> ] [ <typed table element list> ]
       OfType: Expression option
       // 11.3 <subtable clause> ::= UNDER <supertable clause>
       Under: Expression option
+      // 11.3 <typed table element list> ::= ( <typed table element> [ , ... ] )
+      // (empty when the <typed table clause> has no element list)
+      TypedElements: TypedTableElement list
       // 11.3 <table element> also allows <like clause> ::= LIKE <table name> [ <like option>... ]
       Like: (Expression * LikeOption list) option
       // 11.3 <system versioning clause> ::= SYSTEM VERSIONING
@@ -1189,7 +1236,10 @@ and CreateViewStatement =
       //     OF <path-resolved user-defined type name> [ <subview clause> ] [ <view element list> ]
       OfType: Expression option
       // 11.32 <subview clause> ::= UNDER <table name>
-      Under: Expression option }
+      Under: Expression option
+      // 11.32 <view element list> ::= ( <view element> [ , ... ] )
+      // (empty when the <referenceable view specification> has no element list)
+      ViewElements: ViewElement list }
 
 // 11.31 <drop table statement> / 11.33 <drop view statement> / 11.50 <drop trigger statement> etc. — unified DROP
 and DropStatement =

@@ -1628,7 +1628,8 @@ let ``CREATE TABLE OF type verification`` () =
                     Columns = []
                     Constraints = []
                     OfType = Some { Kind = Identifier "MY_TYPE" }
-                    Under = None } -> ()
+                    Under = None
+                    TypedElements = [] } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateTable OF, got %A" res)
 
     // 11.3 <subtable clause> ::= UNDER <supertable clause>
@@ -1637,6 +1638,36 @@ let ``CREATE TABLE OF type verification`` () =
                     Under = Some { Kind = Identifier "SUPER_T" } } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateTable OF ... UNDER, got %A" res)
 
+    // 11.3 <typed table element list> ::=
+    //     ( <typed table element> [ { <comma> <typed table element> }... ] )
+    match
+        parse
+            "CREATE TABLE t OF my_type (c1 WITH OPTIONS SCOPE tbl DEFAULT 5 NOT NULL, REF IS r SYSTEM GENERATED, CONSTRAINT ck CHECK (x > 0))"
+    with
+    | CreateTable { OfType = Some { Kind = Identifier "MY_TYPE" }
+                    TypedElements = elements } ->
+        match elements with
+        | [ TypedTableElement.TypedColumnOptions columnOptions
+            TypedTableElement.TypedSelfReference selfReference
+            TypedTableElement.TypedTableConstraint constraintDefinition ] ->
+            Assert.Equal(Identifier "C1", columnOptions.Name.Kind)
+            Assert.Equal(Some(Identifier "TBL"), columnOptions.Scope |> Option.map (fun e -> e.Kind))
+            Assert.True(Option.isSome columnOptions.DefaultValue, "Expected a DEFAULT clause")
+
+            Assert.Equal<ColumnConstraintKind list>(
+                [ ColumnConstraintKind.NotNull ],
+                columnOptions.Constraints |> List.map (fun c -> c.Kind)
+            )
+
+            Assert.Equal(Identifier "R", selfReference.Name.Kind)
+            Assert.Equal(Some ReferenceGeneration.SystemGenerated, selfReference.Generation)
+
+            match constraintDefinition.Constraint with
+            | TableConstraint.Check(Some { Kind = Identifier "CK" }, _) -> ()
+            | c -> Assert.Fail(sprintf "Expected Check, got %A" c)
+        | other -> Assert.Fail(sprintf "Expected 3 typed table elements, got %A" other)
+    | res -> Assert.Fail(sprintf "Expected CreateTable OF with a typed table element list, got %A" res)
+
 [<Fact>]
 let ``CREATE VIEW OF type verification`` () =
     match parse "CREATE VIEW v OF my_type AS SELECT * FROM t" with
@@ -1644,6 +1675,7 @@ let ``CREATE VIEW OF type verification`` () =
                    Columns = None
                    OfType = Some { Kind = Identifier "MY_TYPE" }
                    Under = None
+                   ViewElements = []
                    Query = SelectQuery _ } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateView OF, got %A" res)
 
@@ -1652,6 +1684,49 @@ let ``CREATE VIEW OF type verification`` () =
     | CreateView { OfType = Some { Kind = Identifier "MY_TYPE" }
                    Under = Some { Kind = Identifier "SUPER_V" } } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateView OF ... UNDER, got %A" res)
+
+    // 11.32 <view element list> ::=
+    //     ( <view element> [ { <comma> <view element> }... ] )
+    match parse "CREATE VIEW v OF my_type (REF IS r USER GENERATED, a WITH OPTIONS SCOPE tbl) AS SELECT * FROM t" with
+    | CreateView { OfType = Some { Kind = Identifier "MY_TYPE" }
+                   ViewElements = [ ViewElement.ViewSelfReference selfReference
+                                    ViewElement.ViewColumnOption columnOptions ] } ->
+        Assert.Equal(Identifier "R", selfReference.Name.Kind)
+        Assert.Equal(Some ReferenceGeneration.UserGenerated, selfReference.Generation)
+        Assert.Equal(Identifier "A", columnOptions.Name.Kind)
+        Assert.Equal(Identifier "TBL", columnOptions.Scope.Kind)
+    | res -> Assert.Fail(sprintf "Expected CreateView OF with a view element list, got %A" res)
+
+[<Theory>]
+[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS)")>]
+[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS SCOPE tbl)")>]
+[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS DEFAULT 5 UNIQUE)")>]
+[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS CONSTRAINT nn NOT NULL)")>]
+[<InlineData("CREATE TABLE t OF my_type UNDER super_t (c1 WITH OPTIONS NOT NULL)")>]
+[<InlineData("CREATE TABLE t OF my_type (REF IS r)")>]
+[<InlineData("CREATE TABLE t OF my_type (REF IS r SYSTEM GENERATED)")>]
+[<InlineData("CREATE TABLE t OF my_type (REF IS r USER GENERATED)")>]
+[<InlineData("CREATE TABLE t OF my_type (REF IS r DERIVED)")>]
+[<InlineData("CREATE TABLE t OF my_type (PRIMARY KEY (c1))")>]
+[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS, REF IS r, UNIQUE (c1))")>]
+[<InlineData("CREATE VIEW v OF my_type (REF IS r DERIVED) AS SELECT * FROM t")>]
+[<InlineData("CREATE VIEW v OF my_type (a WITH OPTIONS SCOPE tbl) AS SELECT * FROM t")>]
+[<InlineData("CREATE VIEW v OF my_type UNDER super_v (REF IS r) AS SELECT * FROM t")>]
+let ``typed table and view element lists are accepted`` (sql: string) =
+    match parse sql with
+    | CreateTable _ -> ()
+    | CreateView _ -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateTable or CreateView, got %A" res)
+
+[<Theory>]
+[<InlineData("CREATE TABLE t OF my_type ()")>]
+[<InlineData("CREATE TABLE t OF my_type (c1)")>]
+[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS DEFAULT)")>]
+[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS DEFAULT 5 SCOPE tbl)")>]
+[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS NOT NULL")>]
+[<InlineData("CREATE VIEW v OF my_type (a WITH OPTIONS) AS SELECT * FROM t")>]
+[<InlineData("CREATE VIEW v OF my_type (a WITH OPTIONS DEFAULT 5) AS SELECT * FROM t")>]
+let ``malformed typed table and view element lists are rejected`` (sql: string) = parseFails sql
 
 [<Fact>]
 let ``CREATE TABLE with REF type verification`` () =

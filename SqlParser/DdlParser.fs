@@ -382,6 +382,24 @@ module DdlParser =
               BeginColumn = beginColumn
               EndColumn = endColumn }
 
+    // 11.3 <reference generation> ::= SYSTEM GENERATED | USER GENERATED | DERIVED
+    let pReferenceGeneration =
+        choice
+            [ attempt (
+                  pKeyword "SYSTEM" >>. pKeyword "GENERATED"
+                  >>% ReferenceGeneration.SystemGenerated
+              )
+              attempt (pKeyword "USER" >>. pKeyword "GENERATED" >>% ReferenceGeneration.UserGenerated)
+              attempt (pKeyword "DERIVED" >>% ReferenceGeneration.Derived) ]
+
+    // 11.3 <self-referencing column specification> ::=
+    //     REF IS <self-referencing column name> [ <reference generation> ]
+    // Shared by the <typed table element list> (11.3) and the <view element list> (11.32).
+    let pSelfReferencingColumn: Parser<SelfReferencingColumnSpecification, unit> =
+        pKeyword "REF" >>. pKeyword "IS" >>. pIdentifierExpr
+        .>>. opt pReferenceGeneration
+        |>> fun (name, generation) -> { Name = name; Generation = generation }
+
     // 11.3 <table definition> ::= CREATE [ <table scope> ] TABLE <table name> <table contents source>
     //       [ WITH <system versioning clause> ] [ ON COMMIT <table commit action> ROWS ]
     // 11.3 <table contents source> ::= <table element list> | <typed table clause> | <as subquery clause>
@@ -421,12 +439,42 @@ module DdlParser =
             attempt (pKeyword "GLOBAL" >>. pKeyword "TEMPORARY" >>% TableScope.Global)
             <|> (pKeyword "LOCAL" >>. pKeyword "TEMPORARY" >>% TableScope.Local)
 
+        // 11.3 <column option list> ::=
+        //     [ <scope clause> ] [ <default clause> ] [ <column constraint definition>... ]
+        let pColumnOptionList =
+            opt pScopeClause .>>. opt pDefaultClause .>>. many (attempt pColumnConstraint)
+
+        // 11.3 <column options> ::= <column name> WITH OPTIONS <column option list>
+        // NOTE: `OPTIONS` is not a reserved word, so the mandatory `WITH OPTIONS` is
+        // what tells a <column options> element from a <table constraint definition>.
+        let pColumnOptions: Parser<ColumnOptions, unit> =
+            pIdentifierExpr .>> pKeyword "WITH" .>> pKeyword "OPTIONS"
+            .>>. pColumnOptionList
+            |>> fun (name, ((scope, defaultValue), constraints)) ->
+                { Name = name
+                  Scope = scope
+                  DefaultValue = defaultValue
+                  Constraints = constraints }
+
+        // 11.3 <typed table element> ::= <column options> | <table constraint definition>
+        //     | <self-referencing column specification>
+        let pTypedTableElement =
+            choice
+                [ attempt (pColumnOptions |>> TypedTableElement.TypedColumnOptions)
+                  attempt (pSelfReferencingColumn |>> TypedTableElement.TypedSelfReference)
+                  attempt (pTableConstraint |>> TypedTableElement.TypedTableConstraint) ]
+
+        // 11.3 <typed table element list> ::=
+        //     <left paren> <typed table element> [ { <comma> <typed table element> }... ] <right paren>
+        let pTypedTableElementList =
+            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pTypedTableElement (token (pstring ",")))
+
         // 11.3 <typed table clause> ::= OF <path-resolved user-defined type name>
         //     [ <subtable clause> ] [ <typed table element list> ]
-        // (<typed table element list> is not supported — see docs/trade-off.md)
         let pTypedTableClause =
             pKeyword "OF" >>. pQualifiedNameExpr
             .>>. opt (pKeyword "UNDER" >>. pQualifiedNameExpr)
+            .>>. opt pTypedTableElementList
 
         // 11.3 <system versioning clause> ::= SYSTEM VERSIONING
         let pWithSystemVersioning =
@@ -444,19 +492,22 @@ module DdlParser =
         .>>. pQualifiedNameExpr
         .>>. (attempt (
                   between (token (pstring "(")) (token (pstring ")")) (sepBy1 pTableElement (token (pstring ",")))
-                  |>> fun elems -> elems, None, None, None, None
+                  |>> fun elems -> elems, None, None, None, None, []
               )
               <|> attempt (
                   between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
                   .>>. pAsSubquery
-                  |>> fun (cols, (q, withData)) -> [], Some cols, Some(q, withData), None, None
+                  |>> fun (cols, (q, withData)) -> [], Some cols, Some(q, withData), None, None, []
               )
-              <|> (pAsSubquery |>> fun (q, withData) -> [], None, Some(q, withData), None, None)
+              <|> (pAsSubquery |>> fun (q, withData) -> [], None, Some(q, withData), None, None, [])
               <|> (pTypedTableClause
-                   |>> fun (typ, supertable) -> [], None, None, Some typ, supertable))
+                   |>> fun ((typ, supertable), typedElements) ->
+                       [], None, None, Some typ, supertable, Option.defaultValue [] typedElements))
         .>>. opt (attempt pWithSystemVersioning)
         .>>. opt (attempt pOnCommit)
-        |>> fun ((((scope, name), (elems, asCols, asQuery, ofType, under)), withSystemVersioning), onCommit) ->
+        |>> fun
+                ((((scope, name), (elems, asCols, asQuery, ofType, under, typedElements)), withSystemVersioning),
+                 onCommit) ->
             let cols =
                 elems
                 |> List.choose (function
@@ -490,6 +541,7 @@ module DdlParser =
               WithData = asQuery |> Option.map snd
               OfType = ofType
               Under = under
+              TypedElements = typedElements
               Like = like
               WithSystemVersioning = Option.defaultValue false withSystemVersioning
               OnCommit = onCommit
@@ -507,11 +559,27 @@ module DdlParser =
     // 11.32 <view definition> ::= CREATE [ RECURSIVE ] VIEW <table name> <view specification>
     //       AS <query expression> [ WITH [ <levels clause> ] CHECK OPTION ]
     let pCreateViewStatement =
+        // 11.32 <view column option> ::= <column name> WITH OPTIONS <scope clause>
+        // (the <scope clause> is mandatory here, unlike in 11.3's <column option list>)
+        let pViewColumnOption: Parser<ViewColumnOptions, unit> =
+            pIdentifierExpr .>> pKeyword "WITH" .>> pKeyword "OPTIONS" .>>. pScopeClause
+            |>> fun (name, scope) -> { Name = name; Scope = scope }
+
+        // 11.32 <view element> ::= <self-referencing column specification> | <view column option>
+        let pViewElement =
+            choice
+                [ attempt (pSelfReferencingColumn |>> ViewElement.ViewSelfReference)
+                  attempt (pViewColumnOption |>> ViewElement.ViewColumnOption) ]
+
+        // 11.32 <view element list> ::=
+        //     <left paren> <view element> [ { <comma> <view element> }... ] <right paren>
+        let pViewElementList =
+            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pViewElement (token (pstring ",")))
+
         // 11.32 <view specification> ::= <regular view specification> | <referenceable view specification>
         // 11.32 <regular view specification> ::= [ ( <view column list> ) ]
         // 11.32 <referenceable view specification> ::= OF <path-resolved user-defined type name>
         //     [ <subview clause> ] [ <view element list> ]
-        // (<view element list> is not supported — see docs/trade-off.md)
         let pViewSpecification =
             choice
                 [ attempt (
@@ -521,6 +589,7 @@ module DdlParser =
                   attempt (
                       pKeyword "OF" >>. pQualifiedNameExpr
                       .>>. opt (pKeyword "UNDER" >>. pQualifiedNameExpr)
+                      .>>. opt pViewElementList
                       |>> Choice2Of2
                   ) ]
 
@@ -531,11 +600,12 @@ module DdlParser =
         .>>. pQuery
         .>>. opt (attempt pCheckOption)
         |>> fun ((((isRecursive, name), spec), query), checkOpt) ->
-            let cols, ofType, under =
+            let cols, ofType, under, viewElements =
                 match spec with
-                | Some(Choice1Of2 c) -> Some c, None, None
-                | Some(Choice2Of2(typeName, subview)) -> None, Some typeName, subview
-                | None -> None, None, None
+                | Some(Choice1Of2 c) -> Some c, None, None, []
+                | Some(Choice2Of2((typeName, subview), elements)) ->
+                    None, Some typeName, subview, Option.defaultValue [] elements
+                | None -> None, None, None, []
 
             { Name = name
               IsRecursive = Option.defaultValue false isRecursive
@@ -543,7 +613,8 @@ module DdlParser =
               Query = query
               CheckOption = checkOpt
               OfType = ofType
-              Under = under }
+              Under = under
+              ViewElements = viewElements }
             |> CreateView
 
     // 12.2 <grantor> ::= CURRENT_USER | CURRENT_ROLE
@@ -869,10 +940,7 @@ module DdlParser =
                       >>% ColumnAlteration.DropNotNull
                   )
                   // 11.17 <add column scope clause> ::= ADD <scope clause>
-                  attempt (
-                      pKeyword "ADD" >>. pKeyword "SCOPE" >>. pQualifiedNameExpr
-                      |>> ColumnAlteration.AddColumnScope
-                  )
+                  attempt (pKeyword "ADD" >>. pScopeClause |>> ColumnAlteration.AddColumnScope)
                   // 11.18 <drop column scope clause> ::= DROP SCOPE <drop behavior>
                   attempt (
                       pKeyword "DROP" >>. pKeyword "SCOPE" >>. pDropBehavior
