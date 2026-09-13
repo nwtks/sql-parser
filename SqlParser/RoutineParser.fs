@@ -7,17 +7,10 @@ open SqlParser.Types
 open SqlParser.DdlParser
 
 module RoutineParser =
-    // 13.4 <SQL procedure statement> / 11.49 <triggered SQL statement> — forward ref
-    // Forward reference to the full statement parser, wired in SqlParser.fs so
-    // that <SQL procedure statement> / <triggered SQL statement> can contain any
-    // statement (including nested routine/trigger definitions).
-    let pRoutineBodyStatementRef, pRoutineBodyStatementRefImpl =
-        createParserForwardedToRef<Statement, unit> ()
-
     // 10.2 <language name> ::= ADA | C | COBOL | FORTRAN | M | MUMPS | PASCAL | PLI | SQL
     // Shared with 11.51 <method characteristic> (TypeParser.fs) — TypeParser.fs is compiled
     // after RoutineParser.fs, so it reuses these two parsers (see docs/trade-off.md).
-    let pLanguageName: Parser<string, unit> =
+    let pLanguageName =
         choice
             [ attempt (pKeyword "FORTRAN" >>% "FORTRAN")
               attempt (pKeyword "MUMPS" >>% "MUMPS")
@@ -30,22 +23,104 @@ module RoutineParser =
               attempt (pKeyword "C" >>% "C") ]
 
     // 10.2 <language clause> ::= LANGUAGE <language name>
-    let pLanguageClause: Parser<string, unit> =
-        attempt (pKeyword "LANGUAGE" >>. pLanguageName)
+    let pLanguageClause = attempt (pKeyword "LANGUAGE" >>. pLanguageName)
 
-    // 11.60 <parameter style clause> ::= PARAMETER STYLE <parameter style>
-    // 11.60 <parameter style> ::= SQL | GENERAL
-    let pParameterStyleClause: Parser<string, unit> =
-        pKeyword "PARAMETER"
-        >>. pKeyword "STYLE"
-        >>. ((pKeyword "SQL" >>% "SQL") <|> (pKeyword "GENERAL" >>% "GENERAL"))
+    // 13.4 <SQL procedure statement> / 11.49 <triggered SQL statement> — forward ref
+    // Forward reference to the full statement parser, wired in SqlParser.fs so
+    // that <SQL procedure statement> / <triggered SQL statement> can contain any
+    // statement (including nested routine/trigger definitions).
+    let pRoutineBodyStatementRef, pRoutineBodyStatementRefImpl =
+        createParserForwardedToRef<Statement, unit> ()
 
-    // 11.60 <parameter mode> ::= IN | OUT | INOUT
-    let pParameterMode =
+    // 11.49 <trigger action time> ::= BEFORE | AFTER | INSTEAD OF
+    let pTriggerActionTime =
         choice
-            [ attempt (pKeyword "INOUT" >>% ParameterMode.InOut)
-              attempt (pKeyword "IN" >>% ParameterMode.In)
-              attempt (pKeyword "OUT" >>% ParameterMode.Out) ]
+            [ attempt (pKeyword "BEFORE" >>% TriggerActionTime.Before)
+              attempt (pKeyword "AFTER" >>% TriggerActionTime.After)
+              attempt (pKeyword "INSTEAD" >>. pKeyword "OF" >>% TriggerActionTime.InsteadOf) ]
+
+    // 11.49 <trigger event> ::= INSERT | DELETE | UPDATE [ OF <trigger column list> ]
+    let pTriggerEvent =
+        choice
+            [ attempt (pKeyword "INSERT" >>% TriggerEvent.Insert)
+              attempt (pKeyword "DELETE" >>% TriggerEvent.Delete)
+              attempt (
+                  pKeyword "UPDATE"
+                  >>. opt (pKeyword "OF" >>. sepBy1 pIdentifierExpr (token (pstring ",")))
+                  |>> TriggerEvent.Update
+              ) ]
+
+    // 11.49 <transition table or variable> ::= OLD TABLE [ AS ] <transition table name> | NEW TABLE [ AS ] <transition table name> | OLD [ ROW ] [ AS ] <old row variable> | NEW [ ROW ] [ AS ] <new row variable>
+    let pTransitionTableOrVariable =
+        choice
+            [ attempt (
+                  pKeyword "OLD" >>. pKeyword "TABLE" >>. opt (pKeyword "AS") >>. pIdentifierExpr
+                  |>> TransitionTableOrVariable.OldTable
+              )
+              attempt (
+                  pKeyword "NEW" >>. pKeyword "TABLE" >>. opt (pKeyword "AS") >>. pIdentifierExpr
+                  |>> TransitionTableOrVariable.NewTable
+              )
+              attempt (
+                  pKeyword "OLD"
+                  >>. opt (pKeyword "ROW")
+                  >>. opt (pKeyword "AS")
+                  >>. pIdentifierExpr
+                  |>> TransitionTableOrVariable.OldRow
+              )
+              attempt (
+                  pKeyword "NEW"
+                  >>. opt (pKeyword "ROW")
+                  >>. opt (pKeyword "AS")
+                  >>. pIdentifierExpr
+                  |>> TransitionTableOrVariable.NewRow
+              ) ]
+
+    // 11.49 <triggered SQL statement> ::= <SQL procedure statement> | BEGIN ATOMIC { <SQL procedure statement>; }... END
+    let pTriggeredStatement =
+        choice
+            [ attempt (
+                  pKeyword "BEGIN"
+                  >>. pKeyword "ATOMIC"
+                  >>. sepEndBy1 pRoutineBodyStatementRef (token (pstring ";"))
+                  .>> pKeyword "END"
+                  |>> fun stmts -> TriggeredStatement.BeginAtomic(List.map (fun s -> s.Kind) stmts)
+              )
+              attempt (pRoutineBodyStatementRef |>> fun s -> SingleStatement s.Kind) ]
+
+    // 11.49 <triggered action> ::= [ FOR EACH { ROW | STATEMENT } ] [ WHEN ( <search condition> ) ] <triggered SQL statement>
+    let pTriggeredAction =
+        opt (
+            pKeyword "FOR"
+            >>. pKeyword "EACH"
+            >>. (pKeyword "ROW" >>% true <|> (pKeyword "STATEMENT" >>% false))
+        )
+        .>>. opt (
+            pKeyword "WHEN"
+            >>. between (token (pstring "(")) (token (pstring ")")) pExpression
+        )
+        .>>. pTriggeredStatement
+        |>> fun ((forEach, whenCond), statement) ->
+            { ForEach = forEach
+              When = whenCond
+              Statement = statement }
+
+    // 11.49 <trigger definition> ::= CREATE TRIGGER <trigger name> <trigger action time> <trigger event> ON <table name> [ REFERENCING <transition table or variable list> ] <triggered action>
+    let pCreateTriggerStatement =
+        pKeyword "CREATE" >>. pKeyword "TRIGGER" >>. pQualifiedNameExpr
+        .>>. pTriggerActionTime
+        .>>. pTriggerEvent
+        .>>. (pKeyword "ON" >>. pQualifiedNameExpr)
+        .>>. opt (pKeyword "REFERENCING" >>. many pTransitionTableOrVariable)
+        .>>. pTriggeredAction
+        |>> fun (((((name, actionTime), event), table), transitions), action) ->
+            CreateTrigger
+                { Name = name
+                  ActionTime = actionTime
+                  Event = event
+                  Table = table
+                  Transitions = Option.defaultValue [] transitions
+                  Action = action }
 
     // 20.16 <descriptor value constructor> ::= DESCRIPTOR ( <descriptor column list> )
     // 20.16 <descriptor column specification> ::= <column name> [ <data type> ]
@@ -59,6 +134,20 @@ module RoutineParser =
                 (sepBy1 (pIdentifierExpr .>>. opt pDataType) (token (pstring ",")))
         |>> DescriptorValueConstructor
         |> withExprPosition
+
+    // 11.60 <parameter style clause> ::= PARAMETER STYLE <parameter style>
+    // 11.60 <parameter style> ::= SQL | GENERAL
+    let pParameterStyleClause =
+        pKeyword "PARAMETER"
+        >>. pKeyword "STYLE"
+        >>. (pKeyword "SQL" >>% "SQL" <|> (pKeyword "GENERAL" >>% "GENERAL"))
+
+    // 11.60 <parameter mode> ::= IN | OUT | INOUT
+    let pParameterMode =
+        choice
+            [ attempt (pKeyword "INOUT" >>% ParameterMode.InOut)
+              attempt (pKeyword "IN" >>% ParameterMode.In)
+              attempt (pKeyword "OUT" >>% ParameterMode.Out) ]
 
     // 11.60 <locator indication> ::= AS LOCATOR
     let pLocatorIndication = pKeyword "AS" >>. pKeyword "LOCATOR" >>% true
@@ -113,16 +202,16 @@ module RoutineParser =
     // The optional <SQL parameter name> must backtrack: for `IN mytype` the identifier after
     // the mode could be either the parameter name (followed by a type) or the type itself.
     let pParameterDeclaration =
-        let pWithName: Parser<ParameterMode option * Expression option * ParameterType, unit> =
+        let pWithName =
             opt pParameterMode .>>. pIdentifierExpr .>>. pParameterType
             |>> fun ((mode, name), paramType) -> mode, Some name, paramType
 
-        let pWithoutName: Parser<ParameterMode option * Expression option * ParameterType, unit> =
+        let pWithoutName =
             opt pParameterMode .>>. pParameterType
             |>> fun (mode, paramType) -> mode, None, paramType
 
         attempt (
-            (attempt pWithName <|> pWithoutName)
+            attempt pWithName <|> pWithoutName
             .>>. opt (pKeyword "RESULT")
             .>>. opt (pKeyword "DEFAULT" >>. (attempt pDescriptorValueConstructor <|> pExpression))
             |>> fun (((mode, name, paramType), isResult), defaultVal) ->
@@ -138,15 +227,15 @@ module RoutineParser =
         between (token (pstring "(")) (token (pstring ")")) (sepBy pParameterDeclaration (token (pstring ",")))
 
     // 11.60 <rights clause> ::= SQL SECURITY INVOKER | SQL SECURITY DEFINER
-    let pRightsClause: Parser<RightsClause, unit> =
+    let pRightsClause =
         pKeyword "SQL"
         >>. pKeyword "SECURITY"
-        >>. ((pKeyword "INVOKER" >>% RightsClause.SqlSecurityInvoker)
+        >>. (pKeyword "INVOKER" >>% RightsClause.SqlSecurityInvoker
              <|> (pKeyword "DEFINER" >>% RightsClause.SqlSecurityDefiner))
 
     // 11.60 <external security clause> ::= EXTERNAL SECURITY DEFINER
     //     | EXTERNAL SECURITY INVOKER | EXTERNAL SECURITY IMPLEMENTATION DEFINED
-    let pExternalSecurityClause: Parser<ExternalSecurity, unit> =
+    let pExternalSecurityClause =
         pKeyword "EXTERNAL"
         >>. pKeyword "SECURITY"
         >>. choice
@@ -164,7 +253,7 @@ module RoutineParser =
     // A lone <group name> with no FOR TYPE is syntactically identical to a one-element
     // <multiple group specification>, so it is reported as <single group specification>
     // (see docs/trade-off.md).
-    let pTransformGroupSpecification: Parser<TransformGroupSpecification, unit> =
+    let pTransformGroupSpecification =
         pKeyword "TRANSFORM"
         >>. pKeyword "GROUP"
         >>. sepBy1
@@ -173,12 +262,12 @@ module RoutineParser =
                 (token (pstring ","))
         |>> fun groups ->
             match groups with
-            | [ (name, None) ] -> TransformGroupSpecification.SingleTransformGroup name
+            | [ name, None ] -> TransformGroupSpecification.SingleTransformGroup name
             | _ -> TransformGroupSpecification.MultipleTransformGroups groups
 
     // 11.60 <external body reference> ::= EXTERNAL [ NAME <external routine name> ]
     //     [ <parameter style clause> ] [ <transform group specification> ] [ <external security clause> ]
-    let pExternalBodyReference: Parser<ExternalBodyReference, unit> =
+    let pExternalBodyReference =
         pKeyword "EXTERNAL" >>. opt (pKeyword "NAME" >>. pQualifiedNameExpr)
         .>>. opt (attempt pParameterStyleClause)
         .>>. opt (attempt pTransformGroupSpecification)
@@ -191,7 +280,7 @@ module RoutineParser =
 
     // 11.60 <PTF private parameters> ::= PRIVATE [ DATA ] <private parameter declaration list>
     // 11.60 <private parameter declaration list> ::= ( [ <SQL parameter declaration> [ { <comma> <SQL parameter declaration> }... ] ] )
-    let pPtfPrivateParameters: Parser<PtfPrivateParameters, unit> =
+    let pPtfPrivateParameters =
         pKeyword "PRIVATE" >>. opt (pKeyword "DATA") .>>. pParameterDeclarationList
         |>> fun (data, declarations) ->
             { HasData = Option.isSome data
@@ -204,7 +293,7 @@ module RoutineParser =
     //     [ FINISH WITH <PTF finish component procedure> ]
     // <PTF {describe|start|fulfill|finish} component procedure> (11.60) is a
     // <specific routine designator> (10.6); only FULFILL is mandatory.
-    let pPolymorphicTableFunctionBody: Parser<PolymorphicTableFunctionBody, unit> =
+    let pPolymorphicTableFunctionBody =
         opt (attempt pPtfPrivateParameters)
         .>>. opt (attempt (pKeyword "DESCRIBE" >>. pKeyword "WITH" >>. pSpecificRoutineDesignator))
         .>>. opt (attempt (pKeyword "START" >>. pKeyword "WITH" >>. pSpecificRoutineDesignator))
@@ -267,7 +356,7 @@ module RoutineParser =
     // given routine definition — reject duplicates (the BNF's "[ <routine characteristic>... ]"
     // alone would allow them). Categories: Language / ParameterStyle / SpecificName /
     // Deterministic / SqlDataAccess / NullCall / DynamicResultSets / SavepointLevel / ExternalName.
-    let routineCharacteristicCategory (c: RoutineCharacteristic) =
+    let routineCharacteristicCategory c =
         match c with
         | Language _ -> "Language"
         | ParameterStyle _ -> "ParameterStyle"
@@ -279,9 +368,7 @@ module RoutineParser =
         | SavepointLevel _ -> "SavepointLevel"
         | ExternalName _ -> "ExternalName"
 
-    let private rejectDuplicateCharacteristics
-        (chars: RoutineCharacteristic list)
-        : Parser<RoutineCharacteristic list, unit> =
+    let private rejectDuplicateCharacteristics chars : Parser<RoutineCharacteristic list, unit> =
         let dup =
             chars
             |> List.groupBy routineCharacteristicCategory
@@ -293,50 +380,6 @@ module RoutineParser =
 
     let pRoutineCharacteristics =
         many pRoutineCharacteristic >>= rejectDuplicateCharacteristics
-
-    // 11.61 <alter routine characteristic> ::= <language clause> | <parameter style clause>
-    //     | <SQL-data access indication> | <null-call clause> | <returned result sets characteristic>
-    //     | NAME <external routine name>
-    // 11.61's set is narrower than 11.60's — no SPECIFIC / <deterministic characteristic> /
-    // <savepoint level indication> — but NAME <external routine name> is allowed here and is
-    // NOT a <routine characteristic> of 11.60 (it used to be accepted in CREATE by mistake).
-    let pAlterRoutineCharacteristic =
-        choice
-            [ attempt (pLanguageClause |>> Language)
-              attempt (pParameterStyleClause |>> ParameterStyle)
-              attempt (pKeyword "NO" >>. pKeyword "SQL" >>% SqlDataAccess NoSql)
-              attempt (pKeyword "CONTAINS" >>. pKeyword "SQL" >>% SqlDataAccess ContainsSql)
-              attempt (
-                  pKeyword "READS" >>. pKeyword "SQL" >>. pKeyword "DATA"
-                  >>% SqlDataAccess ReadsSqlData
-              )
-              attempt (
-                  pKeyword "MODIFIES" >>. pKeyword "SQL" >>. pKeyword "DATA"
-                  >>% SqlDataAccess ModifiesSqlData
-              )
-              attempt (
-                  pKeyword "RETURNS"
-                  >>. pKeyword "NULL"
-                  >>. pKeyword "ON"
-                  >>. pKeyword "NULL"
-                  >>. pKeyword "INPUT"
-                  >>% NullCall true
-              )
-              attempt (
-                  pKeyword "CALLED" >>. pKeyword "ON" >>. pKeyword "NULL" >>. pKeyword "INPUT"
-                  >>% NullCall false
-              )
-              attempt (
-                  pKeyword "DYNAMIC"
-                  >>. pKeyword "RESULT"
-                  >>. pKeyword "SETS"
-                  >>. (pUnsignedInteger .>> ws)
-                  |>> DynamicResultSets
-              )
-              attempt (pKeyword "NAME" >>. pQualifiedNameExpr |>> ExternalName) ]
-
-    let pAlterRoutineCharacteristics =
-        many pAlterRoutineCharacteristic >>= rejectDuplicateCharacteristics
 
     // 11.60 <routine body> ::= <SQL routine spec> | <external body reference> | <polymorphic table function body>
     // 11.60 <SQL routine spec> ::= [ <rights clause> ] <SQL routine body>
@@ -458,7 +501,7 @@ module RoutineParser =
     //     | [ INSTANCE | STATIC | CONSTRUCTOR ] METHOD <method name> <SQL parameter declaration list>
     //         [ <returns clause> ] FOR <schema-resolved user-defined type name>
     // A <method specification designator> has no <routine characteristics> slot (11.60).
-    let pMethodSpecificationDesignator: Parser<MethodSpecificationDesignator, unit> =
+    let pMethodSpecificationDesignator =
         choice
             [ attempt (
                   pKeyword "SPECIFIC" >>. pKeyword "METHOD" >>. pQualifiedNameExpr
@@ -484,6 +527,50 @@ module RoutineParser =
         pKeyword "CREATE" >>. pMethodSpecificationDesignator .>>. pRoutineBody
         |>> fun (designator, body) -> CreateMethod { Designator = designator; Body = body }
 
+    // 11.61 <alter routine characteristic> ::= <language clause> | <parameter style clause>
+    //     | <SQL-data access indication> | <null-call clause> | <returned result sets characteristic>
+    //     | NAME <external routine name>
+    // 11.61's set is narrower than 11.60's — no SPECIFIC / <deterministic characteristic> /
+    // <savepoint level indication> — but NAME <external routine name> is allowed here and is
+    // NOT a <routine characteristic> of 11.60 (it used to be accepted in CREATE by mistake).
+    let pAlterRoutineCharacteristic =
+        choice
+            [ attempt (pLanguageClause |>> Language)
+              attempt (pParameterStyleClause |>> ParameterStyle)
+              attempt (pKeyword "NO" >>. pKeyword "SQL" >>% SqlDataAccess NoSql)
+              attempt (pKeyword "CONTAINS" >>. pKeyword "SQL" >>% SqlDataAccess ContainsSql)
+              attempt (
+                  pKeyword "READS" >>. pKeyword "SQL" >>. pKeyword "DATA"
+                  >>% SqlDataAccess ReadsSqlData
+              )
+              attempt (
+                  pKeyword "MODIFIES" >>. pKeyword "SQL" >>. pKeyword "DATA"
+                  >>% SqlDataAccess ModifiesSqlData
+              )
+              attempt (
+                  pKeyword "RETURNS"
+                  >>. pKeyword "NULL"
+                  >>. pKeyword "ON"
+                  >>. pKeyword "NULL"
+                  >>. pKeyword "INPUT"
+                  >>% NullCall true
+              )
+              attempt (
+                  pKeyword "CALLED" >>. pKeyword "ON" >>. pKeyword "NULL" >>. pKeyword "INPUT"
+                  >>% NullCall false
+              )
+              attempt (
+                  pKeyword "DYNAMIC"
+                  >>. pKeyword "RESULT"
+                  >>. pKeyword "SETS"
+                  >>. (pUnsignedInteger .>> ws)
+                  |>> DynamicResultSets
+              )
+              attempt (pKeyword "NAME" >>. pQualifiedNameExpr |>> ExternalName) ]
+
+    let pAlterRoutineCharacteristics =
+        many pAlterRoutineCharacteristic >>= rejectDuplicateCharacteristics
+
     // 11.61 <alter routine statement> ::= ALTER <specific routine designator> <alter routine characteristic>... [ RESTRICT ]
     let pAlterRoutineStatement =
         pKeyword "ALTER" >>. pSpecificRoutineDesignator
@@ -493,93 +580,3 @@ module RoutineParser =
             AlterRoutine
                 { Routine = routine
                   Characteristics = characteristics }
-
-    // 11.49 <trigger action time> ::= BEFORE | AFTER | INSTEAD OF
-    let pTriggerActionTime =
-        choice
-            [ attempt (pKeyword "BEFORE" >>% TriggerActionTime.Before)
-              attempt (pKeyword "AFTER" >>% TriggerActionTime.After)
-              attempt (pKeyword "INSTEAD" >>. pKeyword "OF" >>% TriggerActionTime.InsteadOf) ]
-
-    // 11.49 <trigger event> ::= INSERT | DELETE | UPDATE [ OF <trigger column list> ]
-    let pTriggerEvent =
-        choice
-            [ attempt (pKeyword "INSERT" >>% TriggerEvent.Insert)
-              attempt (pKeyword "DELETE" >>% TriggerEvent.Delete)
-              attempt (
-                  pKeyword "UPDATE"
-                  >>. opt (pKeyword "OF" >>. sepBy1 pIdentifierExpr (token (pstring ",")))
-                  |>> TriggerEvent.Update
-              ) ]
-
-    // 11.49 <transition table or variable> ::= OLD TABLE [ AS ] <transition table name> | NEW TABLE [ AS ] <transition table name> | OLD [ ROW ] [ AS ] <old row variable> | NEW [ ROW ] [ AS ] <new row variable>
-    let pTransitionTableOrVariable =
-        choice
-            [ attempt (
-                  pKeyword "OLD" >>. pKeyword "TABLE" >>. opt (pKeyword "AS") >>. pIdentifierExpr
-                  |>> TransitionTableOrVariable.OldTable
-              )
-              attempt (
-                  pKeyword "NEW" >>. pKeyword "TABLE" >>. opt (pKeyword "AS") >>. pIdentifierExpr
-                  |>> TransitionTableOrVariable.NewTable
-              )
-              attempt (
-                  pKeyword "OLD"
-                  >>. opt (pKeyword "ROW")
-                  >>. opt (pKeyword "AS")
-                  >>. pIdentifierExpr
-                  |>> TransitionTableOrVariable.OldRow
-              )
-              attempt (
-                  pKeyword "NEW"
-                  >>. opt (pKeyword "ROW")
-                  >>. opt (pKeyword "AS")
-                  >>. pIdentifierExpr
-                  |>> TransitionTableOrVariable.NewRow
-              ) ]
-
-    // 11.49 <triggered SQL statement> ::= <SQL procedure statement> | BEGIN ATOMIC { <SQL procedure statement>; }... END
-    let pTriggeredStatement =
-        choice
-            [ attempt (
-                  pKeyword "BEGIN"
-                  >>. pKeyword "ATOMIC"
-                  >>. sepEndBy1 pRoutineBodyStatementRef (token (pstring ";"))
-                  .>> pKeyword "END"
-                  |>> fun stmts -> TriggeredStatement.BeginAtomic(List.map (fun s -> s.Kind) stmts)
-              )
-              attempt (pRoutineBodyStatementRef |>> fun s -> SingleStatement s.Kind) ]
-
-    // 11.49 <triggered action> ::= [ FOR EACH { ROW | STATEMENT } ] [ WHEN ( <search condition> ) ] <triggered SQL statement>
-    let pTriggeredAction =
-        opt (
-            pKeyword "FOR"
-            >>. pKeyword "EACH"
-            >>. ((pKeyword "ROW" >>% true) <|> (pKeyword "STATEMENT" >>% false))
-        )
-        .>>. opt (
-            pKeyword "WHEN"
-            >>. between (token (pstring "(")) (token (pstring ")")) pExpression
-        )
-        .>>. pTriggeredStatement
-        |>> fun ((forEach, whenCond), statement) ->
-            { ForEach = forEach
-              When = whenCond
-              Statement = statement }
-
-    // 11.49 <trigger definition> ::= CREATE TRIGGER <trigger name> <trigger action time> <trigger event> ON <table name> [ REFERENCING <transition table or variable list> ] <triggered action>
-    let pCreateTriggerStatement =
-        pKeyword "CREATE" >>. pKeyword "TRIGGER" >>. pQualifiedNameExpr
-        .>>. pTriggerActionTime
-        .>>. pTriggerEvent
-        .>>. (pKeyword "ON" >>. pQualifiedNameExpr)
-        .>>. opt (pKeyword "REFERENCING" >>. many pTransitionTableOrVariable)
-        .>>. pTriggeredAction
-        |>> fun (((((name, actionTime), event), table), transitions), action) ->
-            CreateTrigger
-                { Name = name
-                  ActionTime = actionTime
-                  Event = event
-                  Table = table
-                  Transitions = Option.defaultValue [] transitions
-                  Action = action }

@@ -6,14 +6,6 @@ open SqlParser.ExpressionParser
 open SqlParser.TransactionParser
 
 module SessionParser =
-    //   19.3 <set role statement> ::= SET ROLE <role specification>
-    //   <role specification> ::= <value specification> | NONE
-    let pSetRoleStatement =
-        pKeyword "SET"
-        >>. pKeyword "ROLE"
-        >>. (attempt (pKeyword "NONE" >>% None) <|> (pExpression |>> Some))
-        |>> SetRole
-
     // 19.1 <set session characteristics statement>
     // ::= SET SESSION CHARACTERISTICS AS <session characteristic list>
     // <session characteristic> ::= TRANSACTION <transaction mode> [ , ... ]
@@ -34,6 +26,14 @@ module SessionParser =
         >>. pKeyword "AUTHORIZATION"
         >>. pExpression
         |>> SetSessionAuthorization
+
+    //   19.3 <set role statement> ::= SET ROLE <role specification>
+    //   <role specification> ::= <value specification> | NONE
+    let pSetRoleStatement =
+        pKeyword "SET"
+        >>. pKeyword "ROLE"
+        >>. (attempt (pKeyword "NONE" >>% None) <|> (pExpression |>> Some))
+        |>> SetRole
 
     // 19.4 <set local time zone statement>
     // ::= SET TIME ZONE <set time zone value>

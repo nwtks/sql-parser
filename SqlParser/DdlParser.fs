@@ -6,11 +6,65 @@ open SqlParser.ExpressionParser
 open SqlParser.Types
 
 module DdlParser =
+    // 10.6 <routine type> ::= ROUTINE | FUNCTION | PROCEDURE
+    //     | [ INSTANCE | STATIC | CONSTRUCTOR ] METHOD
+    let pRoutineType =
+        choice
+            [ pKeyword "ROUTINE" >>% RoutineType.Routine
+              pKeyword "FUNCTION" >>% RoutineType.Function
+              pKeyword "PROCEDURE" >>% RoutineType.Procedure
+              // 10.6 pMethodKind also serves 11.51 / 11.60 — it lives in Types.fs.
+              attempt (
+                  opt pMethodKind .>>. pKeyword "METHOD"
+                  |>> fun (methodKind, _) -> RoutineType.Method methodKind
+              ) ]
+
+    // 10.6 <routine designator> ::= [ <routine type> ] <qualified identifier>
+    // (<object name> in 12.2 / 12.3 — kept separate from <specific routine designator>
+    //  because <object name> carries a plain name, not a designator)
+    let pRoutineDesignatorWithType =
+        choice [ attempt (pRoutineType >>. pQualifiedNameExpr); pQualifiedNameExpr ]
+
+    // 10.6 <specific routine designator> ::=
+    //       SPECIFIC <routine type> <specific name>
+    //     | <routine type> <member name> [ FOR <schema-resolved user-defined type name> ]
+    // 10.6 <member name> ::= <member name alternatives> [ <data type list> ]
+    // A bare <schema qualified routine name> is also accepted (RoutineType = None) so that
+    // callers such as `ALTER ROUTINE add` keep working — see docs/trade-off.md.
+    let pSpecificRoutineDesignator =
+        // 10.6 <data type list> ::= ( [ <data type> [ { <comma> <data type> }... ] ] )
+        let pDataTypeList =
+            between (token (pstring "(")) (token (pstring ")")) (sepBy pDataType (token (pstring ",")))
+
+        let mk isSpecific routineType name dataTypeList forType =
+            { IsSpecific = isSpecific
+              RoutineType = routineType
+              Name = name
+              DataTypeList = dataTypeList
+              ForType = forType }
+
+        choice
+            [ attempt (
+                  pKeyword "SPECIFIC" >>. pRoutineType .>>. pQualifiedNameExpr
+                  |>> fun (routineType, name) -> mk true (Some routineType) name None None
+              )
+              attempt (
+                  opt pRoutineType
+                  .>>. pQualifiedNameExpr
+                  .>>. opt (attempt pDataTypeList)
+                  .>>. opt (attempt (pKeyword "FOR" >>. pQualifiedNameExpr))
+                  |>> fun (((routineType, name), dataTypeList), forType) ->
+                      mk false routineType name dataTypeList forType
+              ) ]
+
+    // 10.7 <collate clause> ::= COLLATE <collation name>
+    let pCollateClause = pKeyword "COLLATE" >>. pQualifiedNameExpr
+
     // 10.8 <constraint enforcement> ::= [ NOT ] ENFORCED   (true = ENFORCED, false = NOT ENFORCED)
     // Also used by 11.25 <alter table constraint definition>, and by the
     // <column constraint definition> (11.4) / <table constraint definition> (11.6).
     // It is defined at the top of the module so both can reuse it.
-    let pConstraintEnforcement: Parser<bool, unit> =
+    let pConstraintEnforcement =
         attempt (pKeyword "NOT" >>. pKeyword "ENFORCED" >>% false)
         <|> (pKeyword "ENFORCED" >>% true)
 
@@ -18,24 +72,24 @@ module DdlParser =
     //     <constraint check time> [ [ NOT ] DEFERRABLE ] [ <constraint enforcement> ]
     //   | [ [ NOT ] DEFERRABLE ] <constraint check time> [ <constraint enforcement> ]
     //   | <constraint enforcement>
-    let pConstraintCharacteristics: Parser<ConstraintCharacteristics, unit> =
+    let pConstraintCharacteristics =
         // 10.8 <constraint check time> ::= INITIALLY DEFERRED | INITIALLY IMMEDIATE
         // NOTE: both alternatives are parenthesized — `<|>` binds tighter than `>>.`/`>>%`,
         // so an unparenthesized `INITIALLY >>. DEFERRED >>% true <|> (...)` would group as
         // `INITIALLY >>. (DEFERRED >>% (true <|> ...))` and never try IMMEDIATE.
-        let pCheckTime: Parser<bool, unit> =
+        let pCheckTime =
             attempt (pKeyword "INITIALLY" >>. pKeyword "DEFERRED" >>% true)
             <|> (pKeyword "INITIALLY" >>. pKeyword "IMMEDIATE" >>% false)
 
         // 10.8 <constraint deferrability> ::= [ NOT ] DEFERRABLE
-        let pDeferrable: Parser<bool, unit> =
+        let pDeferrable =
             attempt (pKeyword "NOT" >>. pKeyword "DEFERRABLE" >>% false)
             <|> (pKeyword "DEFERRABLE" >>% true)
 
         // 10.8 <constraint enforcement> ::= [ NOT ] ENFORCED — shared with 11.25
         let pEnforced = pConstraintEnforcement
 
-        let mk (initiallyDeferred: bool option) (deferrable: bool option) (enforced: bool option) =
+        let mk initiallyDeferred deferrable enforced =
             { InitiallyDeferred = initiallyDeferred
               Deferrable = deferrable
               Enforced = enforced }
@@ -58,6 +112,57 @@ module DdlParser =
               attempt (pEnforced |>> fun e -> mk None None (Some e))
               // <constraint characteristics> is optional in its enclosing production
               preturn (mk None None None) ]
+
+    // Forward reference to the full DDL statement set; a <schema element> is any
+    // DDL statement. Wired to pDdl in SqlParser.fs (which also contains the
+    // CREATE SCHEMA parser that consumes these elements).
+    // 11.1 <schema element> ::= <table definition> | <view definition> | <domain definition> | ...
+    let pSchemaElement, pSchemaElementImpl =
+        createParserForwardedToRef<StatementKind, unit> ()
+
+    // 11.1 <schema definition> ::= CREATE SCHEMA <schema name clause> [ <schema character set or path> ] [ <schema element>... ]
+    let pCreateSchemaStatement =
+        let pNameClause =
+            choice
+                [ attempt (
+                      pQualifiedNameExpr .>>. opt (pKeyword "AUTHORIZATION" >>. pIdentifierExpr)
+                      |>> fun (name, auth) -> Some name, auth
+                  )
+                  pKeyword "AUTHORIZATION" >>. pIdentifierExpr |>> fun auth -> None, Some auth ]
+
+        // 11.1 <schema character set or path> ::=
+        //     <schema character set specification>
+        //   | <schema path specification>
+        //   | <character set specification> <path specification>
+        //   | <path specification> <character set specification>
+        let pSchemaCharsetOrPath =
+            let pCharset =
+                pKeyword "DEFAULT"
+                >>. pKeyword "CHARACTER"
+                >>. pKeyword "SET"
+                >>. pQualifiedNameExpr
+
+            // 10.3 <path specification> ::= PATH <path-resolved user-defined type name> [ { <comma> ... }... ]
+            let pPath = pKeyword "PATH" >>. sepBy1 pQualifiedNameExpr (token (pstring ","))
+
+            choice
+                [ attempt (pCharset .>>. opt (attempt pPath) |>> fun (c, p) -> Some c, p)
+                  attempt (pPath .>>. opt (attempt pCharset) |>> fun (p, c) -> c, Some p)
+                  preturn (None, None) ]
+
+        pKeyword "CREATE" >>. pKeyword "SCHEMA" >>. pNameClause
+        .>>. pSchemaCharsetOrPath
+        .>>. many pSchemaElement
+        |>> fun ((nameClause, (charset, path)), elements) ->
+            CreateSchema
+                { Name = fst nameClause
+                  Authorization = snd nameClause
+                  CharacterSet = charset
+                  Path = path
+                  Elements = elements }
+
+    // 11.2 <drop behavior> ::= CASCADE | RESTRICT   (true = CASCADE, false = RESTRICT)
+    let pDropBehavior = pKeyword "CASCADE" >>% true <|> (pKeyword "RESTRICT" >>% false)
 
     // 11.8 <referential action> ::= CASCADE | SET NULL | SET DEFAULT | RESTRICT | NO ACTION
     let pReferentialAction =
@@ -234,9 +339,6 @@ module DdlParser =
               attempt pGenerationClause
               attempt pSystemTimePeriodColumn ]
 
-    // 10.7 <collate clause> ::= COLLATE <collation name>
-    let pCollateClause = pKeyword "COLLATE" >>. pQualifiedNameExpr
-
     // 11.4 <column definition> ::= <column name> [ <data type or domain name> ]
     //       [ <default clause> | <identity column specification> | <generation clause>
     //       | <system time period start column specification> | <system time period end column specification> ]
@@ -347,18 +449,6 @@ module DdlParser =
             { Constraint = body
               Characteristics = characteristics }
 
-    // 11.72 <sequence generator definition> ::= CREATE SEQUENCE <sequence generator name> [ <sequence generator options> ]
-    let pCreateSequenceStatement =
-        pKeyword "CREATE" >>. pKeyword "SEQUENCE" >>. pQualifiedNameExpr
-        .>>. many pSequenceOption
-        |>> fun (name, opts) -> CreateSequence(name, opts)
-
-    // 11.73 <alter sequence generator statement> ::= ALTER SEQUENCE <name> <options>
-    let pAlterSequenceStatement =
-        pKeyword "ALTER" >>. pKeyword "SEQUENCE" >>. pQualifiedNameExpr
-        .>>. many1 pSequenceOption
-        |>> fun (name, opts) -> AlterSequence(name, opts)
-
     // 11.3 <system or application time period specification>
     //     ::= PERIOD FOR SYSTEM_TIME | PERIOD FOR <application time period name>
     let pTimePeriodSpecification =
@@ -395,7 +485,7 @@ module DdlParser =
     // 11.3 <self-referencing column specification> ::=
     //     REF IS <self-referencing column name> [ <reference generation> ]
     // Shared by the <typed table element list> (11.3) and the <view element list> (11.32).
-    let pSelfReferencingColumn: Parser<SelfReferencingColumnSpecification, unit> =
+    let pSelfReferencingColumn =
         pKeyword "REF" >>. pKeyword "IS" >>. pIdentifierExpr
         .>>. opt pReferenceGeneration
         |>> fun (name, generation) -> { Name = name; Generation = generation }
@@ -447,7 +537,7 @@ module DdlParser =
         // 11.3 <column options> ::= <column name> WITH OPTIONS <column option list>
         // NOTE: `OPTIONS` is not a reserved word, so the mandatory `WITH OPTIONS` is
         // what tells a <column options> element from a <table constraint definition>.
-        let pColumnOptions: Parser<ColumnOptions, unit> =
+        let pColumnOptions =
             pIdentifierExpr .>> pKeyword "WITH" .>> pKeyword "OPTIONS"
             .>>. pColumnOptionList
             |>> fun (name, ((scope, defaultValue), constraints)) ->
@@ -561,7 +651,7 @@ module DdlParser =
     let pCreateViewStatement =
         // 11.32 <view column option> ::= <column name> WITH OPTIONS <scope clause>
         // (the <scope clause> is mandatory here, unlike in 11.3's <column option list>)
-        let pViewColumnOption: Parser<ViewColumnOptions, unit> =
+        let pViewColumnOption =
             pIdentifierExpr .>> pKeyword "WITH" .>> pKeyword "OPTIONS" .>>. pScopeClause
             |>> fun (name, scope) -> { Name = name; Scope = scope }
 
@@ -623,66 +713,9 @@ module DdlParser =
         <|> (pKeyword "CURRENT_USER" |>> ignore)
         <|> (pKeyword "CURRENT_ROLE" |>> ignore)
 
-    // 12.4 <role definition> ::= CREATE ROLE <role name> [ WITH ADMIN <grantor> ]
-    let pCreateRoleStatement =
-        pKeyword "CREATE" >>. pKeyword "ROLE" >>. pIdentifierExpr
-        .>>. opt (pKeyword "WITH" >>. pKeyword "ADMIN" >>. pGrantor)
-        |>> fun (name, _) -> CreateRole name
-
     // 12.3 <privilege column list> ::= ( <column name list> )
     let pPrivilegeColumnList =
         between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
-
-    // 10.6 <routine type> ::= ROUTINE | FUNCTION | PROCEDURE
-    //     | [ INSTANCE | STATIC | CONSTRUCTOR ] METHOD
-    let pRoutineType: Parser<RoutineType, unit> =
-        choice
-            [ pKeyword "ROUTINE" >>% RoutineType.Routine
-              pKeyword "FUNCTION" >>% RoutineType.Function
-              pKeyword "PROCEDURE" >>% RoutineType.Procedure
-              // 10.6 pMethodKind also serves 11.51 / 11.60 — it lives in Types.fs.
-              attempt (
-                  opt pMethodKind .>>. pKeyword "METHOD"
-                  |>> fun (methodKind, _) -> RoutineType.Method methodKind
-              ) ]
-
-    // 10.6 <routine designator> ::= [ <routine type> ] <qualified identifier>
-    // (<object name> in 12.2 / 12.3 — kept separate from <specific routine designator>
-    //  because <object name> carries a plain name, not a designator)
-    let pRoutineDesignatorWithType =
-        choice [ attempt (pRoutineType >>. pQualifiedNameExpr); pQualifiedNameExpr ]
-
-    // 10.6 <specific routine designator> ::=
-    //       SPECIFIC <routine type> <specific name>
-    //     | <routine type> <member name> [ FOR <schema-resolved user-defined type name> ]
-    // 10.6 <member name> ::= <member name alternatives> [ <data type list> ]
-    // A bare <schema qualified routine name> is also accepted (RoutineType = None) so that
-    // callers such as `ALTER ROUTINE add` keep working — see docs/trade-off.md.
-    let pSpecificRoutineDesignator: Parser<SpecificRoutineDesignator, unit> =
-        // 10.6 <data type list> ::= ( [ <data type> [ { <comma> <data type> }... ] ] )
-        let pDataTypeList =
-            between (token (pstring "(")) (token (pstring ")")) (sepBy pDataType (token (pstring ",")))
-
-        let mk isSpecific routineType name dataTypeList forType =
-            { IsSpecific = isSpecific
-              RoutineType = routineType
-              Name = name
-              DataTypeList = dataTypeList
-              ForType = forType }
-
-        choice
-            [ attempt (
-                  pKeyword "SPECIFIC" >>. pRoutineType .>>. pQualifiedNameExpr
-                  |>> fun (routineType, name) -> mk true (Some routineType) name None None
-              )
-              attempt (
-                  opt pRoutineType
-                  .>>. pQualifiedNameExpr
-                  .>>. opt (attempt pDataTypeList)
-                  .>>. opt (attempt (pKeyword "FOR" >>. pQualifiedNameExpr))
-                  |>> fun (((routineType, name), dataTypeList), forType) ->
-                      mk false routineType name dataTypeList forType
-              ) ]
 
     // 12.3 <privilege method list> ::= <specific routine designator> [ { , <specific routine designator> }... ]
     let pPrivilegeMethodList = sepBy1 pSpecificRoutineDesignator (token (pstring ","))
@@ -737,9 +770,6 @@ module DdlParser =
             [ attempt (opt pKind >>. pQualifiedNameExpr)
               attempt pRoutineDesignatorWithType ]
 
-    // 11.2 <drop behavior> ::= CASCADE | RESTRICT   (true = CASCADE, false = RESTRICT)
-    let pDropBehavior = pKeyword "CASCADE" >>% true <|> (pKeyword "RESTRICT" >>% false)
-
     // 12.2 <grant privilege statement> ::= GRANT <privileges> TO <grantee> [ { , <grantee> }... ]
     //     [ WITH HIERARCHY OPTION ] [ WITH GRANT OPTION ] [ GRANTED BY <grantor> ]
     let pGrantStatement =
@@ -771,6 +801,12 @@ module DdlParser =
                           GrantStatement.GrantRoles(roles, grantees, Option.isSome withAdm)
                   ) ]
         |>> Grant
+
+    // 12.4 <role definition> ::= CREATE ROLE <role name> [ WITH ADMIN <grantor> ]
+    let pCreateRoleStatement =
+        pKeyword "CREATE" >>. pKeyword "ROLE" >>. pIdentifierExpr
+        .>>. opt (pKeyword "WITH" >>. pKeyword "ADMIN" >>. pGrantor)
+        |>> fun (name, _) -> CreateRole name
 
     // 12.7 <revoke statement> ::= <revoke privilege statement> | <revoke role statement>
     // 12.7 <revoke option extension> ::= GRANT OPTION FOR | HIERARCHY OPTION FOR
@@ -887,7 +923,7 @@ module DdlParser =
     //     ::= ADD [ COLUMN ] <column definition 1> ADD [ COLUMN ] <column definition 2>
     // Both columns are required by the grammar, so this parser yields exactly two entries.
     let pAddSystemTimePeriodColumnList =
-        (pKeyword "ADD" >>. opt (pKeyword "COLUMN") >>. pColumnDefinition)
+        pKeyword "ADD" >>. opt (pKeyword "COLUMN") >>. pColumnDefinition
         .>>. (pKeyword "ADD" >>. opt (pKeyword "COLUMN") >>. pColumnDefinition)
         |>> fun (first, second) -> [ first; second ]
 
@@ -910,7 +946,7 @@ module DdlParser =
         //       | <alter identity column option>...
         // At least one of the two alternatives must match, so the parser never succeeds on empty
         // input (which would otherwise shadow the remaining <alter column action> alternatives).
-        let pAlterIdentityColumnSpecification: Parser<AlterIdentityColumnSpecification, unit> =
+        let pAlterIdentityColumnSpecification =
             attempt (
                 pSetIdentityColumnGeneration .>>. many pAlterIdentityColumnOption
                 |>> fun (generation, opts) ->
@@ -1016,63 +1052,6 @@ module DdlParser =
 
         pKeyword "ALTER" >>. pKeyword "TABLE" >>. pQualifiedNameExpr .>>. pAction
         |>> fun (name, action) -> { Table = name; Action = action } |> AlterTable
-
-    // 14.10 <truncate table statement> ::= TRUNCATE TABLE <target table> [ <identity column restart option> ]
-    let pTruncateStatement =
-        pKeyword "TRUNCATE" >>. opt (pKeyword "TABLE") >>. pQualifiedNameExpr
-        .>>. opt (
-            pKeyword "RESTART" >>. pKeyword "IDENTITY" >>% true
-            <|> (pKeyword "CONTINUE" >>. pKeyword "IDENTITY" >>% false)
-        )
-        |>> fun (table, restart) -> Truncate(table, restart)
-
-    // Forward reference to the full DDL statement set; a <schema element> is any
-    // DDL statement. Wired to pDdl in SqlParser.fs (which also contains the
-    // CREATE SCHEMA parser that consumes these elements).
-    // 11.1 <schema element> ::= <table definition> | <view definition> | <domain definition> | ...
-    let pSchemaElement, pSchemaElementImpl =
-        createParserForwardedToRef<StatementKind, unit> ()
-
-    // 11.1 <schema definition> ::= CREATE SCHEMA <schema name clause> [ <schema character set or path> ] [ <schema element>... ]
-    let pCreateSchemaStatement =
-        let pNameClause =
-            choice
-                [ attempt (
-                      pQualifiedNameExpr .>>. opt (pKeyword "AUTHORIZATION" >>. pIdentifierExpr)
-                      |>> fun (name, auth) -> Some name, auth
-                  )
-                  pKeyword "AUTHORIZATION" >>. pIdentifierExpr |>> fun auth -> None, Some auth ]
-
-        // 11.1 <schema character set or path> ::=
-        //     <schema character set specification>
-        //   | <schema path specification>
-        //   | <character set specification> <path specification>
-        //   | <path specification> <character set specification>
-        let pSchemaCharsetOrPath =
-            let pCharset =
-                pKeyword "DEFAULT"
-                >>. pKeyword "CHARACTER"
-                >>. pKeyword "SET"
-                >>. pQualifiedNameExpr
-
-            // 10.3 <path specification> ::= PATH <path-resolved user-defined type name> [ { <comma> ... }... ]
-            let pPath = pKeyword "PATH" >>. sepBy1 pQualifiedNameExpr (token (pstring ","))
-
-            choice
-                [ attempt (pCharset .>>. opt (attempt pPath) |>> fun (c, p) -> Some c, p)
-                  attempt (pPath .>>. opt (attempt pCharset) |>> fun (p, c) -> c, Some p)
-                  preturn (None, None) ]
-
-        pKeyword "CREATE" >>. pKeyword "SCHEMA" >>. pNameClause
-        .>>. pSchemaCharsetOrPath
-        .>>. many pSchemaElement
-        |>> fun ((nameClause, (charset, path)), elements) ->
-            CreateSchema
-                { Name = fst nameClause
-                  Authorization = snd nameClause
-                  CharacterSet = charset
-                  Path = path
-                  Elements = elements }
 
     // 11.34 <domain constraint> ::= [ <constraint name definition> ] CHECK ( <search condition> ) [ <constraint characteristics> ]
     let pDomainConstraint =
@@ -1256,3 +1235,24 @@ module DdlParser =
         >>. pQualifiedNameExpr
         .>>. many1 pAlterTransformGroup
         |>> fun (name, groups) -> AlterTransform(name, groups)
+
+    // 11.72 <sequence generator definition> ::= CREATE SEQUENCE <sequence generator name> [ <sequence generator options> ]
+    let pCreateSequenceStatement =
+        pKeyword "CREATE" >>. pKeyword "SEQUENCE" >>. pQualifiedNameExpr
+        .>>. many pSequenceOption
+        |>> fun (name, opts) -> CreateSequence(name, opts)
+
+    // 11.73 <alter sequence generator statement> ::= ALTER SEQUENCE <name> <options>
+    let pAlterSequenceStatement =
+        pKeyword "ALTER" >>. pKeyword "SEQUENCE" >>. pQualifiedNameExpr
+        .>>. many1 pSequenceOption
+        |>> fun (name, opts) -> AlterSequence(name, opts)
+
+    // 14.10 <truncate table statement> ::= TRUNCATE TABLE <target table> [ <identity column restart option> ]
+    let pTruncateStatement =
+        pKeyword "TRUNCATE" >>. opt (pKeyword "TABLE") >>. pQualifiedNameExpr
+        .>>. opt (
+            pKeyword "RESTART" >>. pKeyword "IDENTITY" >>% true
+            <|> (pKeyword "CONTINUE" >>. pKeyword "IDENTITY" >>% false)
+        )
+        |>> fun (table, restart) -> Truncate(table, restart)

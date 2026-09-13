@@ -6,7 +6,7 @@ open SqlParser.ExpressionParser
 
 module TransactionParser =
     // 17.3 <level of isolation> ::= READ UNCOMMITTED | READ COMMITTED | REPEATABLE READ | SERIALIZABLE
-    let pIsolationLevel: CharStream<unit> -> Reply<IsolationLevel> =
+    let pIsolationLevel =
         choice
             [ attempt (pKeyword "READ" >>. pKeyword "UNCOMMITTED" >>% ReadUncommitted)
               attempt (pKeyword "READ" >>. pKeyword "COMMITTED" >>% ReadCommitted)

@@ -67,7 +67,8 @@ module DiagnosticsParser =
         pKeyword "GET"
         >>. pKeyword "DIAGNOSTICS"
         >>. (attempt (
-                 pKeyword "CONDITION" >>. pExpression .>>. sepBy1 pConditionInfoItem (token (pstring ","))
+                 pKeyword "CONDITION" >>. pExpression
+                 .>>. sepBy1 pConditionInfoItem (token (pstring ","))
                  |>> fun (num, items) -> ConditionInfo(num, items)
              )
              <|> attempt (

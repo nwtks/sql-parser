@@ -3,6 +3,30 @@ namespace SqlParser
 open FParsec
 
 module Lexer =
+    let ws = spaces
+
+    // 5.1 <quote> ::= '
+    let pQuote: Parser<char, unit> = pchar '\''
+
+    // ---- 5.1 <SQL special character> -----------------------------------------
+    // Terminal characters that have no other home. <simple Latin letter>,
+    // <digit>, <space>, <underscore>, <double quote>, <ampersand>, <apostrophe>,
+    // and the operator/punctuation terminals consumed by <value expression> /
+    // <predicate> / statement parsers are already modelled by their own parsers.
+    // <percent> and <reverse solidus> are deliberately absent: they occur only
+    // inside the embedded XQuery-regex (8.6) and SQL/JSON-path (9.38/9.39)
+    // languages, whose text is kept opaque — see docs/trade-off.md.
+    // 5.1 <left brace> ::= {
+    let pLeftBrace: Parser<char, unit> = pchar '{'
+    // 5.1 <right brace> ::= }
+    let pRightBrace: Parser<char, unit> = pchar '}'
+    // 5.1 <circumflex> ::= ^
+    let pCircumflex: Parser<char, unit> = pchar '^'
+    // 5.1 <vertical bar> ::= |
+    let pVerticalBar: Parser<char, unit> = pchar '|'
+    // 5.1 <dollar sign> ::= $
+    let pDollarSign: Parser<char, unit> = pchar '$'
+
     // 5.2 <reserved word> — keywords that cannot be used as <regular identifier>
     let reservedWords =
         Set.ofList
@@ -370,29 +394,6 @@ module Lexer =
               "WITHOUT"
               "YEAR" ]
 
-    let ws = spaces
-
-    // 5.1 <quote> ::= '
-    let pQuote = pchar '\''
-
-    // ---- 5.1 <SQL special character> -----------------------------------------
-    // Terminal characters that have no other home. <simple Latin letter>,
-    // <digit>, <space>, <underscore>, <double quote>, <ampersand>, <apostrophe>,
-    // and the operator/punctuation terminals consumed by <value expression> /
-    // <predicate> / statement parsers are already modelled by their own parsers.
-    // <percent> and <reverse solidus> are deliberately absent: they occur only
-    // inside the embedded XQuery-regex (8.6) and SQL/JSON-path (9.38/9.39)
-    // languages, whose text is kept opaque — see docs/trade-off.md.
-    // 5.1 <left brace> ::= {
-    let pLeftBrace: Parser<char, unit> = pchar '{'
-    // 5.1 <right brace> ::= }
-    let pRightBrace: Parser<char, unit> = pchar '}'
-    // 5.1 <circumflex> ::= ^
-    let pCircumflex: Parser<char, unit> = pchar '^'
-    // 5.1 <vertical bar> ::= |
-    let pVerticalBar: Parser<char, unit> = pchar '|'
-    // 5.1 <dollar sign> ::= $
-    let pDollarSign: Parser<char, unit> = pchar '$'
     // 5.2 <left brace minus> ::= {-
     let pLeftBraceMinus: Parser<string, unit> = pstring "{-"
     // 5.2 <right minus brace> ::= -}
@@ -468,6 +469,63 @@ module Lexer =
         opt (pKeyword "UESCAPE" >>. pQuote >>. pAnyRune .>> pQuote)
         |>> Option.defaultValue "\\"
 
+    // 5.2 <SQL language identifier> ::= <SQL language identifier start> [ <SQL language identifier part>... ]
+    // <SQL language identifier start> ::= <simple Latin letter>
+    // <SQL language identifier part> ::= <simple Latin letter> | <digit> | <underscore>
+    let pSqlLanguageIdentifier =
+        many1Satisfy2L isAsciiLetter (fun c -> isAsciiLetter c || isDigit c || c = '_') "SQL language identifier"
+        |>> (fun s -> s.ToUpperInvariant())
+        .>> ws
+
+    // 5.2 <identifier body> — <identifier start> [ <identifier part>... ]
+    let isIdentifierStartChar c = isLetter c || c = '_'
+    let isIdentifierPartChar c = isLetter c || isDigit c || c = '_'
+
+    // 5.2 <regular identifier> ::= <identifier body>
+    let pIdentifierRaw =
+        many1Satisfy2L isIdentifierStartChar isIdentifierPartChar "identifier"
+        |>> (fun s -> s.ToUpperInvariant())
+        .>> ws
+
+    // 5.2 <regular identifier> — fails on <reserved word>
+    let pRegularIdentifier =
+        attempt (
+            pIdentifierRaw
+            >>= fun s ->
+                if reservedWords.Contains s then
+                    fail "reserved word."
+                else
+                    preturn s
+        )
+
+    // 5.2 <delimited identifier> ::= <double quote> <delimited identifier body> <double quote>
+    // <delimited identifier body> ::= <delimited identifier part> ...
+    // <delimited identifier part> ::= <nondoublequote character> | <doublequote symbol>
+    let pDelimitedIdentifier =
+        between (pchar '\"') (pchar '\"') (manyChars (attempt (pstring "\"\"") >>% '\"' <|> noneOf "\""))
+
+    // 5.2 <Unicode delimiter body> ::= <Unicode identifier part>...
+    // <Unicode identifier part> ::= <delimited identifier part> | <Unicode escape value>
+    let pUnicodeDelimiterBody esc =
+        many (
+            choice
+                [ attempt (pUnicode6DigitEscape esc)
+                  attempt (pUnicodeEscape esc)
+                  attempt (pUnicode4DigitEscape esc)
+                  attempt (pUnicodeEscape "\"")
+                  attempt (many1Chars (noneOf (esc + "\""))) ]
+        )
+        |>> String.concat ""
+
+    // 5.2 <Unicode delimited identifier> ::= U <ampersand> <double quote> <Unicode delimiter body> <double quote> <Unicode escape specifier>
+    let pUnicodeDelimitedIdentifier =
+        pchar 'U'
+        >>. pchar '&'
+        >>. lookAhead (pDelimitedIdentifier .>>. pUnicodeEscapeSpecifier |>> snd)
+        >>= fun esc ->
+            between (pchar '"') (pchar '"') (pUnicodeDelimiterBody esc)
+            .>> pUnicodeEscapeSpecifier
+
     // 5.3 <unsigned integer> ::= <digit>...
     let pUnsignedInteger = many1Chars digit |>> uint64
 
@@ -514,14 +572,6 @@ module Lexer =
 
     // 5.3 <introducer> ::= <underscore>
     let pIntroducer = pchar '_' .>> ws
-
-    // 5.2 <SQL language identifier> ::= <SQL language identifier start> [ <SQL language identifier part>... ]
-    // <SQL language identifier start> ::= <simple Latin letter>
-    // <SQL language identifier part> ::= <simple Latin letter> | <digit> | <underscore>
-    let pSqlLanguageIdentifier =
-        many1Satisfy2L isAsciiLetter (fun c -> isAsciiLetter c || isDigit c || c = '_') "SQL language identifier"
-        |>> (fun s -> s.ToUpperInvariant())
-        .>> ws
 
     // 10.5 <character set specification> ::= <character set name>
     // <character set name> ::= [ <schema name> <period> ] <SQL language identifier>
@@ -588,6 +638,12 @@ module Lexer =
         pchar 'X' >>. pSegment .>>. many (attempt (pSeparator >>. pSegment))
         |>> fun (first, rest) -> first :: rest |> List.concat |> List.toArray
         .>> ws
+
+    // 5.3 <boolean literal> ::= TRUE | FALSE | UNKNOWN
+    let pBooleanLiteral: Parser<bool option, unit> =
+        pKeyword "TRUE" >>% Some true
+        <|> (pKeyword "FALSE" >>% Some false)
+        <|> (pKeyword "UNKNOWN" >>% None)
 
     // 5.3 <date value> ::= <years value> <minus sign> <months value> <minus sign> <days value>
     let pDateValue =
@@ -724,7 +780,7 @@ module Lexer =
         attempt pRange <|> pSingle
 
     // 5.3 <unquoted interval string> — validates <year-month literal> | <day-time literal> against <interval qualifier>
-    let isValidIntervalValue (q: IntervalQualifier) (s: string) =
+    let isValidIntervalValue q (s: string) =
         let d = @"\d+"
         let sec = @"\d+(\.\d+)?"
 
@@ -769,61 +825,6 @@ module Lexer =
             else
                 fail "invalid interval value"
 
-    // 5.3 <boolean literal> ::= TRUE | FALSE | UNKNOWN
-    let pBooleanLiteral: Parser<bool option, unit> =
-        pKeyword "TRUE" >>% Some true
-        <|> (pKeyword "FALSE" >>% Some false)
-        <|> (pKeyword "UNKNOWN" >>% None)
-
-    // 5.2 <identifier body> — <identifier start> [ <identifier part>... ]
-    let isIdentifierStartChar c = isLetter c || c = '_'
-    let isIdentifierPartChar c = isLetter c || isDigit c || c = '_'
-
-    // 5.2 <regular identifier> ::= <identifier body>
-    let pIdentifierRaw =
-        many1Satisfy2L isIdentifierStartChar isIdentifierPartChar "identifier"
-        |>> (fun s -> s.ToUpperInvariant())
-        .>> ws
-
-    // 5.2 <regular identifier> — fails on <reserved word>
-    let pRegularIdentifier =
-        attempt (
-            pIdentifierRaw
-            >>= fun s ->
-                if reservedWords.Contains s then
-                    fail "reserved word."
-                else
-                    preturn s
-        )
-
-    // 5.2 <delimited identifier> ::= <double quote> <delimited identifier body> <double quote>
-    // <delimited identifier body> ::= <delimited identifier part> ...
-    // <delimited identifier part> ::= <nondoublequote character> | <doublequote symbol>
-    let pDelimitedIdentifier =
-        between (pchar '\"') (pchar '\"') (manyChars (attempt (pstring "\"\"") >>% '\"' <|> noneOf "\""))
-
-    // 5.2 <Unicode delimiter body> ::= <Unicode identifier part>...
-    // <Unicode identifier part> ::= <delimited identifier part> | <Unicode escape value>
-    let pUnicodeDelimiterBody esc =
-        many (
-            choice
-                [ attempt (pUnicode6DigitEscape esc)
-                  attempt (pUnicodeEscape esc)
-                  attempt (pUnicode4DigitEscape esc)
-                  attempt (pUnicodeEscape "\"")
-                  attempt (many1Chars (noneOf (esc + "\""))) ]
-        )
-        |>> String.concat ""
-
-    // 5.2 <Unicode delimited identifier> ::= U <ampersand> <double quote> <Unicode delimiter body> <double quote> <Unicode escape specifier>
-    let pUnicodeDelimitedIdentifier =
-        pchar 'U'
-        >>. pchar '&'
-        >>. lookAhead (pDelimitedIdentifier .>>. pUnicodeEscapeSpecifier |>> snd)
-        >>= fun esc ->
-            between (pchar '"') (pchar '"') (pUnicodeDelimiterBody esc)
-            .>> pUnicodeEscapeSpecifier
-
     // 5.4 <identifier> ::= <actual identifier> — <regular identifier> | <delimited identifier> | <Unicode delimited identifier>
     let pIdentifier =
         choice
@@ -840,9 +841,11 @@ module Lexer =
         pIdentifier .>>. many (token (pstring ".") >>. pIdentifier)
         |>> fun (first, rest) -> first :: rest
 
-    // 6.4 <dynamic parameter specification> ::= <question mark>
-    let pQuestionMark: Parser<char, unit> = pchar '?' .>> ws
-
     // 5.4 <host parameter name> ::= <colon> <identifier>
     let pHostParameter: Parser<string, unit> =
         pchar ':' >>. pIdentifier |>> (fun name -> ":" + name) .>> ws
+
+    // 5.4 <scope option> ::= GLOBAL | LOCAL
+    let pScopeOption: Parser<ScopeOption, unit> =
+        pKeyword "GLOBAL" >>% ScopeOption.ScopeGlobal
+        <|> (pKeyword "LOCAL" >>% ScopeOption.ScopeLocal)

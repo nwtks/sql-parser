@@ -6,26 +6,6 @@ open SqlParser.ExpressionParser
 open SqlParser.QueryParser
 
 module DmlParser =
-    // 14.11 <override clause> ::= OVERRIDING USER VALUE | OVERRIDING SYSTEM VALUE
-    // (None when absent; Some true = USER, Some false = SYSTEM)
-    let pOverride =
-        opt (
-            pKeyword "OVERRIDING"
-            >>. (pKeyword "USER" >>% true <|> (pKeyword "SYSTEM" >>% false))
-            .>> pKeyword "VALUE"
-        )
-
-    // 14.9/14.14 FOR PORTION OF <application time period name> FROM <point in time 1> TO <point in time 2>
-    //     FROM <point in time 1> TO <point in time 2>
-    let pPortionOf =
-        pKeyword "FOR" >>. pKeyword "PORTION" >>. pKeyword "OF" >>. pIdentifierExpr
-        .>>. (pKeyword "FROM" >>. (pDatetimeValueExpression .>> ws))
-        .>>. (pKeyword "TO" >>. (pDatetimeValueExpression .>> ws))
-        |>> fun ((period, fromPoint), toPoint) ->
-            { PeriodName = period
-              From = fromPoint
-              To = toPoint }
-
     // 7.12 <where clause> (positioned 14.8/14.13, searched 14.9/14.14)
     //   positioned: WHERE CURRENT OF <cursor name>
     //   searched:   WHERE <search condition>
@@ -44,15 +24,20 @@ module DmlParser =
         attempt (
             pKeyword "ONLY"
             >>. between (token (pstring "(")) (token (pstring ")")) pQualifiedNameExpr
-            |>> fun name -> (name, true)
+            |>> fun name -> name, true
         )
-        <|> (pQualifiedNameExpr |>> fun name -> (name, false))
+        <|> (pQualifiedNameExpr |>> fun name -> name, false)
 
-    // 20.25 <preparable dynamic delete statement: positioned> /
-    // 20.27 <preparable dynamic update statement: positioned> omit the <target table>.
-    let pOptionalDmlTarget =
-        (attempt pTargetTable |>> DmlTarget.TableTarget)
-        <|> preturn DmlTarget.OmittedTarget
+    // 14.9/14.14 FOR PORTION OF <application time period name> FROM <point in time 1> TO <point in time 2>
+    //     FROM <point in time 1> TO <point in time 2>
+    let pPortionOf =
+        pKeyword "FOR" >>. pKeyword "PORTION" >>. pKeyword "OF" >>. pIdentifierExpr
+        .>>. (pKeyword "FROM" >>. (pDatetimeValueExpression .>> ws))
+        .>>. (pKeyword "TO" >>. (pDatetimeValueExpression .>> ws))
+        |>> fun ((period, fromPoint), toPoint) ->
+            { PeriodName = period
+              From = fromPoint
+              To = toPoint }
 
     // 20.25/20.27 — the omitted target form is only valid when the statement is
     // positioned through a dynamic cursor and carries no <portion of>, correlation
@@ -72,6 +57,54 @@ module DmlParser =
                 + " may only be omitted for a positioned statement (WHERE CURRENT OF)"
             )
         | _ -> preturn ()
+
+    // 14.8 <delete statement: positioned> ::= DELETE FROM <target table> [ [ AS ] <correlation name> ] WHERE CURRENT OF <cursor name>
+    // 14.9 <delete statement: searched>   ::= DELETE FROM <target table>
+    //     [ FOR PORTION OF <application time period name> FROM <point in time 1> TO <point in time 2> ]
+    //     [ [ AS ] <correlation name> ] [ WHERE <search condition> ]
+    // 20.25 <preparable dynamic delete statement: positioned> ::= DELETE [ FROM <target table> ]
+    //     WHERE CURRENT OF <preparable dynamic cursor name>
+    let pDeleteStatement =
+        pKeyword "DELETE" >>. opt (attempt (pKeyword "FROM" >>. pTargetTable))
+        .>>. opt (attempt pPortionOf)
+        .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
+        .>>. opt pWhereClause
+        >>= fun (((target, portion), alias), whr) ->
+            let cursor, where =
+                match whr with
+                | Some(c, w) -> c, w
+                | None -> None, None
+
+            let target =
+                match target with
+                | Some(name, isOnly) -> DmlTarget.TableTarget(name, isOnly)
+                | None -> DmlTarget.OmittedTarget
+
+            let statement =
+                { Target = target
+                  TableAlias = alias
+                  Where = where
+                  PortionOf = portion
+                  Cursor = cursor }
+                |> Delete
+
+            pOmittedTargetGuard
+                "preparable dynamic delete statement: positioned (20.25)"
+                target
+                cursor
+                where
+                portion
+                alias
+            >>. preturn statement
+
+    // 14.11 <override clause> ::= OVERRIDING USER VALUE | OVERRIDING SYSTEM VALUE
+    // (None when absent; Some true = USER, Some false = SYSTEM)
+    let pOverride =
+        opt (
+            pKeyword "OVERRIDING"
+            >>. (pKeyword "USER" >>% true <|> (pKeyword "SYSTEM" >>% false))
+            .>> pKeyword "VALUE"
+        )
 
     // 14.11 <insert statement> ::= INSERT INTO <insertion target> <insert columns and source>
     // 14.11 <insertion target> ::= <table name>
@@ -104,6 +137,72 @@ module DmlParser =
               Source = source
               Override = ovr }
             |> Insert
+
+    // 14.12 <merge statement> ::= MERGE INTO <target table> [ [ AS ] <merge correlation name> ]
+    //     USING <table reference> ON <search condition> <merge operation specification>
+    // <merge operation specification> ::= <merge when clause>...
+    // <merge when clause> ::= <merge when matched clause> | <merge when not matched clause>
+    let pMergeStatement =
+        // 14.12 <merge update specification> ::= UPDATE SET <set clause list>
+        // 14.12 <merge delete specification> ::= DELETE
+        // 14.12 <merge insert specification> ::= INSERT [ ( <insert column list> ) ] [ <override clause> ] VALUES <merge insert value list>
+        let pAction =
+            // <merge update specification> ::= UPDATE SET <set clause list> (14.12)
+            // <merge delete specification> ::= DELETE
+            // <merge insert specification> ::= INSERT [ ( <insert column list> ) ] [ <override clause> ] VALUES <merge insert value list>
+            choice
+                [ attempt (pKeyword "UPDATE" >>. pKeyword "SET")
+                  >>. sepBy1 (pIdentifierExpr .>> token (pstring "=") .>>. pExpression) (token (pstring ","))
+                  |>> MergeUpdate
+                  pKeyword "DELETE" >>% MergeDelete
+                  pKeyword "INSERT"
+                  >>. opt (
+                      between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
+                  )
+                  .>>. pOverride
+                  .>> pKeyword "VALUES"
+                  .>>. between
+                      (token (pstring "("))
+                      (token (pstring ")"))
+                      (sepBy1 (pDefaultValue <|> pExpression) (token (pstring ",")))
+                  |>> fun ((cols, ovr), values) -> MergeInsert(cols, ovr, values) ]
+
+        // 14.12 <merge when matched clause>     ::= WHEN MATCHED [ AND <search condition> ] THEN <merge update or delete specification>
+        // 14.12 <merge when not matched clause> ::= WHEN NOT MATCHED [ AND <search condition> ] THEN <merge insert specification>
+        let pWhenMatch =
+            pKeyword "WHEN"
+            >>. choice
+                    [ attempt (pKeyword "NOT" .>> pKeyword "MATCHED") >>% NotMatched
+                      pKeyword "MATCHED" >>% Matched ]
+            .>>. opt (pKeyword "AND" >>. pExpression)
+            .>> pKeyword "THEN"
+            .>>. pAction
+            |>> fun ((cond, filter), action) ->
+                { MatchCondition = cond
+                  Condition = filter
+                  Action = action }
+
+        pKeyword "MERGE" >>. pKeyword "INTO" >>. pTargetTable
+        .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
+        .>> pKeyword "USING"
+        .>>. pTableReference
+        .>> pKeyword "ON"
+        .>>. pExpression
+        .>>. many1 pWhenMatch
+        |>> fun (((((target, targetIsOnly), alias), source), on), whens) ->
+            { Target = target
+              TargetIsOnly = targetIsOnly
+              TargetAlias = alias
+              Source = source
+              On = on
+              WhenClauses = whens }
+            |> Merge
+
+    // 20.25 <preparable dynamic delete statement: positioned> /
+    // 20.27 <preparable dynamic update statement: positioned> omit the <target table>.
+    let pOptionalDmlTarget =
+        attempt pTargetTable |>> DmlTarget.TableTarget
+        <|> preturn DmlTarget.OmittedTarget
 
     // 14.13 <update statement: positioned> ::= UPDATE <target table> [ [ AS ] <correlation name> ] SET <set clause list> WHERE CURRENT OF <cursor name>
     // 14.14 <update statement: searched>   ::= UPDATE <target table> [ FOR PORTION OF <application time period name> FROM <point in time 1> TO <point in time 2> ]
@@ -177,102 +276,3 @@ module DmlParser =
                 portion
                 alias
             >>. preturn statement
-
-    // 14.8 <delete statement: positioned> ::= DELETE FROM <target table> [ [ AS ] <correlation name> ] WHERE CURRENT OF <cursor name>
-    // 14.9 <delete statement: searched>   ::= DELETE FROM <target table>
-    //     [ FOR PORTION OF <application time period name> FROM <point in time 1> TO <point in time 2> ]
-    //     [ [ AS ] <correlation name> ] [ WHERE <search condition> ]
-    // 20.25 <preparable dynamic delete statement: positioned> ::= DELETE [ FROM <target table> ]
-    //     WHERE CURRENT OF <preparable dynamic cursor name>
-    let pDeleteStatement =
-        pKeyword "DELETE" >>. opt (attempt (pKeyword "FROM" >>. pTargetTable))
-        .>>. opt (attempt pPortionOf)
-        .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
-        .>>. opt pWhereClause
-        >>= fun (((target, portion), alias), whr) ->
-            let cursor, where =
-                match whr with
-                | Some(c, w) -> c, w
-                | None -> None, None
-
-            let target =
-                match target with
-                | Some(name, isOnly) -> DmlTarget.TableTarget(name, isOnly)
-                | None -> DmlTarget.OmittedTarget
-
-            let statement =
-                { Target = target
-                  TableAlias = alias
-                  Where = where
-                  PortionOf = portion
-                  Cursor = cursor }
-                |> Delete
-
-            pOmittedTargetGuard
-                "preparable dynamic delete statement: positioned (20.25)"
-                target
-                cursor
-                where
-                portion
-                alias
-            >>. preturn statement
-
-    // 14.12 <merge statement> ::= MERGE INTO <target table> [ [ AS ] <merge correlation name> ]
-    //     USING <table reference> ON <search condition> <merge operation specification>
-    // <merge operation specification> ::= <merge when clause>...
-    // <merge when clause> ::= <merge when matched clause> | <merge when not matched clause>
-    let pMergeStatement =
-        // 14.12 <merge update specification> ::= UPDATE SET <set clause list>
-        // 14.12 <merge delete specification> ::= DELETE
-        // 14.12 <merge insert specification> ::= INSERT [ ( <insert column list> ) ] [ <override clause> ] VALUES <merge insert value list>
-        let pAction =
-            // <merge update specification> ::= UPDATE SET <set clause list> (14.12)
-            // <merge delete specification> ::= DELETE
-            // <merge insert specification> ::= INSERT [ ( <insert column list> ) ] [ <override clause> ] VALUES <merge insert value list>
-            choice
-                [ attempt (pKeyword "UPDATE" >>. pKeyword "SET")
-                  >>. sepBy1 (pIdentifierExpr .>> token (pstring "=") .>>. pExpression) (token (pstring ","))
-                  |>> MergeUpdate
-                  pKeyword "DELETE" >>% MergeDelete
-                  pKeyword "INSERT"
-                  >>. opt (
-                      between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
-                  )
-                  .>>. pOverride
-                  .>> pKeyword "VALUES"
-                  .>>. between
-                      (token (pstring "("))
-                      (token (pstring ")"))
-                      (sepBy1 (pDefaultValue <|> pExpression) (token (pstring ",")))
-                  |>> fun ((cols, ovr), values) -> MergeInsert(cols, ovr, values) ]
-
-        // 14.12 <merge when matched clause>     ::= WHEN MATCHED [ AND <search condition> ] THEN <merge update or delete specification>
-        // 14.12 <merge when not matched clause> ::= WHEN NOT MATCHED [ AND <search condition> ] THEN <merge insert specification>
-        let pWhenMatch =
-            pKeyword "WHEN"
-            >>. choice
-                    [ attempt (pKeyword "NOT" .>> pKeyword "MATCHED") >>% NotMatched
-                      pKeyword "MATCHED" >>% Matched ]
-            .>>. opt (pKeyword "AND" >>. pExpression)
-            .>> pKeyword "THEN"
-            .>>. pAction
-            |>> fun ((cond, filter), action) ->
-                { MatchCondition = cond
-                  Condition = filter
-                  Action = action }
-
-        pKeyword "MERGE" >>. pKeyword "INTO" >>. pTargetTable
-        .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
-        .>> pKeyword "USING"
-        .>>. pTableReference
-        .>> pKeyword "ON"
-        .>>. pExpression
-        .>>. many1 pWhenMatch
-        |>> fun (((((target, targetIsOnly), alias), source), on), whens) ->
-            { Target = target
-              TargetIsOnly = targetIsOnly
-              TargetAlias = alias
-              Source = source
-              On = on
-              WhenClauses = whens }
-            |> Merge

@@ -17,14 +17,27 @@ open SqlParser.DiagnosticsParser
 open SqlParser.DynamicParser
 
 module SqlParser =
-    // 4 <SQL statement> — top-level dispatcher (wired via pStatementRef)
-    let pStatement, pStatementRef = createParserForwardedToRef<Statement, unit> ()
-
     let withStmtPosition p =
         getPosition .>>. p
         |>> fun (pos, kind) ->
             { Kind = kind
               Pos = { Line = pos.Line; Column = pos.Column } }
+
+    // 4 <SQL statement> — top-level dispatcher (wired via pStatementRef)
+    let pStatement, pStatementRef = createParserForwardedToRef<Statement, unit> ()
+
+    // 5.1 <semicolon> ::= ;
+    let pSemicolon = token (pstring ";")
+
+    // 7.17 <with clause> + <query expression> — WITH [ RECURSIVE ] <with list>
+    // <query expression body>. The body is a query only: <with clause> is a prefix of
+    // <query expression> (7.17), so `WITH ... INSERT/UPDATE/DELETE/MERGE` is not a valid
+    // <SQL statement> and is rejected by both entry points.
+    let pWithStatement =
+        pWithClause .>>. (pQuery |>> Select |> withStmtPosition)
+        |>> fun ((recu, ctes), stmt) ->
+            { Kind = WithStatement(recu, ctes, stmt.Kind)
+              Pos = stmt.Pos }
 
     // <data change statement> (7.6) — the DML statements allowed inside a
     // <data change delta table> (FINAL|NEW|OLD TABLE ( ... )). Wired here because
@@ -121,26 +134,6 @@ module SqlParser =
               pDeleteStatement
               pMergeStatement ]
 
-    // 22.1 <directly executable statement> — only the *searched* forms of <update statement>
-    // (14.14) and <delete statement> (14.9) are directly executable. The positioned forms
-    // (14.13 / 14.8, entered through WHERE CURRENT OF) are reachable only from a
-    // <SQL procedure statement> (13.4), so they are excluded from pDirectSqlStatement.
-    let pSearchedUpdateStatement =
-        pUpdateStatement
-        >>= fun stmt ->
-            match stmt with
-            | StatementKind.Update { Cursor = Some _ } ->
-                fail "a positioned <update statement> (14.13) is not directly executable (22.1)."
-            | _ -> preturn stmt
-
-    let pSearchedDeleteStatement =
-        pDeleteStatement
-        >>= fun stmt ->
-            match stmt with
-            | StatementKind.Delete { Cursor = Some _ } ->
-                fail "a positioned <delete statement> (14.8) is not directly executable (22.1)."
-            | _ -> preturn stmt
-
     // 16 <SQL control statement> ::= <call statement> | <return statement>
     let pControl = choice [ attempt pCallStatement; attempt pReturnStatement ]
 
@@ -196,34 +189,25 @@ module SqlParser =
               attempt pCopyDescriptorStatement
               attempt pPipeRowStatement ]
 
-    // 23.1 <get diagnostics statement> ::= GET DIAGNOSTICS <SQL diagnostics information>
-    let pDiagnostics = choice [ attempt pGetDiagnosticsStatement ]
+    // 22.1 <directly executable statement> — only the *searched* forms of <update statement>
+    // (14.14) and <delete statement> (14.9) are directly executable. The positioned forms
+    // (14.13 / 14.8, entered through WHERE CURRENT OF) are reachable only from a
+    // <SQL procedure statement> (13.4), so they are excluded from pDirectSqlStatement.
+    let pSearchedUpdateStatement =
+        pUpdateStatement
+        >>= fun stmt ->
+            match stmt with
+            | Update { Cursor = Some _ } ->
+                fail "a positioned <update statement> (14.13) is not directly executable (22.1)."
+            | _ -> preturn stmt
 
-    // 7.17 <with clause> + <query expression> — WITH [ RECURSIVE ] <with list>
-    // <query expression body>. The body is a query only: <with clause> is a prefix of
-    // <query expression> (7.17), so `WITH ... INSERT/UPDATE/DELETE/MERGE` is not a valid
-    // <SQL statement> and is rejected by both entry points.
-    let pWithStatement =
-        pWithClause .>>. ((pQuery |>> Select) |> withStmtPosition)
-        |>> fun ((recu, ctes), stmt) ->
-            { Kind = WithStatement(recu, ctes, stmt.Kind)
-              Pos = stmt.Pos }
-
-    pStatementRef.Value <-
-        choice
-            [ attempt pWithStatement
-              attempt (pCursor |> withStmtPosition)
-              attempt (pDml |> withStmtPosition)
-              attempt (pDdl |> withStmtPosition)
-              attempt (pControl |> withStmtPosition)
-              attempt (pTransactionStatement |> withStmtPosition)
-              attempt (pConnection |> withStmtPosition)
-              attempt (pSession |> withStmtPosition)
-              attempt (pDynamic |> withStmtPosition)
-              attempt (pDiagnostics |> withStmtPosition) ]
-
-    // 5.1 <semicolon> ::= ;
-    let pSemicolon = token (pstring ";")
+    let pSearchedDeleteStatement =
+        pDeleteStatement
+        >>= fun stmt ->
+            match stmt with
+            | Delete { Cursor = Some _ } ->
+                fail "a positioned <delete statement> (14.8) is not directly executable (22.1)."
+            | _ -> preturn stmt
 
     // 22.1 <direct SQL statement> ::= <directly executable statement> <semicolon>
     // <directly executable statement> ::= <direct SQL data statement> | <SQL schema statement>
@@ -239,7 +223,7 @@ module SqlParser =
     let pDirectSqlStatement =
         choice
             [ attempt pWithStatement
-              attempt ((pQuery |>> Select) |> withStmtPosition)
+              attempt (pQuery |>> Select |> withStmtPosition)
               attempt (pInsertStatement |> withStmtPosition)
               attempt (pSearchedUpdateStatement |> withStmtPosition)
               attempt (pSearchedDeleteStatement |> withStmtPosition)
@@ -251,7 +235,23 @@ module SqlParser =
               attempt (pSession |> withStmtPosition) ]
         .>> pSemicolon
 
-    let private runParser (p: Parser<Statement, unit>) sql =
+    // 23.1 <get diagnostics statement> ::= GET DIAGNOSTICS <SQL diagnostics information>
+    let pDiagnostics = choice [ attempt pGetDiagnosticsStatement ]
+
+    pStatementRef.Value <-
+        choice
+            [ attempt pWithStatement
+              attempt (pCursor |> withStmtPosition)
+              attempt (pDml |> withStmtPosition)
+              attempt (pDdl |> withStmtPosition)
+              attempt (pControl |> withStmtPosition)
+              attempt (pTransactionStatement |> withStmtPosition)
+              attempt (pConnection |> withStmtPosition)
+              attempt (pSession |> withStmtPosition)
+              attempt (pDynamic |> withStmtPosition)
+              attempt (pDiagnostics |> withStmtPosition) ]
+
+    let private runParser p sql =
         match run p sql with
         | Success(res, _, _) -> Result.Ok res
         | Failure(msg, error, _) ->

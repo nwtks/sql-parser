@@ -27,20 +27,6 @@ module CursorParser =
         attempt (pKeyword "WITHOUT" >>. pKeyword "RETURN" >>% CursorReturnability.WithoutReturn)
         <|> (pKeyword "WITH" >>. pKeyword "RETURN" >>% CursorReturnability.WithReturn)
 
-    // 20.8 <cursor attribute> ::= <cursor sensitivity> | <cursor scrollability>
-    //     | <cursor holdability> | <cursor returnability>
-    let pCursorAttribute =
-        choice
-            [ attempt (pCursorSensitivity |>> CursorAttribute.SensitivityAttribute)
-              attempt (pCursorScrollability |>> CursorAttribute.ScrollabilityAttribute)
-              attempt (pCursorHoldability |>> CursorAttribute.HoldabilityAttribute)
-              attempt (pCursorReturnability |>> CursorAttribute.ReturnabilityAttribute) ]
-
-    // 20.8 <cursor attributes> ::= <cursor attribute>...
-    // (20.8 is not referenced by any production in sql-2016-grammar.txt; exposed for
-    //  library consumers — see docs/trade-off.md.)
-    let pCursorAttributes = many1 pCursorAttribute
-
     // 14.2 <cursor properties> ::= [ <cursor sensitivity> ] [ <cursor scrollability> ] CURSOR
     //     [ <cursor holdability> ] [ <cursor returnability> ]
     let pCursorProperties =
@@ -166,7 +152,7 @@ module CursorParser =
 
         // 14.16 <table commit action> ::= PRESERVE | DELETE
         let pTableCommitAction =
-            (pKeyword "PRESERVE" >>% TableCommitAction.PreserveOnCommit)
+            pKeyword "PRESERVE" >>% TableCommitAction.PreserveOnCommit
             <|> (pKeyword "DELETE" >>% TableCommitAction.DeleteOnCommit)
 
         pKeyword "DECLARE"
@@ -199,7 +185,7 @@ module CursorParser =
     // (<embedded variable name> is a host-language construct and is not modelled;
     //  the embedded form degrades to <host parameter name> — see docs/trade-off.md.)
     let pLocatorReference =
-        (pQuestionMark >>% "?" <|> pHostParameter |>> Parameter) |> withExprPosition
+        pQuestionMark >>% "?" <|> pHostParameter |>> Parameter |> withExprPosition
 
     // 14.17 <free locator statement> ::= FREE LOCATOR <locator reference> [ { <comma> <locator reference> }... ]
     let pFreeLocatorStatement =
@@ -214,3 +200,17 @@ module CursorParser =
         >>. pKeyword "LOCATOR"
         >>. sepBy1 pLocatorReference (token (pstring ","))
         |>> HoldLocator
+
+    // 20.8 <cursor attribute> ::= <cursor sensitivity> | <cursor scrollability>
+    //     | <cursor holdability> | <cursor returnability>
+    let pCursorAttribute =
+        choice
+            [ attempt (pCursorSensitivity |>> CursorAttribute.SensitivityAttribute)
+              attempt (pCursorScrollability |>> CursorAttribute.ScrollabilityAttribute)
+              attempt (pCursorHoldability |>> CursorAttribute.HoldabilityAttribute)
+              attempt (pCursorReturnability |>> CursorAttribute.ReturnabilityAttribute) ]
+
+    // 20.8 <cursor attributes> ::= <cursor attribute>...
+    // (20.8 is not referenced by any production in sql-2016-grammar.txt; exposed for
+    //  library consumers — see docs/trade-off.md.)
+    let pCursorAttributes = many1 pCursorAttribute

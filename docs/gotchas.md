@@ -28,6 +28,10 @@ Always qualify (`PrivilegeAction.Select`, `TableConstraint.Unique`,
 `ColumnConstraintKind.Null` was *removed* for this reason (it clashed with
 `Literal.Null`).
 
+Reordering declarations changes which type a bare case name resolves to: after
+moving declarations in `Ast.fs`, re-check for newly ambiguous cases and qualify
+them.
+
 ### Reserved F# keywords cannot be identifiers or lambda parameters
 
 `override`, `base`, `default`, `when`, `constraint` are reserved (some are
@@ -195,6 +199,19 @@ dependency *above* its user (`pIdentitySpec` and `pSequenceOption` before
 `pColumnDefinition`; `pTransformsToBeDropped` before `pDropStatement`;
 `pConstraintEnforcement` next to `pDropBehavior`). Cross-module recursion uses
 `createParserForwardedToRef`.
+
+### Definitions are ordered by spec clause (best-effort)
+
+Top-level definitions follow the ascending ISO/IEC 9075-2:2016 clause number
+cited above them, so a file tracks `sql-2016-grammar.txt`. `define-before-use`
+still wins: a helper cited under a later clause stays above its user
+(`pReferentialAction` 11.8 before `pColumnDefinition` 11.4) rather than gaining a
+new forward reference. The sort key is the *first* citation above a definition;
+uncited helpers/wiring stay with the definition they serve. Where the order is
+compiler-irrelevant it is kept strictly ascending: `Ast.fs`'s recursive `and`
+group (6.1 → 6.43, `ExpressionKind`/`Expression` at 6.28) and the
+`createParserForwardedToRef` declarations at the top of `ExpressionParser.fs`
+(6.1 → 7.17). No test enforces this (see `AGENTS.md`).
 
 ### Forward-reference wiring happens in `SqlParser.fs`
 

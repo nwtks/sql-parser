@@ -29,6 +29,15 @@ This file provides guidance for AI agents working in this repository.
 
 ---
 
+## Definition-order convention
+
+- **Top-level definitions in `SqlParser/*.fs` follow the spec's clause order** — ascending ISO/IEC 9075-2:2016 clause numbers as used by [`sql-2016-grammar.txt`](sql-2016-grammar.txt) (5.1 → … → 23.1).
+- Order is a **best-effort** target, not a hard rule: F# `define-before-use` wins. When an earlier-numbered rule depends on a later-numbered one, keep the dependency order instead of forcing a forward reference.
+- The sort key is the **first** `// <clause> <rule name>` comment above a definition. Uncited helpers and forward-reference wiring stay next to the definition they serve.
+- The convention is enforced by review only — no test checks ordering. See [docs/trade-off.md](docs/trade-off.md).
+
+---
+
 ## Cross-Platform Compatibility
 
 All code — including test code — must work on **both Windows and Linux**. Avoid:

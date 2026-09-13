@@ -18,6 +18,28 @@ triggers), `CursorParser` (§14 cursors), `ConnectionParser` (§18),
   conceptually cohesive and mirrors the standard's section names. Folding these
   into `DmlParser`/`DdlParser` would blur responsibility.
 
+### Definition order follows the spec clause order
+
+Top-level definitions inside each `SqlParser/*.fs` file are ordered by the
+ascending ISO/IEC 9075-2:2016 clause number cited in the leading comment, so the
+file reads roughly top-to-bottom like `sql-2016-grammar.txt`.
+
+- **Trade-off:** A spec-ordered file is easier to navigate against the standard,
+  but the order is **best-effort**: `define-before-use` overrides it. Rules whose
+  sub-parsers are cited under a later clause stay where the dependency requires
+  (e.g. `pReferentialAction` (11.8) before `pColumnDefinition` (11.4) in
+  `DdlParser.fs`), and `Ast.fs`'s single recursive `and` group is free to be
+  reordered because member order is compiler-irrelevant there.
+- Because `Ast.fs`'s recursive group is order-free it is kept **strictly**
+  clause-ascending (6.1 `DataType` → 6.43 `MultisetSetOperator`), with the
+  `ExpressionKind`/`Expression` root (6.28) sitting at its clause position rather
+  than leading the group. Forward-reference declarations are sorted the same way
+  (`ExpressionParser.fs` runs 6.1 → 7.17). Everywhere else the residual
+  inversions are forced by `define-before-use` and listed per file in
+  `docs/gotchas.md`.
+- No test enforces ordering; `RuleNumberingTests` validates the citation
+  *numbers* only. Ordering is a review convention (see `AGENTS.md`).
+
 ### Compile order is part of the design
 
 F# requires definition before use, so `SqlParser.fsproj` lists modules leaf-first.

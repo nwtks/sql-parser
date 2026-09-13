@@ -17,15 +17,6 @@ module QueryParser =
             { TableSource.Kind = kind
               Pos = { Line = pos.Line; Column = pos.Column } }
 
-    // 7.6 <correlation name> ::= [ AS ] <identifier>   (a.k.a. table alias)
-    let pCorrelationName =
-        attempt (pKeyword "AS") >>. pIdentifierExpr <|> pIdentifierExpr
-
-    // 7.6 <correlation or recognition> ::= [ AS ] <correlation name> [ ( <derived column list> ) ]
-    let pCorrelationOrRecognition =
-        pCorrelationName
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ","))))
-
     // 7.3 <table value constructor> ::= VALUES <row value expression>
     //     [ { <comma> <row value expression> }... ]
     //   Used both as a <simple table> (7.17) and as a <derived table> inside
@@ -35,6 +26,15 @@ module QueryParser =
             between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ",")))
 
         pKeyword "VALUES" >>. sepBy1 pRow (token (pstring ","))
+
+    // 7.6 <correlation name> ::= [ AS ] <identifier>   (a.k.a. table alias)
+    let pCorrelationName =
+        attempt (pKeyword "AS") >>. pIdentifierExpr <|> pIdentifierExpr
+
+    // 7.6 <correlation or recognition> ::= [ AS ] <correlation name> [ ( <derived column list> ) ]
+    let pCorrelationOrRecognition =
+        pCorrelationName
+        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ","))))
 
     // 7.6 <sample method> ::= BERNOULLI | SYSTEM
     let pSampleMethod =
@@ -80,7 +80,7 @@ module QueryParser =
              <|> attempt (
                  pKeyword "BETWEEN"
                  >>. opt (
-                     (pKeyword "ASYMMETRIC" >>% SystemTimeSymmetry.Asymmetric)
+                     pKeyword "ASYMMETRIC" >>% SystemTimeSymmetry.Asymmetric
                      <|> (pKeyword "SYMMETRIC" >>% SystemTimeSymmetry.Symmetric)
                  )
                  .>>. pPointInTime
@@ -90,6 +90,51 @@ module QueryParser =
              )
              <|> (pKeyword "FROM" >>. pPointInTime .>> pKeyword "TO" .>>. pPointInTime
                   |>> fun (lo, hi) -> SystemTimeSpec.FromTo(lo, hi)))
+
+    // 7.7 <row pattern empty match handling>
+    let pRowPatternEmptyMatchHandling =
+        choice
+            [ attempt (pKeyword "SHOW" >>. pKeyword "EMPTY" >>. pKeyword "MATCHES" >>% ShowEmptyMatches)
+              attempt (pKeyword "OMIT" >>. pKeyword "EMPTY" >>. pKeyword "MATCHES" >>% OmitEmptyMatches)
+              pKeyword "WITH" >>. pKeyword "UNMATCHED" >>. pKeyword "ROWS"
+              >>% WithUnmatchedRows ]
+
+    // 7.7 <row pattern rows per match>
+    let pRowPatternRowsPerMatch =
+        choice
+            [ attempt (
+                  pKeyword "ONE" >>. pKeyword "ROW" >>. pKeyword "PER" >>. pKeyword "MATCH"
+                  >>% OneRowPerMatch
+              )
+              attempt (
+                  pKeyword "ALL" >>. pKeyword "ROWS" >>. pKeyword "PER" >>. pKeyword "MATCH"
+                  .>>. opt (attempt pRowPatternEmptyMatchHandling)
+                  |>> fun (_, h) -> AllRowsPerMatch h
+              ) ]
+
+    // 7.7 <row pattern recognition clause> ::= MATCH_RECOGNIZE ( [ <partition by> ] [ <order by> ] [ <measures> ] [ <rows per match> ] <common syntax> )
+    let pMatchRecognizeClause =
+        pKeyword "MATCH_RECOGNIZE"
+        >>. between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (opt (
+                    attempt (
+                        pKeyword "PARTITION"
+                        >>. pKeyword "BY"
+                        >>. sepBy1 pExpression (token (pstring ","))
+                    )
+                 )
+                 .>>. opt (attempt (pKeyword "ORDER" >>. pKeyword "BY" >>. sepBy1 pOrderByItem (token (pstring ","))))
+                 .>>. opt (attempt pRowPatternMeasures)
+                 .>>. opt (attempt pRowPatternRowsPerMatch)
+                 .>>. pRowPatternCommon
+                 |>> fun ((((pb, ob), measures), rpm), common) ->
+                     { PartitionBy = Option.defaultValue [] pb
+                       OrderBy = Option.defaultValue [] ob
+                       Measures = Option.defaultValue [] measures
+                       RowsPerMatch = rpm
+                       Common = common })
 
     // 7.11 <JSON table column empty/error behavior> ::= ERROR | NULL | DEFAULT <value expression>
     //     (formatted columns additionally allow EMPTY ARRAY | EMPTY OBJECT)
@@ -205,11 +250,11 @@ module QueryParser =
     let pJsonTableDefaultPlanChoices =
         choice
             [ attempt (
-                  ((pKeyword "INNER" >>% "INNER") <|> (pKeyword "OUTER" >>% "OUTER"))
+                  pKeyword "INNER" >>% "INNER" <|> (pKeyword "OUTER" >>% "OUTER")
                   .>>. opt (
                       attempt (
                           token (pstring ",")
-                          >>. ((pKeyword "UNION" >>% "UNION") <|> (pKeyword "CROSS" >>% "CROSS"))
+                          >>. (pKeyword "UNION" >>% "UNION" <|> (pKeyword "CROSS" >>% "CROSS"))
                       )
                   )
                   |>> fun (io, uc) ->
@@ -217,11 +262,11 @@ module QueryParser =
                         UnionCross = uc }
               )
               attempt (
-                  ((pKeyword "UNION" >>% "UNION") <|> (pKeyword "CROSS" >>% "CROSS"))
+                  pKeyword "UNION" >>% "UNION" <|> (pKeyword "CROSS" >>% "CROSS")
                   .>>. opt (
                       attempt (
                           token (pstring ",")
-                          >>. ((pKeyword "INNER" >>% "INNER") <|> (pKeyword "OUTER" >>% "OUTER"))
+                          >>. (pKeyword "INNER" >>% "INNER" <|> (pKeyword "OUTER" >>% "OUTER"))
                       )
                   )
                   |>> fun (uc, io) ->
@@ -276,51 +321,6 @@ module QueryParser =
                        Columns = cols
                        Plan = None
                        OnError = Some onError })
-
-    // 7.7 <row pattern empty match handling>
-    let pRowPatternEmptyMatchHandling =
-        choice
-            [ attempt (pKeyword "SHOW" >>. pKeyword "EMPTY" >>. pKeyword "MATCHES" >>% ShowEmptyMatches)
-              attempt (pKeyword "OMIT" >>. pKeyword "EMPTY" >>. pKeyword "MATCHES" >>% OmitEmptyMatches)
-              pKeyword "WITH" >>. pKeyword "UNMATCHED" >>. pKeyword "ROWS"
-              >>% WithUnmatchedRows ]
-
-    // 7.7 <row pattern rows per match>
-    let pRowPatternRowsPerMatch =
-        choice
-            [ attempt (
-                  pKeyword "ONE" >>. pKeyword "ROW" >>. pKeyword "PER" >>. pKeyword "MATCH"
-                  >>% OneRowPerMatch
-              )
-              attempt (
-                  pKeyword "ALL" >>. pKeyword "ROWS" >>. pKeyword "PER" >>. pKeyword "MATCH"
-                  .>>. opt (attempt pRowPatternEmptyMatchHandling)
-                  |>> fun (_, h) -> AllRowsPerMatch h
-              ) ]
-
-    // 7.7 <row pattern recognition clause> ::= MATCH_RECOGNIZE ( [ <partition by> ] [ <order by> ] [ <measures> ] [ <rows per match> ] <common syntax> )
-    let pMatchRecognizeClause =
-        pKeyword "MATCH_RECOGNIZE"
-        >>. between
-                (token (pstring "("))
-                (token (pstring ")"))
-                (opt (
-                    attempt (
-                        pKeyword "PARTITION"
-                        >>. pKeyword "BY"
-                        >>. sepBy1 pExpression (token (pstring ","))
-                    )
-                 )
-                 .>>. opt (attempt (pKeyword "ORDER" >>. pKeyword "BY" >>. sepBy1 pOrderByItem (token (pstring ","))))
-                 .>>. opt (attempt pRowPatternMeasures)
-                 .>>. opt (attempt pRowPatternRowsPerMatch)
-                 .>>. pRowPatternCommon
-                 |>> fun ((((pb, ob), measures), rpm), common) ->
-                     { PartitionBy = Option.defaultValue [] pb
-                       OrderBy = Option.defaultValue [] ob
-                       Measures = Option.defaultValue [] measures
-                       RowsPerMatch = rpm
-                       Common = common })
 
     // 7.6 <table primary> ::= [ ONLY ] [ <table or query name> | <derived table> | <lateral derived table>
     //     | <collection derived table> | <table function derived table> | <data change delta table>
@@ -569,30 +569,6 @@ module QueryParser =
                       Pos = acc.Pos })
                 first
 
-    // 7.15 <window definition> ::= <new window name> AS <window specification>
-    let pWindowDefinition =
-        pIdentifierExpr .>> pKeyword "AS"
-        .>>. between
-            (token (pstring "("))
-            (token (pstring ")"))
-            (opt pIdentifierExpr
-             .>>. opt (
-                 pKeyword "PARTITION"
-                 >>. pKeyword "BY"
-                 >>. sepBy1 pExpression (token (pstring ","))
-             )
-             .>>. opt (pKeyword "ORDER" >>. pKeyword "BY" >>. sepBy1 pOrderByItem (token (pstring ",")))
-             .>>. opt pWindowFrame
-             |>> fun (((name, pb), ob), frame) ->
-                 { ExistingWindowName = name
-                   PartitionBy = Option.defaultValue [] pb
-                   OrderBy = Option.defaultValue [] ob
-                   Frame = frame })
-
-    // 7.15 <window clause> ::= WINDOW <window definition list>
-    let pWindowClause =
-        pKeyword "WINDOW" >>. sepBy1 pWindowDefinition (token (pstring ","))
-
     // 7.13 <grouping element> — forward ref
     let pGroupingElement, pGroupingElementRef =
         createParserForwardedToRef<GroupingElement, unit> ()
@@ -636,6 +612,30 @@ module QueryParser =
               attempt pCubeList
               attempt pEmptyGroupingSet
               attempt pOrdinaryGroupingSet ]
+
+    // 7.15 <window definition> ::= <new window name> AS <window specification>
+    let pWindowDefinition =
+        pIdentifierExpr .>> pKeyword "AS"
+        .>>. between
+            (token (pstring "("))
+            (token (pstring ")"))
+            (opt pIdentifierExpr
+             .>>. opt (
+                 pKeyword "PARTITION"
+                 >>. pKeyword "BY"
+                 >>. sepBy1 pExpression (token (pstring ","))
+             )
+             .>>. opt (pKeyword "ORDER" >>. pKeyword "BY" >>. sepBy1 pOrderByItem (token (pstring ",")))
+             .>>. opt pWindowFrame
+             |>> fun (((name, pb), ob), frame) ->
+                 { ExistingWindowName = name
+                   PartitionBy = Option.defaultValue [] pb
+                   OrderBy = Option.defaultValue [] ob
+                   Frame = frame })
+
+    // 7.15 <window clause> ::= WINDOW <window definition list>
+    let pWindowClause =
+        pKeyword "WINDOW" >>. sepBy1 pWindowDefinition (token (pstring ","))
 
     // 7.16 <set quantifier> ::= DISTINCT | ALL
     let pSetQuantifier =
@@ -810,6 +810,14 @@ module QueryParser =
               |>> fun (o, f) -> Some o, f
               attempt pFetchFirstClause |>> fun f -> None, Some f ]
 
+    // 7.17 <corresponding spec> ::= CORRESPONDING [ BY ( <corresponding column list> ) ]
+    let pCorrespondingSpec =
+        pKeyword "CORRESPONDING"
+        >>. opt (
+            pKeyword "BY"
+            >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
+        )
+
     // 14.3 <updatability clause> ::= FOR { READ ONLY | UPDATE [ OF <column name list> ] }
     let pLockingClause =
         pKeyword "FOR"
@@ -820,26 +828,13 @@ module QueryParser =
              )
              <|> (pKeyword "READ" >>. pKeyword "ONLY" >>% ForReadOnly))
 
-    // 7.17 <corresponding spec> ::= CORRESPONDING [ BY ( <corresponding column list> ) ]
-    let pCorrespondingSpec =
-        pKeyword "CORRESPONDING"
-        >>. opt (
-            pKeyword "BY"
-            >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
-        )
-
     // Apply ORDER BY, OFFSET, FETCH, LOCKING to the whole query expression.
     // For a plain SELECT they are folded into the SelectStatement; for set
     // operations and WITH queries they are attached via QueryExpression so the
     // scope is the entire result, not just the last operand.
-    let applyOrderByOffsetFetch
-        (orderBy: (Expression * bool * NullsOrder option) list)
-        (limitOffset: (Expression option * FetchClause option) option)
-        (locking: LockingClause option)
-        (q: Query)
-        =
+    let applyOrderByOffsetFetch (orderBy: (Expression * bool * NullsOrder option) list) limitOffset locking q =
         let hasTopLevelClauses =
-            (not orderBy.IsEmpty) || Option.isSome limitOffset || Option.isSome locking
+            not orderBy.IsEmpty || Option.isSome limitOffset || Option.isSome locking
 
         if not hasTopLevelClauses then
             q
