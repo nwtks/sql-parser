@@ -576,7 +576,11 @@ module Lexer =
     // 10.5 <character set specification> ::= <character set name>
     // <character set name> ::= [ <schema name> <period> ] <SQL language identifier>
     let pCharacterSetSpecification =
-        opt (pSqlLanguageIdentifier .>> token (pstring ".")) .>>. pSqlLanguageIdentifier
+        // `attempt` is required: pSqlLanguageIdentifier consumes the name before the
+        // optional <period> fails, which would otherwise reject an unqualified
+        // <character set name> such as `_UTF8'abc'`.
+        opt (attempt (pSqlLanguageIdentifier .>> token (pstring ".")))
+        .>>. pSqlLanguageIdentifier
         |>> fun (schema, name) ->
             match schema with
             | Some s -> s + "." + name
@@ -793,8 +797,8 @@ module Lexer =
             | IntervalQualifier.SingleField(Minute, _) -> "^" + d + "$"
             | IntervalQualifier.SingleField(Second, _) -> "^" + sec + "$"
             | IntervalQualifier.Range(Year, Month, _) -> "^" + d + "-" + d + "$"
-            | IntervalQualifier.Range(Day, Hour, _) -> "^" + d + @"\s+" + d + ":" + d + "$"
-            | IntervalQualifier.Range(Day, Minute, _) -> "^" + d + @"\s+" + d + ":" + d + ":" + d + "$"
+            | IntervalQualifier.Range(Day, Hour, _) -> "^" + d + @"\s+" + d + "$"
+            | IntervalQualifier.Range(Day, Minute, _) -> "^" + d + @"\s+" + d + ":" + d + "$"
             | IntervalQualifier.Range(Day, Second, _) -> "^" + d + @"\s+" + d + ":" + d + ":" + sec + "$"
             | IntervalQualifier.Range(Hour, Minute, _) -> "^" + d + ":" + d + "$"
             | IntervalQualifier.Range(Hour, Second, _) -> "^" + d + ":" + d + ":" + sec + "$"

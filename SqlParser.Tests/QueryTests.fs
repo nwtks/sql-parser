@@ -96,6 +96,25 @@ let ``MATCH_RECOGNIZE row pattern quantifiers verification`` () =
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
+let ``MATCH_RECOGNIZE plus and question quantifiers verification`` () =
+    match
+        parse
+            "SELECT * FROM t MATCH_RECOGNIZE (PATTERN (A+ B+? C? D??) DEFINE A AS a > 0, B AS b > 0, C AS c > 0, D AS d > 0)"
+    with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = MatchRecognize(_, _, recog, _) } ] ->
+            match recog.Common.Pattern.Terms with
+            | [ { Factors = [ a; b; c; d ] } ] ->
+                Assert.Equal(Some(RowPatternQuantifier.Plus false), a.Quantifier)
+                Assert.Equal(Some(RowPatternQuantifier.Plus true), b.Quantifier)
+                Assert.Equal(Some(RowPatternQuantifier.Question false), c.Quantifier)
+                Assert.Equal(Some(RowPatternQuantifier.Question true), d.Quantifier)
+            | res -> Assert.Fail(sprintf "Expected four factors, got %A" res)
+        | res -> Assert.Fail(sprintf "Expected MatchRecognize, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
 let ``MATCH_RECOGNIZE row pattern anchors verification`` () =
     match parse "SELECT * FROM t MATCH_RECOGNIZE (PATTERN (^ A $) DEFINE A AS a > 0)" with
     | Select(SelectQuery s) ->
@@ -512,6 +531,37 @@ let ``JSON_TABLE plan clause verification`` () =
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
+let ``JSON_TABLE plan primary forms verification`` () =
+    let planOf (sql: string) =
+        match parse sql with
+        | Select(SelectQuery s) ->
+            match s.From with
+            | [ { Kind = JsonTable(stmt, None) } ] -> stmt.Plan
+            | res -> failwithf "Expected JsonTable, got %A" res
+        | res -> failwithf "Expected Select, got %A" res
+
+    match planOf "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN (p INNER q))" with
+    | Some(JsonPlanInner(_, JsonPlanPrimaryName _)) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonPlanInner, got %A" res)
+
+    match planOf "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN (p UNION q))" with
+    | Some(JsonPlanUnion [ JsonPlanPrimaryName _; JsonPlanPrimaryName _ ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonPlanUnion, got %A" res)
+
+    match planOf "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN (p))" with
+    | Some(JsonPlanUnion [ JsonPlanPrimaryName _ ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected a single-name plan, got %A" res)
+
+    match planOf "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN ((p OUTER q)))" with
+    | Some(JsonPlanUnion [ JsonPlanPrimaryGroup(JsonPlanOuter(_, _)) ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonPlanPrimaryGroup, got %A" res)
+
+    match planOf "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN DEFAULT (UNION, INNER))" with
+    | Some(JsonPlanDefault { InnerOuter = Some "INNER"
+                             UnionCross = Some "UNION" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected reversed JsonPlanDefault, got %A" res)
+
+[<Fact>]
 let ``JSON_TABLE error behavior verification`` () =
     match parse "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) EMPTY ON ERROR)" with
     | Select(SelectQuery s) ->
@@ -902,6 +952,21 @@ let ``Window clause verification`` () =
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
+let ``Window definition with existing window name verification`` () =
+    match parse "SELECT SUM(a) OVER x FROM t WINDOW x AS (w ORDER BY b)" with
+    | Select(SelectQuery s) ->
+        match s.Window with
+        | [ (windowName, def) ] ->
+            match windowName.Kind, def.ExistingWindowName with
+            | Identifier "X", Some { Kind = Identifier "W" } ->
+                match def.OrderBy with
+                | [ ({ Kind = Identifier "B" }, _, _) ] -> ()
+                | res -> Assert.Fail(sprintf "Expected ORDER BY b, got %A" res)
+            | res -> Assert.Fail(sprintf "Expected window x referencing w, got %A" res)
+        | res -> Assert.Fail(sprintf "Expected a window definition, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
 let ``SELECT DISTINCT verification`` () =
     match parse "SELECT DISTINCT name FROM users" with
     | Select(SelectQuery s) -> Assert.True(s.IsDistinct)
@@ -1041,6 +1106,26 @@ let ``Offset and Fetch verification`` () =
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
+let ``FETCH percent and WITH TIES verification`` () =
+    match parse "SELECT * FROM t FETCH FIRST 10 PERCENT ROWS ONLY" with
+    | Select(SelectQuery q) ->
+        match q.Fetch with
+        | Some { Count = { Kind = Literal(Number 10m) }
+                 IsPercent = true
+                 WithTies = false } -> ()
+        | res -> Assert.Fail(sprintf "Expected FETCH FIRST 10 PERCENT, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    match parse "SELECT * FROM t FETCH NEXT 5 ROWS WITH TIES" with
+    | Select(SelectQuery q) ->
+        match q.Fetch with
+        | Some { Count = { Kind = Literal(Number 5m) }
+                 IsPercent = false
+                 WithTies = true } -> ()
+        | res -> Assert.Fail(sprintf "Expected FETCH NEXT 5 WITH TIES, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
 let ``UNION CORRESPONDING verification`` () =
     match parse "SELECT a FROM t1 UNION CORRESPONDING BY (a) SELECT a FROM t2" with
     | Select(SetOperation(_, op, _)) ->
@@ -1137,3 +1222,20 @@ let ``ORDER BY applies to whole set operation`` () =
                              None,
                              None)) -> ()
     | res -> Assert.Fail(sprintf "Expected QueryExpression wrapping set operation, got %A" res)
+
+[<Fact>]
+let ``ORDER BY OFFSET FETCH and locking on a WITH statement verification`` () =
+    match
+        parse "WITH cte AS (SELECT 1) SELECT * FROM cte ORDER BY 1 OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY FOR READ ONLY"
+    with
+    | WithStatement(false, [ _ ], Select(SelectQuery s)) ->
+        match s.OrderBy, s.Fetch, s.Locking with
+        | [ ({ Kind = Literal(Number 1m) }, _, _) ], Some { WithTies = false }, Some ForReadOnly -> ()
+        | res -> Assert.Fail(sprintf "Expected ORDER BY/OFFSET/FETCH/locking, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected WithStatement, got %A" res)
+
+[<Fact>]
+let ``OFFSET and FETCH on a set operation verification`` () =
+    match parse "SELECT 1 UNION SELECT 2 OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY" with
+    | Select(QueryExpression(SetOperation(_, _, _), _, Some(Some _, Some _), None)) -> ()
+    | res -> Assert.Fail(sprintf "Expected QueryExpression over set operation, got %A" res)

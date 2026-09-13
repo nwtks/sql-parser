@@ -1113,6 +1113,41 @@ let ``CREATE TYPE with method specification verification`` () =
     | res -> Assert.Fail(sprintf "Expected CreateType method, got %A" res)
 
 [<Fact>]
+let ``CREATE TYPE method characteristic variants verification`` () =
+    match
+        parse
+            "CREATE TYPE my_type AS (a INT) METHOD m1 (x INT) RETURNS INT NOT DETERMINISTIC PARAMETER STYLE GENERAL CONTAINS SQL CALLED ON NULL INPUT"
+    with
+    | CreateType { Methods = [ { Characteristics = [ Deterministic false
+                                                     ParameterStyle "GENERAL"
+                                                     SqlDataAccess ContainsSql
+                                                     NullCall false ] } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected method characteristics, got %A" res)
+
+    match
+        parse
+            "CREATE TYPE my_type AS (a INT) METHOD m1 (x INT) RETURNS INT DETERMINISTIC MODIFIES SQL DATA RETURNS NULL ON NULL INPUT"
+    with
+    | CreateType { Methods = [ { Characteristics = [ Deterministic true; SqlDataAccess ModifiesSqlData; NullCall true ] } ] } ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected ModifiesSqlData characteristics, got %A" res)
+
+    match parse "CREATE TYPE my_type AS (a INT) METHOD m1 (x INT) RETURNS INT NO SQL" with
+    | CreateType { Methods = [ { Characteristics = [ SqlDataAccess NoSql ] } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected NoSql, got %A" res)
+
+    match parse "CREATE TYPE my_type AS (a INT) METHOD m1 (x INT) RETURNS INT SELF AS RESULT SELF AS LOCATOR" with
+    | CreateType { Methods = [ { SelfAsResult = true
+                                 SelfAsLocator = true } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected SELF AS RESULT and SELF AS LOCATOR, got %A" res)
+
+    parseFails "CREATE TYPE my_type AS (a INT) METHOD m1 (x INT) RETURNS INT LANGUAGE SQL LANGUAGE SQL"
+    parseFails "CREATE TYPE my_type AS (a INT) METHOD m1 (x INT) RETURNS INT DETERMINISTIC NOT DETERMINISTIC"
+
+    parseFails
+        "CREATE TYPE my_type AS (a INT) METHOD m1 (x INT) RETURNS INT PARAMETER STYLE SQL PARAMETER STYLE GENERAL"
+
+[<Fact>]
 let ``CREATE TYPE with INSTANCE and OVERRIDING methods verification`` () =
     match parse "CREATE TYPE my_type AS (a INT) INSTANCE METHOD m1 (x INT) RETURNS INT" with
     | CreateType { Methods = [ { Kind = Some MethodKind.Instance
@@ -1165,6 +1200,10 @@ let ``ALTER TYPE method actions verification`` () =
                                                        Returns = Some Integer },
                                                      false) } -> ()
     | res -> Assert.Fail(sprintf "Expected AlterType ADD METHOD, got %A" res)
+
+    match parse "ALTER TYPE my_type ADD OVERRIDING METHOD m2 (x INT) RETURNS INT" with
+    | AlterType { Action = AlterTypeAction.AddMethod({ Name = { Kind = Identifier "M2" } }, true) } -> ()
+    | res -> Assert.Fail(sprintf "Expected AlterType ADD OVERRIDING METHOD, got %A" res)
 
     match parse "ALTER TYPE my_type DROP METHOD m1 (INT) RESTRICT" with
     | AlterType { Action = AlterTypeAction.DropMethod(None, { Kind = Identifier "M1" }, [ Integer ]) } -> ()

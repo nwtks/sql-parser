@@ -91,6 +91,12 @@ Wrap optional multi-keyword clauses in `attempt`
 `pCursorHoldability`, `pCursorReturnability`, the `FOR UPDATE OF` group and the
 `WITH`-prefixed clauses.
 
+A single optional token hits the same trap once an earlier parser has already
+consumed input: `pCharacterSetSpecification` must use
+`opt (attempt (pSqlLanguageIdentifier .>> token (pstring ".")))`, otherwise the
+name is consumed and the missing `.` aborts the whole unqualified form, so
+`_UTF8'abc'` fails to parse.
+
 ### `notFollowedBy` makes the failure fatal — wrap in `attempt`
 
 `opt` cannot catch it, so wrap in `attempt` to let `opt` return `None` (see

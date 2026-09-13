@@ -6,11 +6,11 @@ open System.Text.RegularExpressions
 open Xunit
 
 // A numbered grammar heading, e.g. `11.3 <table definition>`.
-let private headingRx = Regex(@"^(\d+\.\d+)\s+(.*)$")
+let private headingRx = Regex @"^(\d+\.\d+)\s+(.*)$"
 // A rule name inside a heading or body, e.g. `<table definition>`.
-let private nameRx = Regex(@"<([^<>]+)>")
+let private nameRx = Regex @"<([^<>]+)>"
 // A rule citation inside a `//` comment, e.g. `// 11.3 <table definition>`.
-let private citationRx = Regex(@"(\d+\.\d+)\s*<([^<>]+)>")
+let private citationRx = Regex @"(\d+\.\d+)\s*<([^<>]+)>"
 
 /// Walk up from the test assembly directory until `sql-2016-grammar.txt` is found.
 let private findGrammar () =

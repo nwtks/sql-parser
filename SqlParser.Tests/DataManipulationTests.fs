@@ -216,6 +216,18 @@ let ``SELECT INTO GROUP BY DISTINCT verification`` () =
     | res -> Assert.Fail(sprintf "Expected SelectInto GROUP BY DISTINCT, got %A" res)
 
 [<Fact>]
+let ``SELECT INTO WINDOW verification`` () =
+    match parseStatement "SELECT a INTO x FROM t WINDOW w AS (PARTITION BY a)" with
+    | SelectInto s ->
+        match s.Window with
+        | [ (windowName, def) ] ->
+            match windowName.Kind, def.PartitionBy with
+            | Identifier "W", [ { Kind = Identifier "A" } ] -> ()
+            | res -> Assert.Fail(sprintf "Expected window w partitioning by a, got %A" res)
+        | res -> Assert.Fail(sprintf "Expected a window definition, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected SelectInto, got %A" res)
+
+[<Fact>]
 let ``SELECT INTO without select list is rejected`` () = parseStatementFails "SELECT INTO x"
 
 [<Fact>]

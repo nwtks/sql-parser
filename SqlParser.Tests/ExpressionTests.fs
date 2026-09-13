@@ -31,6 +31,64 @@ let ``Navigation keywords are still usable as identifiers`` () =
     Assert.Equal(Identifier "LAST", parse "SELECT last FROM t")
 
 [<Fact>]
+let ``Exact numeric type variants are parsed`` () =
+    match parse "SELECT CAST(x AS DECIMAL(10,2))" with
+    | Cast(_, Decimal(Some 10, Some 2)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DECIMAL(10,2), got %A" res)
+
+    match parse "SELECT CAST(x AS DEC(5))" with
+    | Cast(_, Decimal(Some 5, None)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DEC(5), got %A" res)
+
+    match parse "SELECT CAST(x AS DECFLOAT(34))" with
+    | Cast(_, DecFloat(Some 34)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DECFLOAT(34), got %A" res)
+
+    match parse "SELECT CAST(x AS NUMERIC)" with
+    | Cast(_, Numeric(None, None)) -> ()
+    | res -> Assert.Fail(sprintf "Expected NUMERIC, got %A" res)
+
+[<Fact>]
+let ``Approximate numeric type variants are parsed`` () =
+    match parse "SELECT CAST(x AS FLOAT)" with
+    | Cast(_, Float None) -> ()
+    | res -> Assert.Fail(sprintf "Expected FLOAT, got %A" res)
+
+    match parse "SELECT CAST(x AS FLOAT(24))" with
+    | Cast(_, Float(Some 24)) -> ()
+    | res -> Assert.Fail(sprintf "Expected FLOAT(24), got %A" res)
+
+    match parse "SELECT CAST(x AS REAL)" with
+    | Cast(_, Real) -> ()
+    | res -> Assert.Fail(sprintf "Expected REAL, got %A" res)
+
+    match parse "SELECT CAST(x AS DOUBLE PRECISION)" with
+    | Cast(_, DoublePrecision) -> ()
+    | res -> Assert.Fail(sprintf "Expected DOUBLE PRECISION, got %A" res)
+
+[<Fact>]
+let ``Datetime type variants are parsed`` () =
+    match parse "SELECT CAST(x AS TIME)" with
+    | Cast(_, TimeType(None, false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected TIME, got %A" res)
+
+    match parse "SELECT CAST(x AS TIME(3))" with
+    | Cast(_, TimeType(Some 3, false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected TIME(3), got %A" res)
+
+    match parse "SELECT CAST(x AS TIME WITH TIME ZONE)" with
+    | Cast(_, TimeType(None, true)) -> ()
+    | res -> Assert.Fail(sprintf "Expected TIME WITH TIME ZONE, got %A" res)
+
+    match parse "SELECT CAST(x AS TIME WITHOUT TIME ZONE)" with
+    | Cast(_, TimeType(None, false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected TIME WITHOUT TIME ZONE, got %A" res)
+
+    match parse "SELECT CAST(x AS TIMESTAMP(3) WITH TIME ZONE)" with
+    | Cast(_, TimestampType(Some 3, true)) -> ()
+    | res -> Assert.Fail(sprintf "Expected TIMESTAMP(3) WITH TIME ZONE, got %A" res)
+
+[<Fact>]
 let ``Literal expressions verification`` () =
     Assert.Equal(Literal(Number 123m), parse "SELECT 123")
     Assert.Equal(Literal(String "hello"), parse "SELECT 'hello'")
@@ -212,6 +270,16 @@ let ``Case expression verification`` () =
              { Kind = Literal(String "one") } ],
            Some { Kind = Literal(String "other") }) -> ()
     | res -> Assert.Fail(sprintf "Expected CASE, got %A" res)
+
+[<Fact>]
+let ``Simple CASE expression verification`` () =
+    match parse "SELECT CASE x WHEN 1 THEN 'a' WHEN 2, 3 THEN 'b' ELSE 'c' END" with
+    | Case(Some { Kind = Identifier "X" },
+           [ ({ Kind = Literal(Number 1m) }, { Kind = Literal(String "a") })
+             ({ Kind = Literal(Number 2m) }, { Kind = Literal(String "b") })
+             ({ Kind = Literal(Number 3m) }, { Kind = Literal(String "b") }) ],
+           Some { Kind = Literal(String "c") }) -> ()
+    | res -> Assert.Fail(sprintf "Expected simple CASE, got %A" res)
 
 [<Fact>]
 let ``NEXT VALUE FOR verification`` () =
@@ -968,6 +1036,12 @@ let ``Unary operations verification`` () =
     match parse "SELECT -1" with
     | UnaryOp(Minus, { Kind = Literal(Number 1m) }) -> ()
     | res -> Assert.Fail(sprintf "Expected -1, got %A" res)
+
+[<Fact>]
+let ``Boolean NOT factor verification`` () =
+    match parse "SELECT NOT a = 1" with
+    | UnaryOp(Not, { Kind = BinaryOp(Equal, { Kind = Identifier "A" }, { Kind = Literal(Number 1m) }) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected NOT (a = 1), got %A" res)
 
 [<Fact>]
 let ``Expression precedence verification`` () =
