@@ -45,9 +45,9 @@ to the layer below:
 | Layer | Concern |
 |-------|---------|
 | `Lexer.fs` | Character-level tokens: keywords, identifiers, literals, separators, operators, delimiters. |
-| `ExpressionParser.fs` | The `OperatorPrecedenceParser` (`opp`) for `<value expression>`, predicates, function calls, subqueries. |
-| `Types.fs`, `TypeParser.fs` | `<data type>` and UDT definition/manipulation. |
-| Statement modules | Clause and statement grammars, one module per grammar section (see §4). |
+| `ExpressionParser.fs` | The `OperatorPrecedenceParser` (`opp`) for `<value expression>`, function calls, subqueries, and the `<data type>` family. |
+| `PredicateParser.fs` | §8 `<predicate>`s — the postfix chain applied to a `<value expression primary>` plus the standalone `EXISTS`/`UNIQUE`/`JSON_EXISTS`/period predicates. |
+| Statement modules | Clause and statement grammars, one module per grammar section (see §4), including user-defined types (`SchemaParser.fs`). |
 | `SqlParser.fs` | Dispatches on the leading token to the statement modules and exposes the two entry points. |
 
 `runParser` turns FParsec's `Failure` into `ParseError(message, Position)` and
@@ -81,47 +81,58 @@ is fixed in `SqlParser/SqlParser.fsproj`.
 | File | Grammar sections | Responsibility |
 |------|------------------|----------------|
 | `Ast.fs` | — | All AST types (`Statement`, `Expression`, `DataType`, …). No parsers. |
-| `Lexer.fs` | §5, 10.1, 10.2 | Reserved words, whitespace/comments, identifiers, literals, operators, terminal characters. |
-| `ExpressionParser.fs` | §6, §8, 10.4 | Operator-precedence parser, predicates, routine invocation, subqueries, row patterns, JSON functions. |
-| `Types.fs` | 6.1, 11.3/11.17 helpers | `<data type>` family; shared clauses such as `<scope clause>` and `<method kind>`. |
+| `Lexer.fs` | §5, 10.1, 10.5 | Reserved words, whitespace/comments, identifiers, literals, operators, terminal characters, `<character set specification>`. |
+| `ExpressionParser.fs` | §6, §7/§8 fragments, §10 | Operator-precedence parser, routine invocation, subqueries, row patterns, JSON functions, `<data type>` family, shared `<scope clause>`/`pMethodKind`. |
 | `QueryParser.fs` | §7, 10.10 | `<query expression>`, `SELECT`, table/join references, windows, CTEs, `MATCH_RECOGNIZE`. |
-| `DmlParser.fs` | §14 (DML) | `INSERT`, `UPDATE`, `DELETE`, `MERGE`. |
-| `DdlParser.fs` | §11, §12 | Schema definition/manipulation, `GRANT`/`REVOKE`, `DROP`, roles. |
-| `RoutineParser.fs` | 11.49, 11.60, 11.61 | `CREATE PROCEDURE`/`FUNCTION`/`METHOD`/`TRIGGER`, `ALTER ROUTINE`. |
-| `TypeParser.fs` | 11.40, 11.51, 11.59 | `CREATE`/`ALTER TYPE` and their attributes/methods. |
-| `TransactionParser.fs` | §17 | `START TRANSACTION`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `SET TRANSACTION`, `SET CONSTRAINTS`. |
+| `PredicateParser.fs` | §8 | `<predicate>` postfix chain (`BETWEEN`/`IN`/`LIKE`/`SIMILAR TO`/`IS …`) and the standalone `EXISTS`/`UNIQUE`/`JSON_EXISTS`/period predicates. |
+| `SchemaParser.fs` | §11 | Schema definition/manipulation (`CREATE`/`ALTER`/`DROP`) including user-defined types (`CREATE`/`ALTER TYPE`, 11.51–11.53), plus `CREATE PROCEDURE`/`FUNCTION`/`METHOD`/`TRIGGER` (11.49/11.60/11.61); `DROP ROLE` (12.6) is a branch of the `DROP` dispatcher. |
+| `AccessControlParser.fs` | §12 | `GRANT`/`REVOKE` (privileges and roles) and `CREATE ROLE` (12.2–12.5, 12.7). |
+| `DataManipulationParser.fs` | §14 | The whole of §14: DML (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `TRUNCATE`) plus the cursor/locator statements (`DECLARE CURSOR`, `OPEN`/`FETCH`/`CLOSE`, `SELECT ... INTO`, `<temporary table declaration>`, `USING`/`INTO` clauses). |
 | `ControlParser.fs` | §16 | `CALL`, `RETURN`. |
-| `SessionParser.fs` | §19 | `SET ROLE`, `SET SESSION`, `SET SCHEMA`, `SET TIME ZONE`, … |
-| `CursorParser.fs` | §14 (cursors) | `DECLARE CURSOR`, `OPEN`/`FETCH`/`CLOSE`, `SELECT ... INTO`, `<temporary table declaration>`, locators, `USING`/`INTO` clauses. |
+| `TransactionParser.fs` | §17 | `START TRANSACTION`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `SET TRANSACTION`, `SET CONSTRAINTS`. |
 | `ConnectionParser.fs` | §18 | `CONNECT`, `SET CONNECTION`, `DISCONNECT`. |
-| `DiagnosticsParser.fs` | §23 | `GET DIAGNOSTICS`. |
+| `SessionParser.fs` | §19 | `SET ROLE`, `SET SESSION`, `SET SCHEMA`, `SET TIME ZONE`, … |
 | `DynamicParser.fs` | §20 | `PREPARE`, `EXECUTE`, descriptors, dynamic cursors. |
+| `DiagnosticsParser.fs` | §23 | `GET DIAGNOSTICS`. |
 | `SqlParser.fs` | §22 | Top-level dispatchers, forward-reference wiring, public `parse`/`parseStatement`. |
 
-Examples of the ordering constraint: `RoutineParser.fs` needs
-`DdlParser.pSpecificRoutineDesignator`, so it compiles after `DdlParser.fs`;
-`CursorParser.fs` owns `pUsingClause`/`pIntoClause` because `pOpenStatement` needs
-them and compiles before `DynamicParser.fs`.
+Examples of the ordering constraint: `PredicateParser.fs` (§8) needs
+`ExpressionParser.pExpression`/`pJsonApiCommon` and the `pQuery` forward ref, so
+it compiles after `QueryParser.fs` (§7); it sits before `SchemaParser.fs` (§11)
+to keep the file order clause-ascending (§6 → §7 → §8 → §11).
+`AccessControlParser.fs` needs `SchemaParser.pSpecificRoutineDesignator` /
+`pRoutineDesignatorWithType` / `pDropBehavior`, so it compiles after
+`SchemaParser.fs`, again keeping the order clause-ascending (§11 → §12 → §14).
+`DataManipulationParser.fs` owns `pUsingClause`/`pIntoClause` because
+`pOpenStatement` needs them and compiles before `DynamicParser.fs`.
 
 ## 5. Forward references and wiring
 
-Grammar rules are mutually recursive across modules that F# compiles in a fixed
-order. The codebase resolves this with
-`createParserForwardedToRef`, whose `.Value` is assigned in `SqlParser.fs` once
-all modules are defined:
+F# compiles modules in a fixed order and requires a definition before its use,
+but many grammar rules are mutually recursive. The codebase resolves this with
+`createParserForwardedToRef`, which yields a forwarding parser (safe to reference
+immediately) plus a `…Ref` cell whose `.Value` is assigned once every participant
+is defined. Most refs are private to the module that declares them; a ref that
+crosses a module boundary is wired by whichever module first defines its target
+(the statement-level refs in `SqlParser.fs`).
 
-| Forward reference | Wired to | Why |
-|-------------------|----------|-----|
-| `pStatement` / `pStatementRef` | the full statement `choice` | Routine bodies and triggered statements may be any statement. |
-| `pDataChangeStatementRef` | `pInsertStatement` … `pMergeStatement` | `<data change delta table>` inside `QueryParser` needs the DML parsers compiled later. |
-| `pSchemaElementImpl` | the CREATE-family + `GRANT` choice | `CREATE SCHEMA` (in `DdlParser.fs`) contains schema elements defined later. |
-| `pRoutineBodyStatementRefImpl` | `pStatement` | `<SQL routine body>` / `<triggered SQL statement>`. |
-| `pExpression` | `opp.ExpressionParser` | Central expression parser used before `opp` is complete. |
-| `pValueExpressionNoBoolean` | `opp.ExpressionParser` | Boolean-free `<value expression>` for JSON slots / point-in-time. |
-| `pDataType` | `TypeParser` | `CAST`, JSON `RETURNING`, collection types. |
-| `pQuery` | `pQueryExpression` | Scalar and quantified subqueries. |
-| Row-pattern refs (`pRowPatternMeasures`, `pRowPatternCommon`) | `ExpressionParser` | Shared between `ExpressionParser` (window frames) and `QueryParser` (`MATCH_RECOGNIZE`). |
-| `pMultisetValueExpression` | post-`pValueExpressionPrimary` | 6.44 `SET (...)` is itself a `<value expression primary>`. |
+| Forward reference | Declared in | Wired to | Why |
+|-------------------|-------------|----------|-----|
+| `pStatement` / `pStatementRef` | `SchemaParser.fs` | the full statement `choice` (`SqlParser.fs`) | The first module that needs "any statement" — routine bodies (11.60) and triggered statements (11.49). `SqlParser.fs` reuses the same ref for `parseStatement`. |
+| `pDataChangeStatementRef` | `QueryParser.fs` | `pInsertStatement` … `pMergeStatement` (`SqlParser.fs`) | `<data change delta table>` (7.6) needs the DML parsers, compiled later. |
+| `pPredicateRef`, `pPredicatePrimaryRef` | `ExpressionParser.fs` | `PredicateParser` (§8) (`SqlParser.fs`) | §6.3 `<value expression primary>` and §6.39 `<boolean test>` consume §8 before `PredicateParser.fs` is compiled; `pPredicatePrimary` bundles the 8.9/8.10/8.11/8.20/8.23 atoms into one ref. |
+| `pQueryRef` | `ExpressionParser.fs` | `pQueryExpression` (`QueryParser.fs`) | Scalar and quantified subqueries (6.29) need the §7 query parser. |
+| `pExpression` | `ExpressionParser.fs` | `opp.ExpressionParser` | Central expression parser, used before `opp` is complete. |
+| `pValueExpressionNoBoolean` | `ExpressionParser.fs` | `opp.ExpressionParser` | Boolean-free `<value expression>` for JSON slots and `<point in time>` (6.35). |
+| `pDataType` | `ExpressionParser.fs` | the 6.1 `<data type>` family | `CAST`, JSON `RETURNING`, collection element types. |
+| `pDatetimeValueExpression` | `ExpressionParser.fs` | the 6.35 `<datetime value expression>` | Needed by the 6.37 `<interval value expression>` alternative before it is defined. |
+| `pMultisetValueExpression` | `ExpressionParser.fs` | post-`pValueExpressionPrimary` | 6.44 `SET (...)` is itself a `<value expression primary>`. |
+| `pNotExpr` | `ExpressionParser.fs` | the 6.39 `<boolean factor>` | `[ NOT ] <boolean test>` is left-recursive. |
+| `pRowPattern` | `ExpressionParser.fs` | 7.9 `<row pattern>` | `<row pattern>` is recursive through `<row pattern primary>`. |
+| `pTableReference` | `QueryParser.fs` | 7.6 `<table reference>` | A `<table primary>` may nest a parenthesised `<joined table>`. |
+| `pQueryExpressionBody` | `QueryParser.fs` | 7.17 `<query expression body>` | `UNION`/`EXCEPT` are left-recursive, and a parenthesised `<query primary>` contains a body. |
+| `pGroupingElement` | `QueryParser.fs` | 7.13 `<grouping element>` | `GROUPING SETS` nests `<grouping element>`s. |
+| `pJsonTableColumnsClause`, `pJsonTablePlanPrimary`, `pJsonTablePlan` | `QueryParser.fs` | 7.11 `<JSON table>` | `JSON_TABLE` columns and plans are mutually recursive. |
 
 **Never read `.Value` at module-initialisation time** — it holds FParsec's dummy
 parser until it is assigned. Reference the forwarding *parser* instead.
@@ -170,7 +181,7 @@ parser until it is assigned. Reference the forwarding *parser* instead.
 - Consequence: many dispatch decisions cannot rely on reservedness. Words such as
   `TYPE`, `UNDER`, `DESCRIBE`, `FINAL`, `OPTIONS` are non-reserved, so the parser
   lists alternatives in an order that keeps them apart (e.g. `ALTER TYPE` before
-  `ALTER ROUTINE`, `DROP TYPE` after `DROP ROUTINE`). These orderings are load-
+  `ALTER ROUTINE`, `DROP TYPE` before `DROP ROUTINE`). These orderings are load-
   bearing and recorded in [gotchas.md](gotchas.md).
 - Routine invocation is restricted to a **whitelist** (`functionKeywords` /
   `pReservedFunctionName`) of reserved keywords the grammar spells as functions
@@ -241,7 +252,7 @@ parser until it is assigned. Reference the forwarding *parser* instead.
 - **Common Table Expressions (CTEs)**: Support for `WITH` and `WITH RECURSIVE`, including `SEARCH`/`CYCLE`.
 - **Row Value Constructors**: `(e1, e2, ...)` and `ROW(e1, ...)` as expressions, so row comparisons (`(a, b) = (c, d)`) and row `IN` lists work.
 - **Select List**: `*`, `t.*`, `t.* AS (cols)`, and the general `<all fields reference>` (`(a + b).*`, `f(x).* AS (cols)`).
-- **Table References**: `ONLY ( t ) [ AS alias [ (cols) ] ]`, `FOR SYSTEM_TIME AS OF | BETWEEN [SYMMETRIC|ASYMMETRIC] ... AND ... | FROM ... TO ...` (point-in-time expressions support `+`/`-` with intervals and `AT TIME ZONE`), `UNNEST ... [WITH ORDINALITY]`, `TABLE (...)`, `LATERAL (...)`, `TABLESAMPLE`, data-change delta tables (`FINAL|NEW|OLD TABLE ( <dml statement> ) [ AS alias [ (cols) ] ]`), and `MATCH_RECOGNIZE`.
+- **Table References**: `ONLY ( t ) [ AS alias [ (cols) ] ]`, `FOR SYSTEM_TIME AS OF | BETWEEN [SYMMETRIC|ASYMMETRIC] ... AND ... | FROM ... TO ...` (point-in-time expressions support `+`/`-` with intervals and `AT TIME ZONE`), `UNNEST ... [WITH ORDINALITY]`, `TABLE (...)`, `LATERAL (...)`, `TABLESAMPLE`, data-change delta tables (`FINAL|NEW|OLD TABLE ( <dml statement> ) [ AS alias [ (cols) ] ]`), `JSON_TABLE ( <JSON API common syntax> COLUMNS ( ... ) [PLAN ...] [ERROR|EMPTY ON ERROR] )` (plus its `<JSON table primitive>` form), and `MATCH_RECOGNIZE`.
 
 ### 📝 Data Manipulation (DML)
 
@@ -279,7 +290,7 @@ parser until it is assigned. Reference the forwarding *parser* instead.
 
 ### 🧩 Dynamic SQL, Diagnostics, Connections & Sessions
 
-- Dynamic SQL: `PREPARE` / `EXECUTE` / `EXECUTE IMMEDIATE` / `DEALLOCATE PREPARE`, `DESCRIBE`, descriptor statements (`ALLOCATE` / `DEALLOCATE` / `GET` / `SET` / `COPY DESCRIPTOR`), and the dynamic cursor statements.
+- Dynamic SQL: `PREPARE` / `EXECUTE` / `EXECUTE IMMEDIATE` / `DEALLOCATE PREPARE`, `DESCRIBE`, descriptor statements (`ALLOCATE` / `DEALLOCATE` / `GET` / `SET` / `COPY DESCRIPTOR`), the dynamic cursor statements, and `PIPE ROW` (20.28).
 - `GET DIAGNOSTICS`.
 - `CONNECT` / `SET CONNECTION` / `DISCONNECT`.
 - Session management: `SET SESSION CHARACTERISTICS`, `SET SESSION AUTHORIZATION`, `SET ROLE`, `SET TIME ZONE`, `SET CATALOG`, `SET SCHEMA`, `SET NAMES`, `SET PATH`, `SET TRANSFORM GROUP`, `SET SESSION COLLATION`.
@@ -304,9 +315,12 @@ parser until it is assigned. Reference the forwarding *parser* instead.
 ## 11. Testing
 
 - **xUnit v3** (`dotnet test`). Each source module has a matching test file
-  (`LexerTests`, `ExpressionTests`, `QueryTests`, `DmlTests`, `DdlTests`,
-  `TransactionTests`, `ControlTests`, `SessionTests`, `CursorTests`,
-  `ConnectionTests`, `DiagnosticsTests`, `DynamicTests`, `SqlParserTests`).
+  (`LexerTests`, `ExpressionTests`, `QueryTests`, `PredicateTests`,
+  `SchemaTests`, `AccessControlTests`, `DataManipulationTests`, `ControlTests`,
+  `TransactionTests`, `ConnectionTests`, `SessionTests`, `DynamicTests`,
+  `DiagnosticsTests`, `SqlParserTests`) — the
+  same compile order as `SqlParser.fsproj`, so each test file only exercises the
+  module it is named after.
 - **`RuleNumberingTests.fs`** validates that every `// <clause> <rule name>`
   comment cites a clause that actually defines (or mentions) that rule in
   `sql-2016-grammar.txt`.

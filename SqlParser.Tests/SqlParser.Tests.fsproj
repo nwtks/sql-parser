@@ -11,9 +11,10 @@
     <Compile Include="LexerTests.fs" />
     <Compile Include="ExpressionTests.fs" />
     <Compile Include="QueryTests.fs" />
-    <Compile Include="DdlTests.fs" />
-    <Compile Include="CursorTests.fs" />
-    <Compile Include="DmlTests.fs" />
+    <Compile Include="PredicateTests.fs" />
+    <Compile Include="SchemaTests.fs" />
+    <Compile Include="AccessControlTests.fs" />
+    <Compile Include="DataManipulationTests.fs" />
     <Compile Include="ControlTests.fs" />
     <Compile Include="TransactionTests.fs" />
     <Compile Include="ConnectionTests.fs" />

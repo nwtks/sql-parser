@@ -59,8 +59,8 @@ module QueryParser =
         createParserForwardedToRef<TableSource, unit> ()
 
     // 7.6 <data change delta table> / 7.6 <data change statement> — forward ref
-    // Forward reference to the DML statement parsers (defined in DmlParser.fs, which
-    // is compiled after this module). Used by <data change delta table> (7.6):
+    // Forward reference to the DML statement parsers (defined in DataManipulationParser.fs,
+    // which is compiled after this module). Used by <data change delta table> (7.6):
     //   FINAL|NEW|OLD TABLE ( <data change statement> )
     let pDataChangeStatement, pDataChangeStatementRef =
         createParserForwardedToRef<StatementKind, unit> ()

@@ -1,19 +1,20 @@
 module SqlParser.Tests.DynamicTests
 
 open Xunit
+open FParsec
 open SqlParser
 
 // Dynamic-SQL statements are <SQL procedure statement>s (13.4), not directly executable
 // (22.1), so these use the general entry point.
 let parse (sql: string) =
     match SqlParser.parseStatement (sql.TrimEnd() + ";") with
-    | Ok res -> res.Kind
-    | Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
+    | Result.Ok res -> res.Kind
+    | Result.Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
 
 let parseFails (sql: string) =
     match SqlParser.parseStatement (sql.TrimEnd() + ";") with
-    | Ok _ -> failwithf "Expected parse failure for %s" sql
-    | Error _ -> ()
+    | Result.Ok _ -> failwithf "Expected parse failure for %s" sql
+    | Result.Error _ -> ()
 
 [<Fact>]
 let ``ALLOCATE DESCRIPTOR verification`` () =
@@ -91,6 +92,25 @@ let ``PREPARE with ATTRIBUTES verification`` () =
     | Prepare({ Kind = Identifier "STMT" }, Some { Kind = Literal(String "a") }, { Kind = Literal(String "SELECT 1") }) ->
         ()
     | res -> Assert.Fail(sprintf "Expected Prepare with attributes, got %A" res)
+
+[<Fact>]
+let ``CURSOR ATTRIBUTES verification`` () =
+    match run (DynamicParser.pCursorAttributes .>> eof) "SENSITIVE NO SCROLL WITH HOLD WITHOUT RETURN" with
+    | Success(attrs, _, _) ->
+        Assert.Equal<CursorAttribute list>(
+            [ CursorAttribute.SensitivityAttribute Sensitive
+              CursorAttribute.ScrollabilityAttribute NoScroll
+              CursorAttribute.HoldabilityAttribute WithHold
+              CursorAttribute.ReturnabilityAttribute WithoutReturn ],
+            attrs
+        )
+    | Failure(msg, _, _) -> Assert.Fail(msg)
+
+[<Fact>]
+let ``CURSOR ATTRIBUTES rejects a non-attribute`` () =
+    match run (DynamicParser.pCursorAttributes .>> eof) "SENSITIVE UPDATE" with
+    | Success _ -> Assert.Fail("Expected CURSOR ATTRIBUTES to reject UPDATE")
+    | Failure _ -> ()
 
 [<Fact>]
 let ``DEALLOCATE PREPARE verification`` () =

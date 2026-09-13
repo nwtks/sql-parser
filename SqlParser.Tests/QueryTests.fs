@@ -181,41 +181,6 @@ let ``WITH CYCLE clause verification`` () =
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
-let ``BETWEEN verification`` () =
-    match parse "SELECT * FROM t WHERE x BETWEEN 1 AND 10" with
-    | Select(SelectQuery q) ->
-        match q.Where with
-        | Some { Kind = ExpressionKind.Between({ Kind = Identifier "X" },
-                                               false,
-                                               false,
-                                               { Kind = Literal(Number 1m) },
-                                               { Kind = Literal(Number 10m) }) } -> ()
-        | res -> Assert.Fail(sprintf "Expected Between, got %A" res)
-    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
-
-[<Fact>]
-let ``IN list verification`` () =
-    match parse "SELECT * FROM t WHERE x IN (1, 2, 3)" with
-    | Select(SelectQuery q) ->
-        match q.Where with
-        | Some { Kind = InList({ Kind = Identifier "X" },
-                               false,
-                               [ { Kind = Literal(Number 1m) }
-                                 { Kind = Literal(Number 2m) }
-                                 { Kind = Literal(Number 3m) } ]) } -> ()
-        | res -> Assert.Fail(sprintf "Expected InList, got %A" res)
-    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
-
-[<Fact>]
-let ``IS NULL verification`` () =
-    match parse "SELECT * FROM t WHERE x IS NOT NULL" with
-    | Select(SelectQuery q) ->
-        match q.Where with
-        | Some { Kind = IsNull({ Kind = Identifier "X" }, true) } -> ()
-        | res -> Assert.Fail(sprintf "Expected IsNull(true), got %A" res)
-    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
-
-[<Fact>]
 let ``interval term accepts a numeric factor on the right of an operator (6.37)`` () =
     match parse "SELECT * FROM t FOR SYSTEM_TIME AS OF CURRENT_DATE + INTERVAL '1' DAY * 2" with
     | Select(SelectQuery s) ->

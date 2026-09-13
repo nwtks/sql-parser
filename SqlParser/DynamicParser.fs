@@ -3,7 +3,7 @@ namespace SqlParser
 open FParsec
 open SqlParser.Lexer
 open SqlParser.ExpressionParser
-open SqlParser.CursorParser
+open SqlParser.DataManipulationParser
 
 module DynamicParser =
     // 20.2 <allocate descriptor statement> ::= ALLOCATE [ SQL ] DESCRIPTOR <descriptor name> [ WITH MAX <occurrences> ]
@@ -163,20 +163,34 @@ module DynamicParser =
         .>>. pExpression
         |>> fun ((name, attrs), stmt) -> Prepare(name, attrs, stmt)
 
+    // 20.8 <cursor attribute> ::= <cursor sensitivity> | <cursor scrollability>
+    //     | <cursor holdability> | <cursor returnability>
+    let pCursorAttribute =
+        choice
+            [ attempt (pCursorSensitivity |>> CursorAttribute.SensitivityAttribute)
+              attempt (pCursorScrollability |>> CursorAttribute.ScrollabilityAttribute)
+              attempt (pCursorHoldability |>> CursorAttribute.HoldabilityAttribute)
+              attempt (pCursorReturnability |>> CursorAttribute.ReturnabilityAttribute) ]
+
+    // 20.8 <cursor attributes> ::= <cursor attribute>...
+    // (20.8 is not referenced by any production in sql-2016-grammar.txt; exposed for
+    //  library consumers — see docs/trade-off.md.)
+    let pCursorAttributes = many1 pCursorAttribute
+
     // 20.9 <deallocate prepared statement> ::= DEALLOCATE PREPARE <SQL statement name>
     let pDeallocatePrepareStatement =
         pKeyword "DEALLOCATE" >>. pKeyword "PREPARE" >>. pQualifiedNameExpr
         |>> DeallocatePrepare
 
-    // 20.10 <using descriptor> ::= USING [ SQL ] DESCRIPTOR <descriptor name> (DESCRIBE <using descriptor>)
-    let pUsingDescriptor =
-        pKeyword "USING" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. pQualifiedNameExpr
-
     // 20.10 <nesting option> ::= WITH NESTING | WITHOUT NESTING
     let pNestingOption =
         pKeyword "WITH" >>. pKeyword "NESTING" >>% true
         <|> (pKeyword "WITHOUT" >>. pKeyword "NESTING" >>% false)
+
+    // 20.10 <using descriptor> ::= USING [ SQL ] DESCRIPTOR <descriptor name> (DESCRIBE <using descriptor>)
+    let pUsingDescriptor =
+        pKeyword "USING" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
+        >>. pQualifiedNameExpr
 
     // 20.10 <describe statement> ::= DESCRIBE [ INPUT | OUTPUT ] <name> <using descriptor> [ <nesting option> ]
     //                            | DESCRIBE CURSOR <cursor> STRUCTURE <using descriptor> [ <nesting option> ]
@@ -217,7 +231,7 @@ module DynamicParser =
 
     // 20.11 <input using clause> / 20.12 <output using clause> are shared with
     // 20.19 <dynamic open statement> / 20.20 <dynamic fetch statement> and are
-    // therefore defined in CursorParser.fs (compiled before this module).
+    // therefore defined in DataManipulationParser.fs (compiled before this module).
 
     // 20.13 <execute statement> ::= EXECUTE <SQL statement name> [ <output using clause> ] [ <input using clause> ]
     let pExecuteStatement =
@@ -242,7 +256,7 @@ module DynamicParser =
 
     // 20.15 <dynamic declare cursor> ::= DECLARE <cursor name> <cursor properties> FOR <statement name>
     let pDynamicDeclareCursorStatement =
-        pKeyword "DECLARE" >>. pQualifiedNameExpr .>>. CursorParser.pCursorProperties
+        pKeyword "DECLARE" >>. pQualifiedNameExpr .>>. pCursorProperties
         .>> pKeyword "FOR"
         .>>. pExtendedName
         |>> fun ((name, properties), statement) ->
@@ -254,8 +268,7 @@ module DynamicParser =
     // 20.17 <allocate extended dynamic cursor statement> ::= ALLOCATE <extended cursor name>
     //     <cursor properties> FOR <extended statement name>
     let pAllocateExtendedDynamicCursorStatement =
-        pKeyword "ALLOCATE" >>. pExtendedName .>>. CursorParser.pCursorProperties
-        .>> pKeyword "FOR"
+        pKeyword "ALLOCATE" >>. pExtendedName .>>. pCursorProperties .>> pKeyword "FOR"
         .>>. pExtendedName
         |>> fun ((cursor, properties), statement) ->
             { Cursor = cursor
@@ -269,7 +282,7 @@ module DynamicParser =
         pKeyword "ALLOCATE" >>. pQualifiedNameExpr .>>. opt (pKeyword "CURSOR" >>% ())
         .>> pKeyword "FOR"
         .>> pKeyword "PROCEDURE"
-        .>>. DdlParser.pSpecificRoutineDesignator
+        .>>. SchemaParser.pSpecificRoutineDesignator
         |>> fun ((name, _), routine) -> { Name = name; Routine = routine } |> AllocateReceivedCursor
 
     // 20.28 <pipe row statement> ::= PIPE ROW (<row value expression>)

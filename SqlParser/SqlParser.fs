@@ -2,19 +2,17 @@ namespace SqlParser
 
 open FParsec
 open SqlParser.Lexer
-open SqlParser.DmlParser
-open SqlParser.DdlParser
 open SqlParser.ExpressionParser
 open SqlParser.QueryParser
-open SqlParser.TransactionParser
+open SqlParser.SchemaParser
+open SqlParser.AccessControlParser
+open SqlParser.DataManipulationParser
 open SqlParser.ControlParser
-open SqlParser.RoutineParser
-open SqlParser.TypeParser
-open SqlParser.SessionParser
-open SqlParser.CursorParser
+open SqlParser.TransactionParser
 open SqlParser.ConnectionParser
-open SqlParser.DiagnosticsParser
+open SqlParser.SessionParser
 open SqlParser.DynamicParser
+open SqlParser.DiagnosticsParser
 
 module SqlParser =
     let withStmtPosition p =
@@ -23,11 +21,16 @@ module SqlParser =
             { Kind = kind
               Pos = { Line = pos.Line; Column = pos.Column } }
 
-    // 4 <SQL statement> — top-level dispatcher (wired via pStatementRef)
-    let pStatement, pStatementRef = createParserForwardedToRef<Statement, unit> ()
+    // 4 <SQL statement> — the shared top-level forward ref is declared in SchemaParser.fs
+    // (`pStatement` / `pStatementRef`) and wired at the bottom of this module.
 
     // 5.1 <semicolon> ::= ;
     let pSemicolon = token (pstring ";")
+
+    // <data change statement> (7.6) — the DML statements allowed inside a
+    // <data change delta table> (FINAL|NEW|OLD TABLE ( ... )). Wired here because
+    // the DML parsers live in DataManipulationParser.fs, which is compiled after QueryParser.fs.
+    pDataChangeStatementRef.Value <- choice [ pInsertStatement; pUpdateStatement; pDeleteStatement; pMergeStatement ]
 
     // 7.17 <with clause> + <query expression> — WITH [ RECURSIVE ] <with list>
     // <query expression body>. The body is a query only: <with clause> is a prefix of
@@ -39,20 +42,51 @@ module SqlParser =
             { Kind = WithStatement(recu, ctes, stmt.Kind)
               Pos = stmt.Pos }
 
-    // <data change statement> (7.6) — the DML statements allowed inside a
-    // <data change delta table> (FINAL|NEW|OLD TABLE ( ... )). Wired here because
-    // the DML parsers live in DmlParser.fs, which is compiled after QueryParser.fs.
-    pDataChangeStatementRef.Value <- choice [ pInsertStatement; pUpdateStatement; pDeleteStatement; pMergeStatement ]
+    // 8 Predicates — wire the forward refs declared in ExpressionParser.fs to the parsers defined
+    // in PredicateParser.fs. Assigning here (rather than in PredicateParser.fs itself) forces
+    // PredicateParser's module initialiser to run before the first parse.
+    pPredicateRef.Value <- PredicateParser.pPredicate opp.ExpressionParser
+    pPredicatePrimaryRef.Value <- PredicateParser.pPredicatePrimary
 
     // 11 <SQL-schema statement> — DDL dispatcher
+    // 11.1 <schema element> ::= <table definition> | <view definition> | <domain definition>
+    //     | <character set definition> | <collation definition> | <transliteration definition>
+    //     | <assertion definition> | <trigger definition> | <user-defined type definition>
+    //     | <user-defined cast definition> | <user-defined ordering definition>
+    //     | <transform definition> | <schema routine> | <sequence generator definition>
+    //     | <grant statement> | <role definition>
+    // Only CREATE-family elements and GRANT are schema elements — DROP / ALTER /
+    // TRUNCATE / REVOKE are NOT. It is a local binding because the CREATE SCHEMA parser
+    // (SchemaParser.fs) takes it as a parameter and is its only consumer.
     let pDdl =
+        let pSchemaElement =
+            choice
+                [ attempt pCreateTableStatement
+                  attempt pCreateViewStatement
+                  attempt pCreateRoleStatement
+                  attempt pCreateSequenceStatement
+                  attempt pCreateDomainStatement
+                  attempt pCreateCharacterSetStatement
+                  attempt pCreateCollationStatement
+                  attempt pCreateTransliterationStatement
+                  attempt pCreateAssertionStatement
+                  attempt pCreateCastStatement
+                  attempt pCreateOrderingStatement
+                  attempt pCreateTransformStatement
+                  attempt pCreateTypeStatement
+                  attempt pCreateProcedureStatement
+                  attempt pCreateFunctionStatement
+                  attempt pCreateMethodStatement
+                  attempt pCreateTriggerStatement
+                  attempt pGrantStatement ]
+
         choice
             [ attempt pCreateTableStatement
               attempt pCreateViewStatement
               attempt pCreateRoleStatement
               attempt pCreateSequenceStatement
               attempt pAlterSequenceStatement
-              attempt pCreateSchemaStatement
+              attempt (pCreateSchemaStatement pSchemaElement)
               attempt pCreateDomainStatement
               attempt pAlterDomainStatement
               attempt pCreateCharacterSetStatement
@@ -75,41 +109,6 @@ module SqlParser =
               pDropStatement
               pAlterTableStatement
               pTruncateStatement ]
-
-    // 11.1 <schema element> ::= <table definition> | <view definition> | <domain definition>
-    //     | <character set definition> | <collation definition> | <transliteration definition>
-    //     | <assertion definition> | <trigger definition> | <user-defined type definition>
-    //     | <user-defined cast definition> | <user-defined ordering definition>
-    //     | <transform definition> | <schema routine> | <sequence generator definition>
-    //     | <grant statement> | <role definition>
-    // Only CREATE-family elements and GRANT are schema elements — DROP / ALTER /
-    // TRUNCATE / REVOKE are NOT (wired here so the CREATE SCHEMA parser defined in
-    // DdlParser.fs can consume nested schema elements).
-    pSchemaElementImpl.Value <-
-        choice
-            [ attempt pCreateTableStatement
-              attempt pCreateViewStatement
-              attempt pCreateRoleStatement
-              attempt pCreateSequenceStatement
-              attempt pCreateDomainStatement
-              attempt pCreateCharacterSetStatement
-              attempt pCreateCollationStatement
-              attempt pCreateTransliterationStatement
-              attempt pCreateAssertionStatement
-              attempt pCreateCastStatement
-              attempt pCreateOrderingStatement
-              attempt pCreateTransformStatement
-              attempt pCreateTypeStatement
-              attempt pCreateProcedureStatement
-              attempt pCreateFunctionStatement
-              attempt pCreateMethodStatement
-              attempt pCreateTriggerStatement
-              attempt pGrantStatement ]
-
-    // <SQL procedure statement> / <triggered SQL statement> used inside routine
-    // bodies and triggered actions may be any statement (wired here so the
-    // routine/trigger parsers defined in RoutineParser.fs can consume them).
-    pRoutineBodyStatementRefImpl.Value <- pStatement
 
     // 14.1 <declare cursor> / 14.4 <open statement> / 14.5 <fetch statement> / 14.6 <close statement>
     // 14.7 <select statement: single row> / 14.16 <temporary table declaration>

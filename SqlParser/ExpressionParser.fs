@@ -4,7 +4,7 @@ open FParsec
 open SqlParser.Lexer
 
 module ExpressionParser =
-    // 6.1 <data type> — forward ref (defined in TypeParser; used by CAST / JSON returning)
+    // 6.1 <data type> — forward ref (wired below in this module; used by CAST / JSON returning)
     let pDataType, pDataTypeRef = createParserForwardedToRef<DataType, unit> ()
     // 6.28 <value expression> without boolean operators — forward ref (wired to
     // opp.ExpressionParser after the operator-precedence parser is built below).
@@ -27,19 +27,20 @@ module ExpressionParser =
     let pMultisetValueExpression, pMultisetValueExpressionRef =
         createParserForwardedToRef<Expression, unit> ()
 
-    // Forward references to the 7.8/7.9 row pattern parsers (defined later in this
-    // module, after pExpression). Used by the 7.15 <window frame clause> and by
-    // QueryParser's MATCH_RECOGNIZE.
-    // 7.8 <row pattern measures> — forward ref
-    let pRowPatternMeasures, pRowPatternMeasuresRef =
-        createParserForwardedToRef<RowPatternMeasure list, unit> ()
-
-    // 7.9 <row pattern common syntax> — forward ref
-    let pRowPatternCommon, pRowPatternCommonRef =
-        createParserForwardedToRef<RowPatternCommon, unit> ()
-
     // 7.17 <query expression> — forward ref (defined in QueryParser; used by scalar/quantified subqueries)
     let pQuery, pQueryRef = createParserForwardedToRef<Query, unit> ()
+
+    // 8 Predicates — forward refs (defined in PredicateParser.fs, compiled after QueryParser.fs;
+    // wired in SqlParser.fs). §6.3 <value expression primary> and §6.39 <boolean test> consume
+    // them, so they must be referenced before PredicateParser is compiled.
+    // 8.1 <predicate> — the postfix predicate suffix (Expression -> Expression)
+    let pPredicate, pPredicateRef =
+        createParserForwardedToRef<Expression -> Expression, unit> ()
+    // 8.9 ANY/SOME/ALL (subquery) / 8.10 EXISTS / 8.11 UNIQUE / 8.20 PERIOD () / 8.23
+    // JSON_EXISTS — the §8 parsers that are also <value expression primary> alternatives,
+    // bundled into one parser.
+    let pPredicatePrimary, pPredicatePrimaryRef =
+        createParserForwardedToRef<Expression, unit> ()
 
     // 6.3 <value expression primary> helper — attaches source position to an ExpressionKind
     let withExprPosition p =
@@ -48,11 +49,214 @@ module ExpressionParser =
             { Expression.Kind = kind
               Pos = { Line = pos.Line; Column = pos.Column } }
 
-    // 6.3 <scalar subquery> ::= ( <subquery> )
-    let pScalarSubquery =
-        between (token (pstring "(")) (token (pstring ")")) pQuery
-        |>> SubqueryExpression
+    // 6.1 <character string type> ::= CHARACTER [ ( <character length> ) ] | CHAR [ ( <length> ) ] | CHARACTER VARYING ( <length> ) | VARCHAR ( <length> ) | <character large object type>
+    let pCharacterType =
+        choice
+            [ attempt (pKeyword "CHARACTER" .>> pKeyword "VARYING") >>% Varchar
+              attempt (pKeyword "CHAR" .>> pKeyword "VARYING") >>% Varchar
+              pKeyword "VARCHAR" >>% Varchar
+              attempt (pKeyword "CHARACTER" .>> pKeyword "LARGE" .>> pKeyword "OBJECT")
+              >>% CharacterLargeObject
+              attempt (pKeyword "CHAR" .>> pKeyword "LARGE" .>> pKeyword "OBJECT")
+              >>% CharacterLargeObject
+              pKeyword "CLOB" >>% CharacterLargeObject
+              pKeyword "CHARACTER" >>% Character
+              pKeyword "CHAR" >>% Character ]
+        .>>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
+        |>> fun (typ, len) -> typ len
+
+    // 6.1 <national character string type> ::= NATIONAL CHARACTER [ ( <character length> ) ] | NCHAR [ ... ] | NATIONAL CHARACTER VARYING ... | <national character large object type>
+    let pNationalCharacterType =
+        choice
+            [ attempt (pKeyword "NATIONAL" .>> pKeyword "CHARACTER" .>> pKeyword "VARYING")
+              >>% NationalVarchar
+              attempt (pKeyword "NATIONAL" .>> pKeyword "CHAR" .>> pKeyword "VARYING")
+              >>% NationalVarchar
+              attempt (pKeyword "NCHAR" .>> pKeyword "VARYING") >>% NationalVarchar
+              attempt (
+                  pKeyword "NATIONAL"
+                  .>> pKeyword "CHARACTER"
+                  .>> pKeyword "LARGE"
+                  .>> pKeyword "OBJECT"
+              )
+              >>% NationalCharacterLargeObject
+              attempt (pKeyword "NCHAR" .>> pKeyword "LARGE" .>> pKeyword "OBJECT")
+              >>% NationalCharacterLargeObject
+              pKeyword "NCLOB" >>% NationalCharacterLargeObject
+              attempt (pKeyword "NATIONAL" .>> pKeyword "CHARACTER") >>% NationalCharacter
+              attempt (pKeyword "NATIONAL" .>> pKeyword "CHAR") >>% NationalCharacter
+              pKeyword "NCHAR" >>% NationalCharacter ]
+        .>>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
+        |>> fun (typ, len) -> typ len
+
+    // 6.1 <binary string type> ::= BINARY [ ( <length> ) ] | BINARY VARYING ( <length> ) | VARBINARY ( <length> ) | <binary large object string type>
+    let pBinaryType =
+        choice
+            [ attempt (pKeyword "BINARY" .>> pKeyword "VARYING") >>% VarBinary
+              pKeyword "VARBINARY" >>% VarBinary
+              attempt (pKeyword "BINARY" .>> pKeyword "LARGE" .>> pKeyword "OBJECT")
+              >>% BinaryLargeObject
+              pKeyword "BLOB" >>% BinaryLargeObject
+              pKeyword "BINARY" >>% Binary ]
+        .>>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
+        |>> fun (typ, len) -> typ len
+
+    // 6.1 <exact numeric type> ::= NUMERIC [ ( <precision> [ , <scale> ] ) ] | DECIMAL [ ... ] | DEC [ ... ] | SMALLINT | INTEGER | INT | BIGINT  —  <decimal floating-point type> ::= DECFLOAT [ ( <precision> ) ]
+    let pNumericType =
+        let pPrecScale =
+            between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (pUnsignedInteger .>>. opt (token (pstring ",") >>. pUnsignedInteger))
+            |>> fun (p, s) -> Some(int p), Option.map int s
+
+        choice
+            [ pKeyword "NUMERIC" >>. opt pPrecScale
+              |>> fun ps ->
+                  Numeric(
+                      match ps with
+                      | Some(p, s) -> p, s
+                      | None -> None, None
+                  )
+              pKeyword "DECIMAL" >>. opt pPrecScale
+              |>> fun ps ->
+                  Decimal(
+                      match ps with
+                      | Some(p, s) -> p, s
+                      | None -> None, None
+                  )
+              pKeyword "DEC" >>. opt pPrecScale
+              |>> fun ps ->
+                  Decimal(
+                      match ps with
+                      | Some(p, s) -> p, s
+                      | None -> None, None
+                  )
+              pKeyword "DECFLOAT"
+              >>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
+              |>> DecFloat
+              pKeyword "SMALLINT" >>% SmallInt
+              pKeyword "INTEGER" >>% Integer
+              pKeyword "INT" >>% Integer
+              pKeyword "BIGINT" >>% BigInt ]
+
+    // 6.1 <approximate numeric type> ::= FLOAT [ ( <precision> ) ] | REAL | DOUBLE PRECISION
+    let pApproximateNumericType =
+        choice
+            [ pKeyword "FLOAT"
+              >>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
+              |>> Float
+              pKeyword "REAL" >>% Real
+              attempt (pKeyword "DOUBLE" .>> pKeyword "PRECISION") >>% DoublePrecision ]
+
+    // 6.1 <datetime type> ::= DATE | TIME [ ( <time precision> ) ] [ <with or without time zone> ] | TIMESTAMP [ ( <timestamp precision> ) ] [ <with or without time zone> ]
+    let pDateTimeType =
+        let pTz =
+            opt (pKeyword "WITH" <|> pKeyword "WITHOUT" .>> pKeyword "TIME" .>> pKeyword "ZONE")
+            |>> function
+                | Some "WITH" -> true
+                | _ -> false
+
+        choice
+            [ pKeyword "DATE" >>% DateType
+              pKeyword "TIME"
+              >>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
+              .>>. pTz
+              |>> fun (p, tz) -> TimeType(p, tz)
+              pKeyword "TIMESTAMP"
+              >>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
+              .>>. pTz
+              |>> fun (p, tz) -> TimestampType(p, tz) ]
+
+    // 6.1 <interval type> ::= INTERVAL <interval qualifier>
+    let pIntervalType =
+        pKeyword "INTERVAL" >>. many1Chars (noneOf "();,") .>> ws |>> IntervalType
+
+    // 6.7 <column reference> / 5.4 <identifier> — <identifier> | <column reference>
+    let pIdentifierExpr = pIdentifier |>> Identifier |> withExprPosition
+
+    // 6.1 <row type> ::= ROW <row type body> — <row type body> ::= ( <field definition> [ { , <field definition> }... ] )
+    let pRowType =
+        pKeyword "ROW"
+        >>. between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (sepBy1 (pIdentifierExpr .>>. pDataType) (token (pstring ",")))
+        |>> RowType
+
+    // 5.4 <schema qualified name>
+    let pQualifiedNameExpr =
+        pSchemaQualifiedName
+        |>> function
+            | [ s ] -> Identifier s
+            | parts -> ColumnReference parts
         |> withExprPosition
+
+    // 6.1 <scope clause> ::= SCOPE <table name>
+    // Shared by <reference type> (6.1), <column option list> (11.3) and
+    // <add column scope clause> (11.17); it lives here because ExpressionParser.fs is
+    // compiled before SchemaParser.fs.
+    let pScopeClause: Parser<Expression, unit> = pKeyword "SCOPE" >>. pQualifiedNameExpr
+
+    // 6.1 <data type> — element type parser: all types EXCEPT collection types (to avoid
+    // left recursion). The recursive REF / row-field positions use the `pDataType`
+    // forward ref, so this parser can be defined before `pCollectionType`.
+    let pDataTypeElement: Parser<DataType, unit> =
+        choice
+            [ attempt pCharacterType
+              attempt pNationalCharacterType
+              attempt pBinaryType
+              attempt pNumericType
+              attempt pApproximateNumericType
+              pKeyword "BOOLEAN" >>% Boolean
+              attempt pDateTimeType
+              attempt pIntervalType
+              attempt pRowType
+              // 6.1 <reference type> ::= REF ( <referenced type> ) [ SCOPE <table name> ]
+              // (REF is a reserved word, so it must be tried before the
+              // <path-resolved user-defined type name> fallback below)
+              attempt (
+                  pKeyword "REF" >>. between (token (pstring "(")) (token (pstring ")")) pDataType
+                  .>>. opt pScopeClause
+                  |>> fun (t, scope) -> ReferenceType(t, scope)
+              )
+              // 6.1 <path-resolved user-defined type name> ::= [ <schema name> <period> ] <qualified identifier>
+              // A UDT name is an identifier (optionally schema-qualified), but it must not be
+              // followed by another identifier — that would indicate a misparse (e.g. the
+              // NESTED PATH column form of JSON_TABLE, where NESTED would be read as a
+              // column name and PATH as a UDT).
+              attempt (
+                  pSchemaQualifiedName .>>? notFollowedBy pIdentifier
+                  >>= fun parts ->
+                      getPosition
+                      |>> fun pos ->
+                          let expr =
+                              match parts with
+                              | [ s ] -> Identifier s
+                              | ps -> ColumnReference ps
+
+                          UserDefinedType
+                              { Kind = expr
+                                Pos = { Line = pos.Line; Column = pos.Column } }
+              ) ]
+
+    // 6.1 <collection type> ::= <array type> | <multiset type> — <array type> ::= <data type> ARRAY [ [ <maximum cardinality> ] ] — <multiset type> ::= <data type> MULTISET
+    // The suffixes are applied left-to-right and may nest (`INT ARRAY ARRAY` =
+    // `ArrayType(ArrayType(Integer, None), None)`), because <data type> on the left of
+    // ARRAY/MULTISET may itself be a collection type.
+    let pCollectionType =
+        let pArraySuffix =
+            pKeyword "ARRAY"
+            .>>. opt (between (token (pstring "[")) (token (pstring "]")) pUnsignedInteger)
+            |>> fun (_, len) -> fun t -> ArrayType(t, Option.map int len)
+
+        let pMultisetSuffix: Parser<DataType -> DataType, unit> =
+            pKeyword "MULTISET" >>% (fun t -> MultisetType t)
+
+        pDataTypeElement .>>. many (choice [ pArraySuffix; pMultisetSuffix ])
+        |>> fun (t, suffixes) -> List.fold (fun acc f -> f acc) t suffixes
+
+    pDataTypeRef.Value <- choice [ attempt pCollectionType; pDataTypeElement ]
 
     // 5.1 <left bracket> ::= [ | ??( — and <right bracket> ::= ] | ??)
     let pLeftBracket = pstring "[" <|> pstring "??("
@@ -74,14 +278,6 @@ module ExpressionParser =
               attempt (pTimestampLiteral |>> Timestamp |>> Literal)
               attempt (pIntervalLiteral |>> Interval |>> Literal)
               attempt (pBinaryStringLiteral |>> Literal.Binary |>> Literal) ]
-        |> withExprPosition
-
-    // 5.4 <schema qualified name>
-    let pQualifiedNameExpr =
-        pSchemaQualifiedName
-        |>> function
-            | [ s ] -> Identifier s
-            | parts -> ColumnReference parts
         |> withExprPosition
 
     // 6.4 <dynamic parameter specification> ::= <question mark>
@@ -127,9 +323,6 @@ module ExpressionParser =
     let pDefaultValue: Parser<Expression, unit> =
         pKeyword "DEFAULT" >>% Default |> withExprPosition
 
-    // 6.7 <column reference> / 5.4 <identifier> — <identifier> | <column reference>
-    let pIdentifierExpr = pIdentifier |>> Identifier |> withExprPosition
-
     // A dotted identifier chain stops before '. <identifier> ( ... )' so that a
     // method invocation like a.b.method(x) parses as a column reference (a.b)
     // followed by a method-invocation postfix, while a.b.c (no parens) still
@@ -156,10 +349,137 @@ module ExpressionParser =
             [ pKeyword "RUNNING" >>% RunningOrFinal.Running
               pKeyword "FINAL" >>% RunningOrFinal.Final ]
 
-    // 7.15 <window frame clause> — follows the 6.10 <window name or specification> that
-    // consumes it (define-before-use): F#'s `let` bindings are not recursive, so a parser
-    // cannot reference itself through another parser's body even via a forward ref; the
-    // 6.10 body references this binding directly.
+    // 6.11 <row marker delta> / 7.9 <row pattern quantifier> — unsigned integer as <value expression> (row marker offsets / quantifier bounds)
+    let pUnsignedIntegerExpr: Parser<Expression, unit> =
+        getPosition .>>. token pUnsignedInteger
+        |>> fun (pos, n) ->
+            { Kind = Literal(Number(decimal n))
+              Pos = { Line = pos.Line; Column = pos.Column } }
+
+    // 7.8 <row pattern measures> / 7.9 <row pattern common syntax> — defined before the
+    // 7.15 <window frame clause> that consumes them, because they are also used by
+    // QueryParser's MATCH_RECOGNIZE. They depend only on `pExpression` (forward ref) and
+    // Lexer terminals.
+
+    // 7.8 <row pattern measure definition> ::= <row pattern measure expression> AS <measure name>
+    let pRowPatternMeasure =
+        pExpression .>> pKeyword "AS" .>>. pIdentifierExpr
+        |>> fun (expr, name) ->
+            { RowPatternMeasure.Expression = expr
+              Name = name }
+
+    // 7.8 <row pattern measures> ::= MEASURES <row pattern measure list>
+    let pRowPatternMeasures =
+        pKeyword "MEASURES" >>. sepBy1 pRowPatternMeasure (token (pstring ","))
+
+    // 7.9 <row pattern> — forward ref (recursive)
+    let pRowPattern, pRowPatternRef = createParserForwardedToRef<RowPattern, unit> ()
+
+    // 7.9 <row pattern quantifier>
+    let pRowPatternQuantifier =
+        choice
+            [ attempt (
+                  token (pstring "*") >>. opt (token (pstring "?"))
+                  |>> fun q -> RowPatternQuantifier.Star(Option.isSome q)
+              )
+              attempt (
+                  token (pstring "+") >>. opt (token (pstring "?"))
+                  |>> fun q -> RowPatternQuantifier.Plus(Option.isSome q)
+              )
+              attempt (
+                  token (pstring "?") >>. opt (token (pstring "?"))
+                  |>> fun q -> RowPatternQuantifier.Question(Option.isSome q)
+              )
+              attempt (
+                  between
+                      (token pLeftBrace)
+                      (token pRightBrace)
+                      (opt pUnsignedIntegerExpr .>> token (pstring ",") .>>. opt pUnsignedIntegerExpr)
+                  .>>. opt (token (pstring "?"))
+                  |>> fun ((lo, hi), q) -> RowPatternQuantifier.Brace(lo, hi, Option.isSome q)
+              )
+              attempt (
+                  between (token pLeftBrace) (token pRightBrace) pUnsignedIntegerExpr
+                  |>> RowPatternQuantifier.BraceExact
+              ) ]
+
+    // 7.9 <row pattern primary>
+    let pRowPatternPrimary =
+        choice
+            [ attempt (
+                  token pLeftBraceMinus >>. pRowPattern .>> token pRightMinusBrace
+                  |>> RowPatternExclude
+              )
+              attempt (token pCircumflex >>% RowPatternAnchorStart)
+              attempt (token pDollarSign >>% RowPatternAnchorEnd)
+              attempt (
+                  pKeyword "PERMUTE"
+                  >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pRowPattern (token (pstring ",")))
+                  |>> RowPatternPermute
+              )
+              attempt (
+                  between (token (pstring "(")) (token (pstring ")")) (opt pRowPattern)
+                  |>> RowPatternGroup
+              )
+              pIdentifierExpr |>> RowPatternVariable ]
+
+    // 7.9 <row pattern factor> ::= <row pattern primary> [ <row pattern quantifier> ]
+    let pRowPatternFactor =
+        pRowPatternPrimary .>>. opt (attempt pRowPatternQuantifier)
+        |>> fun (primary, quant) ->
+            { Primary = primary
+              Quantifier = quant }
+
+    // 7.9 <row pattern term> ::= <row pattern factor> | <row pattern term> <row pattern factor>
+    let pRowPatternTerm =
+        many1 pRowPatternFactor |>> fun factors -> { Factors = factors }
+
+    // 7.9 <row pattern> ::= <row pattern term> | <row pattern alternation>
+    pRowPatternRef.Value <- sepBy1 pRowPatternTerm (token pVerticalBar) |>> fun terms -> { Terms = terms }
+
+    // 7.9 <row pattern skip to>
+    let pRowPatternSkipTo =
+        pKeyword "SKIP"
+        >>. pKeyword "TO"
+        >>. choice
+                [ attempt (pKeyword "NEXT" >>. pKeyword "ROW" >>% SkipToNextRow)
+                  attempt (pKeyword "PAST" >>. pKeyword "LAST" >>. pKeyword "ROW" >>% SkipPastLastRow)
+                  attempt (pKeyword "FIRST" >>. pIdentifierExpr |>> SkipToFirst)
+                  attempt (pKeyword "LAST" >>. pIdentifierExpr |>> SkipToLast)
+                  pIdentifierExpr |>> SkipTo ]
+
+    // 7.9 <row pattern subset item> ::= <var> = ( <var> [ , <var> ]... )
+    let pRowPatternSubset =
+        pIdentifierExpr .>> token (pstring "=")
+        .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
+        |>> fun (name, vars) -> { Name = name; Variables = vars }
+
+    // 7.9 <row pattern definition> ::= <var> AS <search condition>
+    let pRowPatternDefinition =
+        pIdentifierExpr .>> pKeyword "AS" .>>. pExpression
+        |>> fun (name, cond) -> { Name = name; Condition = cond }
+
+    // 7.9 <row pattern common syntax> ::= [ AFTER MATCH <skip to> ] [ INITIAL | SEEK ]
+    //     PATTERN ( <row pattern> ) [ <subset clause> ] DEFINE <definition list>
+    let pRowPatternCommon =
+        opt (attempt (pKeyword "AFTER" >>. pKeyword "MATCH" >>. pRowPatternSkipTo))
+        .>>. opt (attempt (pKeyword "INITIAL" >>% true <|> (pKeyword "SEEK" >>% false)))
+        .>> pKeyword "PATTERN"
+        .>>. between (token (pstring "(")) (token (pstring ")")) pRowPattern
+        .>>. opt (attempt (pKeyword "SUBSET" >>. sepBy1 pRowPatternSubset (token (pstring ","))))
+        .>> pKeyword "DEFINE"
+        .>>. sepBy1 pRowPatternDefinition (token (pstring ","))
+        |>> fun ((((after, ios), pattern), subset), define) ->
+            { AfterMatch = after
+              InitialOrSeek = ios
+              Pattern = pattern
+              Subset = Option.defaultValue [] subset
+              Define = define }
+
+    // 7.15 <window frame clause> — consumed by the 6.10 <window name or specification>
+    // below (define-before-use): F#'s `let` bindings are not recursive, so the 6.10 body
+    // references this binding directly. Its optional leading <row pattern measures> and
+    // trailing <row pattern common syntax> (7.8/7.9) are defined immediately above.
     // 7.15 <window frame clause> ::= [ <row pattern measures> ] <window frame units> <window frame extent> [ <window frame exclusion> ] [ <row pattern common syntax> ]
     let pWindowFrame =
         // 7.15 <window frame units> ::= ROWS | RANGE | GROUPS
@@ -266,13 +586,6 @@ module ExpressionParser =
                         PartitionBy = []
                         OrderBy = []
                         Frame = None }))
-
-    // 6.11 <row marker delta> / 7.9 <row pattern quantifier> — unsigned integer as <value expression> (row marker offsets / quantifier bounds)
-    let pUnsignedIntegerExpr: Parser<Expression, unit> =
-        getPosition .>>. token pUnsignedInteger
-        |>> fun (pos, n) ->
-            { Kind = Literal(Number(decimal n))
-              Pos = { Line = pos.Line; Column = pos.Column } }
 
     // 6.11 <row marker> ::= BEGIN_PARTITION | BEGIN_FRAME | CURRENT_ROW | FRAME_ROW | END_FRAME | END_PARTITION
     let pRowMarker =
@@ -396,20 +709,19 @@ module ExpressionParser =
     let pValueExpressionList =
         between (token (pstring "(")) (token (pstring ")")) (sepBy pExpression (token (pstring ",")))
 
-    // 6.32 <specific type method> ::= <user-defined type value expression> <period> SPECIFICTYPE [ ( ) ]
-    // SPECIFICTYPE is a reserved word, so it cannot be reached through pIdentifierExpr below.
-    let pSpecificTypeMethod =
-        token (pstring ".")
-        >>. pKeyword "SPECIFICTYPE"
-        >>. opt (between (token (pstring "(")) (token (pstring ")")) (preturn true))
-        |>> fun parens ->
-            fun r ->
-                { Expression.Kind = SpecificTypeMethod(r, Option.isSome parens)
-                  Pos = r.Pos }
-
-    // — postfix '. <method name> [ ( <args> ) ]' applied to any <value expression primary> (with args → MethodInvocation; without → FieldReference)
-    // 6.17 <method invocation> (direct form) / 6.15 <field reference> ::= <value expression primary> <period> <method name> [ <SQL argument list> ] | <value expression primary> <period> <field name>
     let pMethodOrFieldReference =
+        // 6.32 <specific type method> ::= <user-defined type value expression> <period> SPECIFICTYPE [ ( ) ]
+        // SPECIFICTYPE is a reserved word, so it cannot be reached through pIdentifierExpr below.
+        // Local because pMethodOrFieldReference is its only consumer.
+        let pSpecificTypeMethod =
+            token (pstring ".")
+            >>. pKeyword "SPECIFICTYPE"
+            >>. opt (between (token (pstring "(")) (token (pstring ")")) (preturn true))
+            |>> fun parens ->
+                fun r ->
+                    { Expression.Kind = SpecificTypeMethod(r, Option.isSome parens)
+                      Pos = r.Pos }
+
         attempt pSpecificTypeMethod
         <|> (token (pstring ".") >>. pIdentifierExpr .>>. opt pValueExpressionList
              |>> fun (name, args) ->
@@ -525,14 +837,14 @@ module ExpressionParser =
         pRowPatternNavigation |>> RowPatternNavigation |> withExprPosition
 
     // 10.12 <JSON representation> ::= JSON [ ENCODING { UTF8 | UTF16 | UTF32 } ]
-    let pJsonEncoding =
-        choice
-            [ pKeyword "UTF8" >>% Utf8
-              pKeyword "UTF16" >>% Utf16
-              pKeyword "UTF32" >>% Utf32 ]
-
-    // 10.12 <JSON representation> ::= JSON [ ENCODING { UTF8 | UTF16 | UTF32 } ]
     let pJsonRepresentation =
+        // 10.12 <JSON representation>
+        let pJsonEncoding =
+            choice
+                [ pKeyword "UTF8" >>% Utf8
+                  pKeyword "UTF16" >>% Utf16
+                  pKeyword "UTF32" >>% Utf32 ]
+
         pKeyword "JSON" >>. opt (pKeyword "ENCODING" >>. pJsonEncoding) |>> JsonEncoding
 
     // 10.12 <JSON input clause> ::= FORMAT <JSON representation>
@@ -566,18 +878,18 @@ module ExpressionParser =
               PathName = pathName
               Passing = Option.defaultValue [] passing }
 
-    // 6.27 <JSON value empty/error behavior> ::= ERROR | NULL | DEFAULT <value expression>
-    // <value expression> is not boolean, so boolean operators are rejected here.
-    let pJsonValueBehavior =
-        choice
-            [ pKeyword "ERROR" >>% JsonError
-              pKeyword "NULL" >>% JsonNull
-              pKeyword "DEFAULT" >>. pValueExpressionNoBoolean |>> JsonDefault ]
-
     // 6.27 <JSON value function> ::= JSON_VALUE ( <JSON API common syntax>
     //     [ <JSON returning clause> ] [ <JSON value empty behavior> ON EMPTY ]
     //     [ <JSON value error behavior> ON ERROR ] )
     let pJsonValueFunction =
+        // 6.27 <JSON value empty/error behavior> ::= ERROR | NULL | DEFAULT <value expression>
+        // <value expression> is not boolean, so boolean operators are rejected here.
+        let pJsonValueBehavior =
+            choice
+                [ pKeyword "ERROR" >>% JsonError
+                  pKeyword "NULL" >>% JsonNull
+                  pKeyword "DEFAULT" >>. pValueExpressionNoBoolean |>> JsonDefault ]
+
         pKeyword "JSON_VALUE"
         >>. between
                 (token (pstring "("))
@@ -858,7 +1170,8 @@ module ExpressionParser =
         |> withExprPosition
 
     // 8.12 <normal form> ::= NFC | NFD | NFKC | NFKD
-    // (shared by the 8.12 <normalized predicate> and the 6.32 <normalize function>)
+    // Kept here (not in PredicateParser.fs): the 6.32 <normalize function> consumes it and
+    // §6 precedes §8, so define-before-use wins over the module split.
     let pNormalForm =
         choice
             [ pKeyword "NFC" >>% Nfc
@@ -886,13 +1199,6 @@ module ExpressionParser =
             match rest with
             | Some(form, len) -> NormalizeFunction(e, Some form, len)
             | None -> NormalizeFunction(e, None, None)
-        |> withExprPosition
-
-    // 6.32 <classifier function> ::= CLASSIFIER ( [ <row pattern variable name> ] )
-    let pClassifierFunction =
-        pKeyword "CLASSIFIER"
-        >>. between (token (pstring "(")) (token (pstring ")")) (opt pExpression)
-        |>> Classifier
         |> withExprPosition
 
     // 6.33 <JSON name and value> ::= [ KEY ] <JSON name> VALUE <JSON value expression>
@@ -1109,123 +1415,6 @@ module ExpressionParser =
              |>> RowValueConstructor)
         |> withExprPosition
 
-    // 7.8 <row pattern measure definition> ::= <row pattern measure expression> AS <measure name>
-    let pRowPatternMeasure =
-        pExpression .>> pKeyword "AS" .>>. pIdentifierExpr
-        |>> fun (expr, name) ->
-            { RowPatternMeasure.Expression = expr
-              Name = name }
-
-    // 7.8 <row pattern measures> ::= MEASURES <row pattern measure list>
-    pRowPatternMeasuresRef.Value <- pKeyword "MEASURES" >>. sepBy1 pRowPatternMeasure (token (pstring ","))
-
-    // 7.9 <row pattern> — forward ref (recursive)
-    let pRowPattern, pRowPatternRef = createParserForwardedToRef<RowPattern, unit> ()
-
-    // 7.9 <row pattern quantifier>
-    let pRowPatternQuantifier =
-        choice
-            [ attempt (
-                  token (pstring "*") >>. opt (token (pstring "?"))
-                  |>> fun q -> RowPatternQuantifier.Star(Option.isSome q)
-              )
-              attempt (
-                  token (pstring "+") >>. opt (token (pstring "?"))
-                  |>> fun q -> RowPatternQuantifier.Plus(Option.isSome q)
-              )
-              attempt (
-                  token (pstring "?") >>. opt (token (pstring "?"))
-                  |>> fun q -> RowPatternQuantifier.Question(Option.isSome q)
-              )
-              attempt (
-                  between
-                      (token pLeftBrace)
-                      (token pRightBrace)
-                      (opt pUnsignedIntegerExpr .>> token (pstring ",") .>>. opt pUnsignedIntegerExpr)
-                  .>>. opt (token (pstring "?"))
-                  |>> fun ((lo, hi), q) -> RowPatternQuantifier.Brace(lo, hi, Option.isSome q)
-              )
-              attempt (
-                  between (token pLeftBrace) (token pRightBrace) pUnsignedIntegerExpr
-                  |>> RowPatternQuantifier.BraceExact
-              ) ]
-
-    // 7.9 <row pattern primary>
-    let pRowPatternPrimary =
-        choice
-            [ attempt (
-                  token pLeftBraceMinus >>. pRowPattern .>> token pRightMinusBrace
-                  |>> RowPatternExclude
-              )
-              attempt (token pCircumflex >>% RowPatternAnchorStart)
-              attempt (token pDollarSign >>% RowPatternAnchorEnd)
-              attempt (
-                  pKeyword "PERMUTE"
-                  >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pRowPattern (token (pstring ",")))
-                  |>> RowPatternPermute
-              )
-              attempt (
-                  between (token (pstring "(")) (token (pstring ")")) (opt pRowPattern)
-                  |>> RowPatternGroup
-              )
-              pIdentifierExpr |>> RowPatternVariable ]
-
-    // 7.9 <row pattern factor> ::= <row pattern primary> [ <row pattern quantifier> ]
-    let pRowPatternFactor =
-        pRowPatternPrimary .>>. opt (attempt pRowPatternQuantifier)
-        |>> fun (primary, quant) ->
-            { Primary = primary
-              Quantifier = quant }
-
-    // 7.9 <row pattern term> ::= <row pattern factor> | <row pattern term> <row pattern factor>
-    let pRowPatternTerm =
-        many1 pRowPatternFactor |>> fun factors -> { Factors = factors }
-
-    // 7.9 <row pattern> ::= <row pattern term> | <row pattern alternation>
-    pRowPatternRef.Value <- sepBy1 pRowPatternTerm (token pVerticalBar) |>> fun terms -> { Terms = terms }
-
-    // 7.9 <row pattern skip to>
-    let pRowPatternSkipTo =
-        pKeyword "SKIP"
-        >>. pKeyword "TO"
-        >>. choice
-                [ attempt (pKeyword "NEXT" >>. pKeyword "ROW" >>% SkipToNextRow)
-                  attempt (pKeyword "PAST" >>. pKeyword "LAST" >>. pKeyword "ROW" >>% SkipPastLastRow)
-                  attempt (pKeyword "FIRST" >>. pIdentifierExpr |>> SkipToFirst)
-                  attempt (pKeyword "LAST" >>. pIdentifierExpr |>> SkipToLast)
-                  pIdentifierExpr |>> SkipTo ]
-
-    // 7.9 <row pattern subset item> ::= <var> = ( <var> [ , <var> ]... )
-    let pRowPatternSubset =
-        pIdentifierExpr .>> token (pstring "=")
-        .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
-        |>> fun (name, vars) -> { Name = name; Variables = vars }
-
-    // 7.9 <row pattern definition> ::= <var> AS <search condition>
-    let pRowPatternDefinition =
-        pIdentifierExpr .>> pKeyword "AS" .>>. pExpression
-        |>> fun (name, cond) -> { Name = name; Condition = cond }
-
-    // 7.9 <row pattern common syntax> ::= [ AFTER MATCH <skip to> ] [ INITIAL | SEEK ]
-    //     PATTERN ( <row pattern> ) [ <subset clause> ] DEFINE <definition list>
-    pRowPatternCommonRef.Value <-
-        opt (attempt (pKeyword "AFTER" >>. pKeyword "MATCH" >>. pRowPatternSkipTo))
-        .>>. opt (attempt (pKeyword "INITIAL" >>% true <|> (pKeyword "SEEK" >>% false)))
-        .>> pKeyword "PATTERN"
-        .>>. between (token (pstring "(")) (token (pstring ")")) pRowPattern
-        .>>. opt (attempt (pKeyword "SUBSET" >>. sepBy1 pRowPatternSubset (token (pstring ","))))
-        .>> pKeyword "DEFINE"
-        .>>. sepBy1 pRowPatternDefinition (token (pstring ","))
-        |>> fun ((((after, ios), pattern), subset), define) ->
-            { AfterMatch = after
-              InitialOrSeek = ios
-              Pattern = pattern
-              Subset = Option.defaultValue [] subset
-              Define = define }
-
-    // 7.16 <asterisk> ::= * — also used as <value expression primary> wildcard
-    let pStarExpr = pstring "*" .>> ws >>% ExpressionKind.Star |> withExprPosition
-
     // plus optional OVER (window), FILTER (WHERE), WITHIN GROUP (ORDER BY) clauses.
     // 10.4 <routine invocation> ::= <routine name> <SQL argument list>
     // 10.9 <aggregate function> — names used by <aggregate function>, <binary set function> and
@@ -1396,40 +1585,41 @@ module ExpressionParser =
                       Pos = { Line = pos.Line; Column = pos.Column } }
             | _ -> fail "RUNNING/FINAL requires an <aggregate function>"
 
-    // 7.18 <search clause> ::= SEARCH { DEPTH FIRST | BREADTH FIRST } BY <cols> SET <col>
-    let pSearchClause =
-        pKeyword "SEARCH"
-        >>. (attempt (pKeyword "DEPTH" >>. pKeyword "FIRST" >>% true)
-             <|> (pKeyword "BREADTH" >>. pKeyword "FIRST" >>% false))
-        .>> pKeyword "BY"
-        .>>. sepBy1 pIdentifierExpr (token (pstring ","))
-        .>> pKeyword "SET"
-        .>>. pIdentifierExpr
-        |>> fun ((isDepthFirst, orderBy), setCol) ->
-            { IsDepthFirst = isDepthFirst
-              OrderBy = orderBy
-              SetColumn = setCol }
-
-    // 7.18 <cycle clause> ::= CYCLE <cols> SET <col> TO <mark> DEFAULT <default> USING <path>
-    let pCycleClause =
-        pKeyword "CYCLE" >>. sepBy1 pIdentifierExpr (token (pstring ","))
-        .>> pKeyword "SET"
-        .>>. pIdentifierExpr
-        .>> pKeyword "TO"
-        .>>. pExpression
-        .>> pKeyword "DEFAULT"
-        .>>. pExpression
-        .>> pKeyword "USING"
-        .>>. pIdentifierExpr
-        |>> fun ((((cols, setCol), mark), defaultVal), path) ->
-            { CycleColumns = cols
-              SetColumn = setCol
-              MarkValue = mark
-              DefaultValue = defaultVal
-              PathColumn = path }
-
     // 7.17 <with list element> ::= <query name> [ ( <with column list> ) ] AS <table subquery> [ <search or cycle clause> ]
     let pCte =
+        // 7.18 <search clause> ::= SEARCH { DEPTH FIRST | BREADTH FIRST } BY <cols> SET <col>
+        // Local because pCte is the only consumer of the 7.18 clauses.
+        let pSearchClause =
+            pKeyword "SEARCH"
+            >>. (attempt (pKeyword "DEPTH" >>. pKeyword "FIRST" >>% true)
+                 <|> (pKeyword "BREADTH" >>. pKeyword "FIRST" >>% false))
+            .>> pKeyword "BY"
+            .>>. sepBy1 pIdentifierExpr (token (pstring ","))
+            .>> pKeyword "SET"
+            .>>. pIdentifierExpr
+            |>> fun ((isDepthFirst, orderBy), setCol) ->
+                { IsDepthFirst = isDepthFirst
+                  OrderBy = orderBy
+                  SetColumn = setCol }
+
+        // 7.18 <cycle clause> ::= CYCLE <cols> SET <col> TO <mark> DEFAULT <default> USING <path>
+        let pCycleClause =
+            pKeyword "CYCLE" >>. sepBy1 pIdentifierExpr (token (pstring ","))
+            .>> pKeyword "SET"
+            .>>. pIdentifierExpr
+            .>> pKeyword "TO"
+            .>>. pExpression
+            .>> pKeyword "DEFAULT"
+            .>>. pExpression
+            .>> pKeyword "USING"
+            .>>. pIdentifierExpr
+            |>> fun ((((cols, setCol), mark), defaultVal), path) ->
+                { CycleColumns = cols
+                  SetColumn = setCol
+                  MarkValue = mark
+                  DefaultValue = defaultVal
+                  PathColumn = path }
+
         pIdentifierExpr
         .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ","))))
         .>> pKeyword "AS"
@@ -1448,276 +1638,26 @@ module ExpressionParser =
         .>>. sepBy1 pCte (token (pstring ","))
         |>> fun (recu, ctes) -> Option.defaultValue false recu, ctes
 
-    // 8.9 <quantifier> ::= ALL | SOME | ANY
-    let pQuantifier =
-        choice
-            [ pKeyword "ANY" >>% Quantifier.Any
-              pKeyword "SOME" >>% Quantifier.SomeQuantifier
-              pKeyword "ALL" >>% Quantifier.All ]
-
-    // Only valid as the right operand of a comparison operator (see comparisonOp).
-    // 8.9 <quantified comparison predicate> — the ANY | SOME | ALL subquery term
-    let pQuantifiedSubqueryTerm =
-        pQuantifier .>>. between (token (pstring "(")) (token (pstring ")")) pQuery
-        |>> fun (quant, q) -> QuantifiedSubquery(quant, q)
-        |> withExprPosition
-
-    // 8.19 <user-defined type specification> ::= <user-defined type name> | ONLY <user-defined type name>
-    let pTypeSpec =
-        choice
-            [ pKeyword "ONLY" >>. pQualifiedNameExpr |>> Exclusive
-              pQualifiedNameExpr |>> Inclusive ]
-
-    // 8.20 <period predicate> operators (OVERLAPS is covered by the existing Overlaps case)
-    let pPeriodPredicateKind =
-        choice
-            [ pKeyword "EQUALS" >>% PeriodEquals
-              pKeyword "CONTAINS" >>% PeriodContains
-              pKeyword "PRECEDES" >>% PeriodPrecedes
-              pKeyword "SUCCEEDS" >>% PeriodSucceeds
-              attempt (pKeyword "IMMEDIATELY" >>. pKeyword "PRECEDES" >>% PeriodImmediatelyPrecedes)
-              attempt (pKeyword "IMMEDIATELY" >>. pKeyword "SUCCEEDS" >>% PeriodImmediatelySucceeds) ]
-
-    // 8.20 <period predicand> ::= <period reference> | PERIOD ( <start> , <end> )
-    let pPeriodValue =
-        pKeyword "PERIOD"
-        >>. between (token (pstring "(")) (token (pstring ")")) (pExpression .>> token (pstring ",") .>>. pExpression)
-        |>> (fun (start, finish) -> PeriodValue(start, finish))
-        |> withExprPosition
-
-    // 8.1 <predicate> — a postfix predicate applied to a <value expression primary>:
-    //   <between predicate>, <in predicate>, <null predicate>, <distinct predicate>,
-    //   <overlaps predicate>, <like predicate>, <similar predicate>, plus <collate clause>.
-    let pPredicate pExpr =
-        choice
-            [ // 8.3 <between predicate> ::= <row value predicand> [ NOT ] BETWEEN [ ASYMMETRIC | SYMMETRIC ] <row value predicand> AND <row value predicand>
-              attempt (
-                  opt (pKeyword "NOT") .>> pKeyword "BETWEEN"
-                  .>>. opt (pKeyword "ASYMMETRIC" <|> pKeyword "SYMMETRIC")
-                  .>>. pExpr
-                  .>> pKeyword "AND"
-                  .>>. pExpr
-                  |>> fun (((isNot, sym), start), endBound) ->
-                      fun e ->
-                          { Expression.Kind =
-                              ExpressionKind.Between(e, Option.isSome isNot, Option.isSome sym, start, endBound)
-                            Pos = e.Pos }
-              )
-              // 8.4 <in predicate> ::= <row value predicand> [ NOT ] IN { <table subquery> | <in predicate value list> }
-              attempt (
-                  opt (pKeyword "NOT") .>> pKeyword "IN"
-                  .>>. between
-                      (token (pstring "("))
-                      (token (pstring ")"))
-                      (attempt pQuery |>> Choice1Of2
-                       <|> (sepBy1 pExpr (token (pstring ",")) |>> Choice2Of2))
-                  |>> fun (isNot, res) ->
-                      fun e ->
-                          let kind =
-                              match res with
-                              | Choice1Of2 q -> InSubquery(e, Option.isSome isNot, q)
-                              | Choice2Of2 l -> InList(e, Option.isSome isNot, l)
-
-                          { Expression.Kind = kind; Pos = e.Pos }
-              )
-              // 8.8 <null predicate> ::= <row value predicand> IS [ NOT ] NULL — 6.39 <boolean test> ::= <boolean primary> IS [ NOT ] { TRUE | FALSE | UNKNOWN }
-              attempt (
-                  pKeyword "IS" >>. opt (pKeyword "NOT")
-                  .>>. (pKeyword "NULL" >>% Choice1Of2()
-                        <|> (pKeyword "TRUE" >>% Choice2Of2(Some true))
-                        <|> (pKeyword "FALSE" >>% Choice2Of2(Some false))
-                        <|> (pKeyword "UNKNOWN" >>% Choice2Of2 None))
-                  |>> fun (isNot, res) ->
-                      fun e ->
-                          let kind =
-                              match res with
-                              | Choice1Of2() -> IsNull(e, Option.isSome isNot)
-                              | Choice2Of2 b -> IsBoolean(e, Option.isSome isNot, b)
-
-                          { Expression.Kind = kind; Pos = e.Pos }
-              )
-              // 8.15 <distinct predicate> ::= <row value predicand> IS [ NOT ] DISTINCT FROM <row value predicand>
-              attempt (
-                  pKeyword "IS" >>. opt (pKeyword "NOT")
-                  .>> pKeyword "DISTINCT"
-                  .>> pKeyword "FROM"
-                  .>>. pExpr
-                  |>> fun (isNot, r) ->
-                      fun l ->
-                          { Expression.Kind = IsDistinctFrom(l, Option.isSome isNot, r)
-                            Pos = l.Pos }
-              )
-              // 8.14 <overlaps predicate> ::= <row value predicand 1> OVERLAPS <row value predicand 2>
-              attempt (
-                  pKeyword "OVERLAPS" >>. pExpr
-                  |>> fun r ->
-                      fun l ->
-                          { Expression.Kind = Overlaps(l, r)
-                            Pos = l.Pos }
-              )
-              // 8.5 <like predicate> ::= <character string value expression> [ NOT ] LIKE <character string pattern> [ ESCAPE <escape character> ]
-              attempt (
-                  opt (pKeyword "NOT") .>> pKeyword "LIKE"
-                  .>>. pExpr
-                  .>>. opt (pKeyword "ESCAPE" >>. pExpr)
-                  |>> fun ((isNot, pattern), escape) ->
-                      fun l ->
-                          { Expression.Kind = Like(l, Option.isSome isNot, pattern, escape)
-                            Pos = l.Pos }
-              )
-              // 8.6 <similar predicate> ::= <character string value expression> [ NOT ] SIMILAR TO <character string pattern> [ ESCAPE <escape character> ]
-              attempt (
-                  opt (pKeyword "NOT") .>> attempt (pKeyword "SIMILAR" .>> pKeyword "TO")
-                  .>>. pExpr
-                  .>>. opt (pKeyword "ESCAPE" >>. pExpr)
-                  |>> fun ((isNot, pattern), escape) ->
-                      fun l ->
-                          { Expression.Kind = SimilarTo(l, Option.isSome isNot, pattern, escape)
-                            Pos = l.Pos }
-              )
-              // 10.7 <collate clause> ::= COLLATE <collation name>
-              attempt (
-                  pKeyword "COLLATE" >>. pIdentifierExpr
-                  |>> fun collation ->
-                      fun e ->
-                          { Expression.Kind = Collate(e, collation)
-                            Pos = e.Pos }
-              )
-              // 8.12 <normalized predicate> ::= IS [ NOT ] [ <normal form> ] NORMALIZED
-              attempt (
-                  pKeyword "IS" >>. opt (pKeyword "NOT") .>>. opt pNormalForm
-                  .>> pKeyword "NORMALIZED"
-                  |>> fun (isNot, form) ->
-                      fun e ->
-                          { Expression.Kind = IsNormalized(e, Option.isSome isNot, form)
-                            Pos = e.Pos }
-              )
-              // 8.19 <type predicate> ::= IS [ NOT ] OF ( <type list> )
-              attempt (
-                  pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "OF"
-                  .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pTypeSpec (token (pstring ",")))
-                  |>> fun (isNot, types) ->
-                      fun e ->
-                          { Expression.Kind = IsOfType(e, Option.isSome isNot, types)
-                            Pos = e.Pos }
-              )
-              // 8.22 <JSON predicate> ::= IS [ NOT ] JSON [ VALUE | ARRAY | OBJECT | SCALAR ]
-              //     [ WITH | WITHOUT UNIQUE [ KEYS ] ]
-              attempt (
-                  pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "JSON"
-                  .>>. opt (
-                      pKeyword "VALUE" >>% JsonTypeValue
-                      <|> (pKeyword "ARRAY" >>% JsonTypeArray)
-                      <|> (pKeyword "OBJECT" >>% JsonTypeObject)
-                      <|> (pKeyword "SCALAR" >>% JsonTypeScalar)
-                  )
-                  .>>. opt (
-                      attempt (
-                          pKeyword "WITH" >>% Some true <|> (pKeyword "WITHOUT" >>% Some false)
-                          .>> pKeyword "UNIQUE"
-                          .>> opt (pKeyword "KEYS")
-                      )
-                  )
-                  |>> fun ((isNot, typeConstraint), unique) ->
-                      fun e ->
-                          { Expression.Kind = IsJson(e, Option.isSome isNot, typeConstraint, Option.flatten unique)
-                            Pos = e.Pos }
-              )
-              // 8.7 <regex like predicate> ::= [ NOT ] LIKE_REGEX <XQuery pattern>
-              //     [ FLAG <XQuery option flag> ]
-              attempt (
-                  opt (pKeyword "NOT") .>> pKeyword "LIKE_REGEX"
-                  .>>. pExpr
-                  .>>. opt (pKeyword "FLAG" >>. pExpr)
-                  |>> fun ((isNot, pattern), flag) ->
-                      fun e ->
-                          { Expression.Kind = RegexLike(e, Option.isSome isNot, pattern, flag)
-                            Pos = e.Pos }
-              )
-              // 8.13 <match predicate> ::= MATCH [ UNIQUE ] [ SIMPLE | PARTIAL | FULL ]
-              //     <table subquery>
-              attempt (
-                  pKeyword "MATCH" >>. opt (pKeyword "UNIQUE" >>% true)
-                  .>>. opt (
-                      pKeyword "SIMPLE" >>% Simple
-                      <|> (pKeyword "PARTIAL" >>% Partial)
-                      <|> (pKeyword "FULL" >>% Full)
-                  )
-                  .>>. between (token (pstring "(")) (token (pstring ")")) pQuery
-                  |>> fun ((isUnique, matchOption), q) ->
-                      fun e ->
-                          { Expression.Kind = Match(e, Option.isSome isUnique, matchOption, q)
-                            Pos = e.Pos }
-              )
-              // 8.16 <member predicate> ::= [ NOT ] MEMBER [ OF ] <multiset value expression>
-              attempt (
-                  opt (pKeyword "NOT") .>> pKeyword "MEMBER" .>> opt (pKeyword "OF") .>>. pExpr
-                  |>> fun (isNot, multiset) ->
-                      fun e ->
-                          { Expression.Kind = MemberOf(e, Option.isSome isNot, multiset)
-                            Pos = e.Pos }
-              )
-              // 8.17 <submultiset predicate> ::= [ NOT ] SUBMULTISET [ OF ] <multiset value expression>
-              attempt (
-                  opt (pKeyword "NOT") .>> pKeyword "SUBMULTISET" .>> opt (pKeyword "OF")
-                  .>>. pExpr
-                  |>> fun (isNot, multiset) ->
-                      fun e ->
-                          { Expression.Kind = SubmultisetOf(e, Option.isSome isNot, multiset)
-                            Pos = e.Pos }
-              )
-              // 8.18 <set predicate> ::= IS [ NOT ] A SET
-              attempt (
-                  pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "A" .>> pKeyword "SET"
-                  |>> fun isNot ->
-                      fun e ->
-                          { Expression.Kind = IsSet(e, Option.isSome isNot)
-                            Pos = e.Pos }
-              )
-              // 8.20 <period predicate> ::= <period predicate operator> <period predicand>
-              attempt (
-                  pPeriodPredicateKind .>>. (attempt pPeriodValue <|> pExpr)
-                  |>> fun (kind, right) ->
-                      fun left ->
-                          { Expression.Kind = PeriodPredicate(kind, left, right)
-                            Pos = left.Pos }
-              ) ]
-
-    // 8.10 <exists predicate> ::= EXISTS ( <subquery> )
-    let pExistsPredicate =
-        pKeyword "EXISTS" >>. between (token (pstring "(")) (token (pstring ")")) pQuery
-        |>> Exists
-        |> withExprPosition
-
-    // 8.11 <unique predicate> ::= UNIQUE ( <subquery> )
-    let pUniquePredicate =
-        pKeyword "UNIQUE" >>. between (token (pstring "(")) (token (pstring ")")) pQuery
-        |>> ExpressionKind.Unique
-        |> withExprPosition
-
-    // 8.23 <JSON exists error behavior> ::= TRUE | FALSE | UNKNOWN | ERROR
-    let pJsonExistsErrorBehavior =
-        choice
-            [ pKeyword "TRUE" >>% JsonExistsTrue
-              pKeyword "FALSE" >>% JsonExistsFalse
-              pKeyword "UNKNOWN" >>% JsonExistsUnknown
-              pKeyword "ERROR" >>% JsonExistsError ]
-
-    // 8.23 <JSON exists predicate> ::= JSON_EXISTS ( <JSON API common syntax>
-    //     [ <JSON exists error behavior> ON ERROR ] )
-    let pJsonExistsPredicate =
-        pKeyword "JSON_EXISTS"
-        >>. between
-                (token (pstring "("))
-                (token (pstring ")"))
-                (pJsonApiCommon
-                 .>>. opt (pJsonExistsErrorBehavior .>> pKeyword "ON" .>> pKeyword "ERROR"))
-        |>> fun (common, onError) -> JsonExists(common, onError)
-        |> withExprPosition
-
     // — the atomic building block of every <value expression>, used as the term parser of the operator-precedence parser below.
     // 6.3 <value expression primary> — the atomic building block of every <value expression>
     let pValueExpressionPrimary =
+        // 6.3 <scalar subquery> ::= ( <subquery> )
+        // Local because pValueExpressionPrimary is its only consumer.
+        let pScalarSubquery =
+            between (token (pstring "(")) (token (pstring ")")) pQuery
+            |>> SubqueryExpression
+            |> withExprPosition
+
+        // 6.32 <classifier function> ::= CLASSIFIER ( [ <row pattern variable name> ] )
+        let pClassifierFunction =
+            pKeyword "CLASSIFIER"
+            >>. between (token (pstring "(")) (token (pstring ")")) (opt pExpression)
+            |>> Classifier
+            |> withExprPosition
+
+        // 7.16 <asterisk> ::= * — also used as <value expression primary> wildcard
+        let pStarExpr = pstring "*" .>> ws >>% ExpressionKind.Star |> withExprPosition
+
         choice
             [ attempt pCastSpecification
               attempt pCaseExpression
@@ -1756,10 +1696,7 @@ module ExpressionParser =
               attempt pJsonArrayFunction
               attempt pJsonObjectAggFunction
               attempt pJsonArrayAggFunction
-              attempt pExistsPredicate
-              attempt pUniquePredicate
-              attempt pJsonExistsPredicate
-              attempt pPeriodValue
+              attempt pPredicatePrimary
               attempt pStaticMethodInvocation
               attempt pNewSpecification
               attempt pNestedRowNumberFunction
@@ -1772,7 +1709,6 @@ module ExpressionParser =
               attempt pLiteralExpr
               attempt pGeneralValueSpecification
               attempt pStarExpr
-              attempt pQuantifiedSubqueryTerm
               attempt pGeneralizedInvocation
               attempt pIntervalValueExpression
               attempt pExplicitRowValueConstructor
@@ -1968,7 +1904,10 @@ module ExpressionParser =
 
     // 8.2 <comparison predicate> ::= <row value predicand> <comp op> <row value predicand>
     // 8.9 <quantified comparison predicate> — rewrites <comp op> <quantifier> <table subquery> on the right
-    let comparisonOp (op: BinaryOperator) (x: Expression) (y: Expression) : ExpressionKind =
+    // Kept here (not in PredicateParser.fs): these are operators of `opp`, which §6 owns. The
+    // right-hand <quantifier> <table subquery> term is built by PredicateParser.pQuantifiedSubqueryTerm
+    // (surfaced through the pPredicatePrimary forward ref used by pValueExpressionPrimary).
+    let comparisonOp op x (y: Expression) =
         match y.Kind with
         | QuantifiedSubquery(quant, q) -> QuantifiedComparison(op, quant, x, q)
         | _ -> BinaryOp(op, x, y)
@@ -1991,7 +1930,7 @@ module ExpressionParser =
     let pBooleanTest =
         opp.ExpressionParser
         .>>. many (
-            pPredicate opp.ExpressionParser
+            pPredicate
             <|> pArrayElementReference
             <|> attempt pMultisetSetOperatorSuffix
             <|> attempt pTimeZoneSuffix
@@ -2029,202 +1968,146 @@ module ExpressionParser =
     // ANY/SOME/ALL (subquery) is only valid as the right operand of a comparison operator,
     // where `comparisonOp` rewrites it into QuantifiedComparison. Any QuantifiedSubquery that
     // survives (i.e. was not rewritten) is standalone and must be rejected.
-    let rec containsStandaloneQuantifiedSubquery e =
-        let containsJsonCommon c =
-            containsStandaloneQuantifiedSubquery c.Context
-            || Option.exists containsStandaloneQuantifiedSubquery c.PathName
-            || List.exists
-                (fun (v, n) -> containsStandaloneQuantifiedSubquery v || containsStandaloneQuantifiedSubquery n)
-                c.Passing
+    //
+    // The traversal uses an explicit work list so it is tail-recursive: an expression tree can
+    // be arbitrarily deep, and a boolean short-circuit (`a || b`) cannot put both recursive
+    // calls in tail position. The child collectors sit at module level (rather than inside the
+    // search) so they are not rebuilt on every visited node.
+    [<TailCall>]
+    let rec private containsStandaloneQuantifiedSubqueryIn (work: Expression list) =
+        let jsonCommonChildren c =
+            [ yield c.Context
+              yield! Option.toList c.PathName
+              yield! c.Passing |> List.collect (fun (v, n) -> [ v; n ]) ]
 
-        let containsJsonValueBehavior b =
-            match b with
-            | JsonDefault e -> containsStandaloneQuantifiedSubquery e
-            | _ -> false
+        let regexArgumentChildren (a: RegexArgument) =
+            let occurrenceChildren o =
+                match o with
+                | RegexOccurrenceNumber e -> [ e ]
+                | RegexOccurrenceAll -> []
 
-        let containsJsonQueryBehavior _ = false
+            [ yield a.Pattern
+              yield! Option.toList a.Flag
+              yield a.Subject
+              yield! Option.toList a.Replacement
+              yield! Option.toList a.From
+              yield! a.Occurrence |> Option.toList |> List.collect occurrenceChildren
+              yield! Option.toList a.CaptureGroup ]
 
-        let containsJsonNameValue (nv: JsonNameValue) =
-            containsStandaloneQuantifiedSubquery nv.Name
-            || containsStandaloneQuantifiedSubquery nv.Value
+        let expressionChildren (e: Expression) =
+            match e.Kind with
+            | BinaryOp(_, l, r) -> [ l; r ]
+            | UnaryOp(_, x) -> [ x ]
+            | FunctionCall(name, _, args, _, filter, withinGroup) ->
+                [ yield name
+                  yield! args
+                  yield! Option.toList filter
+                  yield! withinGroup |> Option.defaultValue [] |> List.map (fun (e, _, _) -> e) ]
+            | Cast(x, _) -> [ x ]
+            | Case(cond, whens, elseExpr) ->
+                [ yield! Option.toList cond
+                  yield! whens |> List.collect (fun (w, t) -> [ w; t ])
+                  yield! Option.toList elseExpr ]
+            | WindowFunction wf -> wf.Function :: wf.Args
+            | ExpressionKind.Between(x, _, _, lo, hi) -> [ x; lo; hi ]
+            | AllFieldsReference(x, cols) -> x :: Option.defaultValue [] cols
+            | InList(x, _, items) -> x :: items
+            | IsNull(x, _) -> [ x ]
+            | IsBoolean(x, _, _) -> [ x ]
+            | IsDistinctFrom(x, _, y) -> [ x; y ]
+            | Overlaps(x, y) -> [ x; y ]
+            | Collate(x, c) -> [ x; c ]
+            | Like(x, _, p, esc) -> [ yield x; yield p; yield! Option.toList esc ]
+            | SimilarTo(x, _, p, esc) -> [ yield x; yield p; yield! Option.toList esc ]
+            | Extract(x, f) -> [ x; f ]
+            | Position(x, s, len) -> [ yield x; yield s; yield! Option.toList len ]
+            | Trim(_, src, x) -> x :: Option.toList src
+            | Substring(x, s, len, _) -> [ yield x; yield s; yield! Option.toList len ]
+            | Overlay(x, p, f, len) -> [ yield x; yield p; yield f; yield! Option.toList len ]
+            | QuantifiedComparison(_, _, x, _) -> [ x ]
+            | CurrentTransformGroupForType x -> [ x ]
+            | CollationFor x -> [ x ]
+            | ArrayConstructor xs -> xs
+            | MultisetConstructor xs -> xs
+            | TableQuery _ -> []
+            | ArrayElement(x, idx) -> [ x; idx ]
+            | Treat(x, _) -> [ x ]
+            | Deref x -> [ x ]
+            | Element x -> [ x ]
+            | IsNormalized(x, _, _) -> [ x ]
+            | IsOfType(x, _, types) ->
+                x
+                :: (types
+                    |> List.map (function
+                        | Inclusive e
+                        | Exclusive e -> e))
+            | IsJson(x, _, _, _) -> [ x ]
+            | RegexLike(x, _, p, flag) -> [ yield x; yield p; yield! Option.toList flag ]
+            | Match(x, _, _, _) -> [ x ]
+            | MemberOf(x, _, m) -> [ x; m ]
+            | SubmultisetOf(x, _, m) -> [ x; m ]
+            | IsSet(x, _) -> [ x ]
+            | PeriodPredicate(_, l, r) -> [ l; r ]
+            | PeriodValue(s, e) -> [ s; e ]
+            | JsonExists(common, _) -> jsonCommonChildren common
+            | JsonValue(common, _, onEmpty, onError) ->
+                [ yield! jsonCommonChildren common
+                  yield!
+                      Option.toList onEmpty @ Option.toList onError
+                      |> List.collect (function
+                          | JsonDefault e -> [ e ]
+                          | _ -> []) ]
+            | JsonQuery(common, _, _, _, _, _) -> jsonCommonChildren common
+            | JsonObject(nvs, _, _, _) -> nvs |> List.collect (fun (nv: JsonNameValue) -> [ nv.Name; nv.Value ])
+            | JsonArray(xs, _, _) -> xs
+            | JsonObjectAgg(nv, _, _, _) -> [ nv.Name; nv.Value ]
+            | JsonArrayAgg(x, orderBy, _, _) ->
+                [ yield x
+                  yield! orderBy |> Option.defaultValue [] |> List.map (fun (e, _, _) -> e) ]
+            | SetFunction(_, x) -> [ x ]
+            | Grouping xs -> xs
+            | GeneralizedInvocation(r, _, name, args) -> [ yield r; yield name; yield! Option.defaultValue [] args ]
+            | Dereference(r, name, args) -> [ yield r; yield name; yield! Option.defaultValue [] args ]
+            | RowPatternNavigation(RowPatternNavigation.Logical(_, _, x, offset)) ->
+                [ yield x; yield! Option.toList offset ]
+            | RowPatternNavigation(RowPatternNavigation.Physical(_, x, offset)) ->
+                [ yield x; yield! Option.toList offset ]
+            | RowPatternNavigation(RowPatternNavigation.Compound(_, _, _, x, logical, physical)) ->
+                [ yield x; yield! Option.toList logical; yield! Option.toList physical ]
+            | LengthExpression(_, x, _) -> [ x ]
+            | NumericValueFunction(_, args) -> args
+            | RegexOccurrences arg -> regexArgumentChildren arg
+            | RegexPosition(_, arg) -> regexArgumentChildren arg
+            | RegexSubstring arg -> regexArgumentChildren arg
+            | RegexTransliterate arg -> regexArgumentChildren arg
+            | SubstringSimilar(x, pattern, escape) -> [ x; pattern; escape ]
+            | Fold(_, x) -> [ x ]
+            | Transcoding(x, name) -> [ x; name ]
+            | CharacterTransliteration(x, name) -> [ x; name ]
+            | NormalizeFunction(x, _, length) -> [ yield x; yield! Option.toList length ]
+            | SpecificTypeMethod(x, _) -> [ x ]
+            | Classifier x -> Option.toList x
+            | AtTimeZone(x, TimeZoneSpecifier.TimeZoneOffset zone) -> [ x; zone ]
+            | AtTimeZone(x, _) -> [ x ]
+            | TrimArray(x, count) -> [ x; count ]
+            | DatetimeDifference(l, r, _) -> [ l; r ]
+            | IntervalPrimary(x, _) -> [ x ]
+            | RowValueConstructor items -> items
+            | MultisetSetOperation(_, _, l, r) -> [ l; r ]
+            | MultisetSetFunction x -> [ x ]
+            // QuantifiedSubquery is tested by the search below; unlisted kinds (literals,
+            // identifiers, ...) contribute no children.
+            | _ -> []
 
-        let containsRegexOccurrence o =
-            match o with
-            | RegexOccurrenceNumber e -> containsStandaloneQuantifiedSubquery e
-            | RegexOccurrenceAll -> false
+        match work with
+        | [] -> false
+        | e :: rest ->
+            match e.Kind with
+            | QuantifiedSubquery _ -> true
+            | _ -> containsStandaloneQuantifiedSubqueryIn (expressionChildren e @ rest)
 
-        let containsRegexArgument (a: RegexArgument) =
-            containsStandaloneQuantifiedSubquery a.Pattern
-            || Option.exists containsStandaloneQuantifiedSubquery a.Flag
-            || containsStandaloneQuantifiedSubquery a.Subject
-            || Option.exists containsStandaloneQuantifiedSubquery a.Replacement
-            || Option.exists containsStandaloneQuantifiedSubquery a.From
-            || Option.exists containsRegexOccurrence a.Occurrence
-            || Option.exists containsStandaloneQuantifiedSubquery a.CaptureGroup
-
-        match e.Kind with
-        | QuantifiedSubquery _ -> true
-        | BinaryOp(_, l, r) -> containsStandaloneQuantifiedSubquery l || containsStandaloneQuantifiedSubquery r
-        | UnaryOp(_, x) -> containsStandaloneQuantifiedSubquery x
-        | FunctionCall(name, _, args, _, filter, withinGroup) ->
-            containsStandaloneQuantifiedSubquery name
-            || List.exists containsStandaloneQuantifiedSubquery args
-            || Option.exists containsStandaloneQuantifiedSubquery filter
-            || Option.exists (List.exists (fun (e, _, _) -> containsStandaloneQuantifiedSubquery e)) withinGroup
-        | Cast(x, _) -> containsStandaloneQuantifiedSubquery x
-        | Case(cond, whens, elseExpr) ->
-            Option.exists containsStandaloneQuantifiedSubquery cond
-            || List.exists
-                (fun (w, t) -> containsStandaloneQuantifiedSubquery w || containsStandaloneQuantifiedSubquery t)
-                whens
-            || Option.exists containsStandaloneQuantifiedSubquery elseExpr
-        | WindowFunction wf ->
-            containsStandaloneQuantifiedSubquery wf.Function
-            || List.exists containsStandaloneQuantifiedSubquery wf.Args
-        | ExpressionKind.Between(x, _, _, lo, hi) ->
-            containsStandaloneQuantifiedSubquery x
-            || containsStandaloneQuantifiedSubquery lo
-            || containsStandaloneQuantifiedSubquery hi
-        | AllFieldsReference(x, cols) ->
-            containsStandaloneQuantifiedSubquery x
-            || Option.exists (List.exists containsStandaloneQuantifiedSubquery) cols
-        | InList(x, _, items) ->
-            containsStandaloneQuantifiedSubquery x
-            || List.exists containsStandaloneQuantifiedSubquery items
-        | IsNull(x, _) -> containsStandaloneQuantifiedSubquery x
-        | IsBoolean(x, _, _) -> containsStandaloneQuantifiedSubquery x
-        | IsDistinctFrom(x, _, y) -> containsStandaloneQuantifiedSubquery x || containsStandaloneQuantifiedSubquery y
-        | Overlaps(x, y) -> containsStandaloneQuantifiedSubquery x || containsStandaloneQuantifiedSubquery y
-        | Collate(x, c) -> containsStandaloneQuantifiedSubquery x || containsStandaloneQuantifiedSubquery c
-        | Like(x, _, p, esc) ->
-            containsStandaloneQuantifiedSubquery x
-            || containsStandaloneQuantifiedSubquery p
-            || Option.exists containsStandaloneQuantifiedSubquery esc
-        | SimilarTo(x, _, p, esc) ->
-            containsStandaloneQuantifiedSubquery x
-            || containsStandaloneQuantifiedSubquery p
-            || Option.exists containsStandaloneQuantifiedSubquery esc
-        | Extract(x, f) -> containsStandaloneQuantifiedSubquery x || containsStandaloneQuantifiedSubquery f
-        | Position(x, s, len) ->
-            containsStandaloneQuantifiedSubquery x
-            || containsStandaloneQuantifiedSubquery s
-            || Option.exists containsStandaloneQuantifiedSubquery len
-        | Trim(_, src, x) ->
-            Option.exists containsStandaloneQuantifiedSubquery src
-            || containsStandaloneQuantifiedSubquery x
-        | Substring(x, s, len, _) ->
-            containsStandaloneQuantifiedSubquery x
-            || containsStandaloneQuantifiedSubquery s
-            || Option.exists containsStandaloneQuantifiedSubquery len
-        | Overlay(x, p, f, len) ->
-            containsStandaloneQuantifiedSubquery x
-            || containsStandaloneQuantifiedSubquery p
-            || containsStandaloneQuantifiedSubquery f
-            || Option.exists containsStandaloneQuantifiedSubquery len
-        | QuantifiedComparison(_, _, x, _) -> containsStandaloneQuantifiedSubquery x
-        | CurrentTransformGroupForType x -> containsStandaloneQuantifiedSubquery x
-        | CollationFor x -> containsStandaloneQuantifiedSubquery x
-        | ArrayConstructor xs -> List.exists containsStandaloneQuantifiedSubquery xs
-        | MultisetConstructor xs -> List.exists containsStandaloneQuantifiedSubquery xs
-        | TableQuery _ -> false
-        | ArrayElement(x, idx) ->
-            containsStandaloneQuantifiedSubquery x
-            || containsStandaloneQuantifiedSubquery idx
-        | Treat(x, _) -> containsStandaloneQuantifiedSubquery x
-        | Deref x -> containsStandaloneQuantifiedSubquery x
-        | Element x -> containsStandaloneQuantifiedSubquery x
-        | IsNormalized(x, _, _) -> containsStandaloneQuantifiedSubquery x
-        | IsOfType(x, _, types) ->
-            containsStandaloneQuantifiedSubquery x
-            || List.exists
-                (fun t ->
-                    match t with
-                    | Inclusive e -> containsStandaloneQuantifiedSubquery e
-                    | Exclusive e -> containsStandaloneQuantifiedSubquery e)
-                types
-        | IsJson(x, _, _, _) -> containsStandaloneQuantifiedSubquery x
-        | RegexLike(x, _, p, flag) ->
-            containsStandaloneQuantifiedSubquery x
-            || containsStandaloneQuantifiedSubquery p
-            || Option.exists containsStandaloneQuantifiedSubquery flag
-        | Match(x, _, _, _) -> containsStandaloneQuantifiedSubquery x
-        | MemberOf(x, _, m) -> containsStandaloneQuantifiedSubquery x || containsStandaloneQuantifiedSubquery m
-        | SubmultisetOf(x, _, m) -> containsStandaloneQuantifiedSubquery x || containsStandaloneQuantifiedSubquery m
-        | IsSet(x, _) -> containsStandaloneQuantifiedSubquery x
-        | PeriodPredicate(_, l, r) -> containsStandaloneQuantifiedSubquery l || containsStandaloneQuantifiedSubquery r
-        | PeriodValue(s, e) -> containsStandaloneQuantifiedSubquery s || containsStandaloneQuantifiedSubquery e
-        | JsonExists(common, _) -> containsJsonCommon common
-        | JsonValue(common, _, onEmpty, onError) ->
-            containsJsonCommon common
-            || Option.exists containsJsonValueBehavior onEmpty
-            || Option.exists containsJsonValueBehavior onError
-        | JsonQuery(common, _, _, _, onEmpty, onError) ->
-            containsJsonCommon common
-            || Option.exists containsJsonQueryBehavior onEmpty
-            || Option.exists containsJsonQueryBehavior onError
-        | JsonObject(nvs, _, _, _) -> List.exists containsJsonNameValue nvs
-        | JsonArray(xs, _, _) -> List.exists containsStandaloneQuantifiedSubquery xs
-        | JsonObjectAgg(nv, _, _, _) -> containsJsonNameValue nv
-        | JsonArrayAgg(x, orderBy, _, _) ->
-            containsStandaloneQuantifiedSubquery x
-            || Option.exists (List.exists (fun (e, _, _) -> containsStandaloneQuantifiedSubquery e)) orderBy
-        | SetFunction(_, x) -> containsStandaloneQuantifiedSubquery x
-        | Grouping xs -> List.exists containsStandaloneQuantifiedSubquery xs
-        | GeneralizedInvocation(r, _, name, args) ->
-            containsStandaloneQuantifiedSubquery r
-            || containsStandaloneQuantifiedSubquery name
-            || Option.exists (List.exists containsStandaloneQuantifiedSubquery) args
-        | Dereference(r, name, args) ->
-            containsStandaloneQuantifiedSubquery r
-            || containsStandaloneQuantifiedSubquery name
-            || Option.exists (List.exists containsStandaloneQuantifiedSubquery) args
-        | RowPatternNavigation(RowPatternNavigation.Logical(_, _, x, offset)) ->
-            containsStandaloneQuantifiedSubquery x
-            || Option.exists containsStandaloneQuantifiedSubquery offset
-        | RowPatternNavigation(RowPatternNavigation.Physical(_, x, offset)) ->
-            containsStandaloneQuantifiedSubquery x
-            || Option.exists containsStandaloneQuantifiedSubquery offset
-        | RowPatternNavigation(RowPatternNavigation.Compound(_, _, _, x, logical, physical)) ->
-            containsStandaloneQuantifiedSubquery x
-            || Option.exists containsStandaloneQuantifiedSubquery logical
-            || Option.exists containsStandaloneQuantifiedSubquery physical
-        | LengthExpression(_, x, _) -> containsStandaloneQuantifiedSubquery x
-        | NumericValueFunction(_, args) -> List.exists containsStandaloneQuantifiedSubquery args
-        | RegexOccurrences arg -> containsRegexArgument arg
-        | RegexPosition(_, arg) -> containsRegexArgument arg
-        | RegexSubstring arg -> containsRegexArgument arg
-        | RegexTransliterate arg -> containsRegexArgument arg
-        | SubstringSimilar(x, pattern, escape) ->
-            containsStandaloneQuantifiedSubquery x
-            || containsStandaloneQuantifiedSubquery pattern
-            || containsStandaloneQuantifiedSubquery escape
-        | Fold(_, x) -> containsStandaloneQuantifiedSubquery x
-        | Transcoding(x, name) ->
-            containsStandaloneQuantifiedSubquery x
-            || containsStandaloneQuantifiedSubquery name
-        | CharacterTransliteration(x, name) ->
-            containsStandaloneQuantifiedSubquery x
-            || containsStandaloneQuantifiedSubquery name
-        | NormalizeFunction(x, _, length) ->
-            containsStandaloneQuantifiedSubquery x
-            || Option.exists containsStandaloneQuantifiedSubquery length
-        | SpecificTypeMethod(x, _) -> containsStandaloneQuantifiedSubquery x
-        | Classifier x -> Option.exists containsStandaloneQuantifiedSubquery x
-        | AtTimeZone(x, TimeZoneSpecifier.TimeZoneOffset zone) ->
-            containsStandaloneQuantifiedSubquery x
-            || containsStandaloneQuantifiedSubquery zone
-        | AtTimeZone(x, _) -> containsStandaloneQuantifiedSubquery x
-        | TrimArray(x, count) ->
-            containsStandaloneQuantifiedSubquery x
-            || containsStandaloneQuantifiedSubquery count
-        | DatetimeDifference(l, r, _) ->
-            containsStandaloneQuantifiedSubquery l || containsStandaloneQuantifiedSubquery r
-        | IntervalPrimary(x, _) -> containsStandaloneQuantifiedSubquery x
-        | RowValueConstructor items -> List.exists containsStandaloneQuantifiedSubquery items
-        | MultisetSetOperation(_, _, l, r) ->
-            containsStandaloneQuantifiedSubquery l || containsStandaloneQuantifiedSubquery r
-        | MultisetSetFunction x -> containsStandaloneQuantifiedSubquery x
-        | _ -> false
+    let containsStandaloneQuantifiedSubquery root =
+        containsStandaloneQuantifiedSubqueryIn [ root ]
 
     pExpressionRef.Value <-
         pOrExpr
@@ -2233,3 +2116,14 @@ module ExpressionParser =
                 fail "quantified subquery requires a comparison operator"
             else
                 preturn e
+
+    // 10.6 <routine type> / 11.51 <partial method specification> — [ INSTANCE | STATIC | CONSTRUCTOR ]
+    // Shared by 10.6 (<routine type>), 11.60 (<method specification designator>) and
+    // 11.51 (<partial method specification>), all defined in SchemaParser.fs; it lives here
+    // because ExpressionParser.fs is compiled before that module. INSTANCE and CONSTRUCTOR are not
+    // reserved words, hence the `attempt`s. Placed after the 6.1 family so the file stays in clause order.
+    let pMethodKind: Parser<MethodKind, unit> =
+        choice
+            [ attempt (pKeyword "INSTANCE" >>% MethodKind.Instance)
+              attempt (pKeyword "STATIC" >>% MethodKind.Static)
+              attempt (pKeyword "CONSTRUCTOR" >>% MethodKind.Constructor) ]
