@@ -65,7 +65,8 @@ All code — including test code — must work on **both Windows and Linux**. Av
 - After any code change, run `dotnet test` and confirm **all tests pass**.
 - Maintain high unit test coverage (target: ≥ 90% line coverage). If it falls below 90%, add tests to restore it before merging.
 - **Test ordering rules**:
-  1. Within each test file, `[<Fact>]` functions must appear in the same order as the corresponding functions/methods/constructors in the source file under test.
+  1. Within each test file, `[<Fact>]` functions must appear in the same order as the corresponding functions/methods/constructors in the source file under test. When a test targets a symbol in a different module, order it by the `SqlParser.fsproj` compile order of the target module, then by that symbol's definition order.
   2. When multiple test cases target the same source function, order them by **test priority**: normal (happy path) → error cases → fault/failure scenarios.
+- Ordering is a review convention — no test enforces it (`RuleNumberingTests` validates citation numbers only). Reordering definitions in `SqlParser/*.fs` therefore means re-sorting the matching test files too.
 - **Prefer data-driven tests** (`[<Theory>]` + `[<InlineData>]`) when multiple test cases share the same test logic but differ only in inputs or expected outputs. This reduces code duplication and makes it easy to add new cases.
 - **Use a unique suffix** per test — tests may run in parallel.

@@ -50,25 +50,6 @@ let ``DECLARE CURSOR returnability verification`` (keyword: string) (expected: s
     | res -> Assert.Fail(sprintf "Expected %s returnability, got %A" keyword res)
 
 [<Fact>]
-let ``CURSOR ATTRIBUTES verification`` () =
-    match run (CursorParser.pCursorAttributes .>> eof) "SENSITIVE NO SCROLL WITH HOLD WITHOUT RETURN" with
-    | Success(attrs, _, _) ->
-        Assert.Equal<CursorAttribute list>(
-            [ CursorAttribute.SensitivityAttribute Sensitive
-              CursorAttribute.ScrollabilityAttribute NoScroll
-              CursorAttribute.HoldabilityAttribute WithHold
-              CursorAttribute.ReturnabilityAttribute WithoutReturn ],
-            attrs
-        )
-    | Failure(msg, _, _) -> Assert.Fail(msg)
-
-[<Fact>]
-let ``CURSOR ATTRIBUTES rejects a non-attribute`` () =
-    match run (CursorParser.pCursorAttributes .>> eof) "SENSITIVE UPDATE" with
-    | Success _ -> Assert.Fail("Expected CURSOR ATTRIBUTES to reject UPDATE")
-    | Failure _ -> ()
-
-[<Fact>]
 let ``DECLARE CURSOR verification`` () =
     match parse "DECLARE cur CURSOR FOR SELECT a FROM t" with
     | DeclareCursor { Name = { Kind = Identifier "CUR" }
@@ -283,3 +264,22 @@ let ``HOLD LOCATOR multiple references verification`` () =
 
 [<Fact>]
 let ``HOLD LOCATOR without locator reference is rejected`` () = parseFails "HOLD LOCATOR"
+
+[<Fact>]
+let ``CURSOR ATTRIBUTES verification`` () =
+    match run (CursorParser.pCursorAttributes .>> eof) "SENSITIVE NO SCROLL WITH HOLD WITHOUT RETURN" with
+    | Success(attrs, _, _) ->
+        Assert.Equal<CursorAttribute list>(
+            [ CursorAttribute.SensitivityAttribute Sensitive
+              CursorAttribute.ScrollabilityAttribute NoScroll
+              CursorAttribute.HoldabilityAttribute WithHold
+              CursorAttribute.ReturnabilityAttribute WithoutReturn ],
+            attrs
+        )
+    | Failure(msg, _, _) -> Assert.Fail(msg)
+
+[<Fact>]
+let ``CURSOR ATTRIBUTES rejects a non-attribute`` () =
+    match run (CursorParser.pCursorAttributes .>> eof) "SENSITIVE UPDATE" with
+    | Success _ -> Assert.Fail("Expected CURSOR ATTRIBUTES to reject UPDATE")
+    | Failure _ -> ()

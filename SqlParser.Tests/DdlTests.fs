@@ -27,47 +27,130 @@ let private returnsData (ty: DataType) =
 let private dataTypeParam ty = DataTypeParameter(ty, false)
 
 [<Fact>]
-let ``CREATE SEQUENCE verification`` () =
-    match parse "CREATE SEQUENCE order_seq START WITH 1 INCREMENT BY 2 MAXVALUE 100 CYCLE" with
-    | CreateSequence({ Kind = Identifier "ORDER_SEQ" },
-                     [ StartWith 1m; IncrementBy 2m; MaxValue(Some 100m); Cycle true ]) -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateSequence, got %A" res)
-
-    match parse "CREATE SEQUENCE order_seq NO MINVALUE NO CYCLE" with
-    | CreateSequence({ Kind = Identifier "ORDER_SEQ" }, [ MinValue None; Cycle false ]) -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateSequence NO MINVALUE NO CYCLE, got %A" res)
-
-    match parse "CREATE SEQUENCE order_seq MINVALUE 1" with
-    | CreateSequence({ Kind = Identifier "ORDER_SEQ" }, [ MinValue(Some 1m) ]) -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateSequence MINVALUE, got %A" res)
+let ``User-defined type does not crash`` () =
+    match parse "CREATE TABLE t (c MyType)" with
+    | CreateTable { Columns = [ { DataType = UserDefinedType { Kind = Identifier "MYTYPE" } } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected UserDefinedType, got %A" res)
 
 [<Fact>]
-let ``ALTER SEQUENCE verification`` () =
-    match parse "ALTER SEQUENCE order_seq RESTART WITH 100" with
-    | AlterSequence({ Kind = Identifier "ORDER_SEQ" }, [ Restart(Some 100m) ]) -> ()
-    | res -> Assert.Fail(sprintf "Expected AlterSequence RESTART, got %A" res)
-
-    match parse "ALTER SEQUENCE order_seq INCREMENT BY 5 MAXVALUE 1000" with
-    | AlterSequence({ Kind = Identifier "ORDER_SEQ" }, [ IncrementBy 5m; MaxValue(Some 1000m) ]) -> ()
-    | res -> Assert.Fail(sprintf "Expected AlterSequence INCREMENT, got %A" res)
+let ``CREATE TABLE with REF type verification`` () =
+    match parse "CREATE TABLE t (r REF(my_type) SCOPE users)" with
+    | CreateTable { Columns = [ { Name = { Kind = Identifier "R" }
+                                  DataType = ReferenceType(UserDefinedType { Kind = Identifier "MY_TYPE" },
+                                                           Some { Kind = Identifier "USERS" }) } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateTable REF, got %A" res)
 
 [<Fact>]
-let ``CREATE TABLE verification`` () =
-    match parse "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100) NOT NULL)" with
-    | CreateTable { Table = { Kind = Identifier "USERS" }
-                    Columns = [ { Name = { Kind = Identifier "ID" }
-                                  DataType = Integer
-                                  IsPrimaryKey = true }
-                                { Name = { Kind = Identifier "NAME" }
-                                  DataType = Varchar(Some 100)
-                                  IsNullable = Some false } ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateTable, got %A" res)
+let ``Array type is parsed`` () =
+    match parse "CREATE TABLE t (c INT ARRAY)" with
+    | CreateTable { Columns = [ { DataType = ArrayType(Integer, None) } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected ArrayType, got %A" res)
 
 [<Fact>]
-let ``CREATE TABLE schema-qualified verification`` () =
-    match parse "CREATE TABLE app.users (id INT)" with
-    | CreateTable { Table = { Kind = ColumnReference [ "APP"; "USERS" ] } } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateTable schema-qualified, got %A" res)
+let ``Nested collection types are parsed`` () =
+    match parse "CREATE TABLE t (c INT ARRAY ARRAY)" with
+    | CreateTable { Columns = [ { DataType = ArrayType(ArrayType(Integer, None), None) } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected nested ArrayType, got %A" res)
+
+    match parse "CREATE TABLE t (c INT MULTISET ARRAY [3])" with
+    | CreateTable { Columns = [ { DataType = ArrayType(MultisetType Integer, Some 3) } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected ArrayType of MultisetType, got %A" res)
+
+[<Fact>]
+let ``column collate clause verification`` () =
+    match parse "CREATE TABLE t (c VARCHAR(10) COLLATE en_us)" with
+    | CreateTable { Columns = [ { Collation = Some { Kind = Identifier "EN_US" } } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected a column COLLATE clause, got %A" res)
+
+[<Fact>]
+let ``constraint characteristics verification`` () =
+    // 10.8 alternative 1: <constraint check time> [ [ NOT ] DEFERRABLE ] [ <constraint enforcement> ]
+    match parse "CREATE DOMAIN d AS INT CHECK (x > 0) INITIALLY DEFERRED" with
+    | CreateDomain { Constraints = [ c ] } ->
+        Assert.Equal(Some true, c.Characteristics.InitiallyDeferred)
+        Assert.True(Option.isNone c.Characteristics.Deferrable)
+        Assert.True(Option.isNone c.Characteristics.Enforced)
+    | res -> Assert.Fail(sprintf "Expected INITIALLY DEFERRED, got %A" res)
+
+    // 10.8 alternative 2: [ [ NOT ] DEFERRABLE ] <constraint check time> [ <constraint enforcement> ]
+    match parse "CREATE DOMAIN d AS INT CHECK (x > 0) DEFERRABLE INITIALLY IMMEDIATE NOT ENFORCED" with
+    | CreateDomain { Constraints = [ c ] } ->
+        Assert.Equal(Some false, c.Characteristics.InitiallyDeferred)
+        Assert.Equal(Some true, c.Characteristics.Deferrable)
+        Assert.Equal(Some false, c.Characteristics.Enforced)
+    | res -> Assert.Fail(sprintf "Expected deferrability-first characteristics, got %A" res)
+
+    // 10.8 alternative 3: <constraint enforcement> alone
+    match parse "CREATE DOMAIN d AS INT CHECK (x > 0) NOT DEFERRABLE" with
+    | CreateDomain { Constraints = [ c ] } -> Assert.Equal(Some false, c.Characteristics.Deferrable)
+    | res -> Assert.Fail(sprintf "Expected NOT DEFERRABLE, got %A" res)
+
+    match parse "CREATE DOMAIN d AS INT CHECK (x > 0) ENFORCED" with
+    | CreateDomain { Constraints = [ c ] } -> Assert.Equal(Some true, c.Characteristics.Enforced)
+    | res -> Assert.Fail(sprintf "Expected ENFORCED, got %A" res)
+
+    // only the three grammar alternatives are accepted
+    parseFails "CREATE DOMAIN d AS INT CHECK (x > 0) ENFORCED NOT DEFERRABLE"
+    parseFails "CREATE DOMAIN d AS INT CHECK (x > 0) INITIALLY DEFERRED INITIALLY IMMEDIATE"
+    parseFails "CREATE DOMAIN d AS INT CHECK (x > 0) DEFERRABLE DEFERRABLE"
+
+[<Fact>]
+let ``CREATE SCHEMA verification`` () =
+    match parse "CREATE SCHEMA sales AUTHORIZATION alice" with
+    | CreateSchema { Name = Some { Kind = Identifier "SALES" }
+                     Authorization = Some { Kind = Identifier "ALICE" }
+                     CharacterSet = None
+                     Path = None
+                     Elements = [] } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateSchema, got %A" res)
+
+    match parse "CREATE SCHEMA AUTHORIZATION bob" with
+    | CreateSchema { Name = None
+                     Authorization = Some { Kind = Identifier "BOB" }
+                     Elements = [] } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateSchema with only authorization, got %A" res)
+
+    match parse "CREATE SCHEMA s" with
+    | CreateSchema { Name = Some { Kind = Identifier "S" }
+                     Elements = [] } -> ()
+    | res -> Assert.Fail(sprintf "Expected minimal CreateSchema, got %A" res)
+
+    match parse "CREATE SCHEMA s PATH p1, p2 DEFAULT CHARACTER SET utf8" with
+    | CreateSchema { Name = Some { Kind = Identifier "S" }
+                     CharacterSet = Some { Kind = Identifier "UTF8" }
+                     Path = Some [ { Kind = Identifier "P1" }; { Kind = Identifier "P2" } ]
+                     Elements = [] } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateSchema with charset and path, got %A" res)
+
+    // 11.1 <schema character set or path> — the character set may precede the path
+    match parse "CREATE SCHEMA s DEFAULT CHARACTER SET utf8 PATH p1" with
+    | CreateSchema { Name = Some { Kind = Identifier "S" }
+                     CharacterSet = Some { Kind = Identifier "UTF8" }
+                     Path = Some [ { Kind = Identifier "P1" } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateSchema with charset then path, got %A" res)
+
+    match parse "CREATE SCHEMA s CREATE TABLE t (id INT)" with
+    | CreateSchema { Name = Some { Kind = Identifier "S" }
+                     Elements = [ CreateTable _ ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateSchema with element, got %A" res)
+
+[<Fact>]
+let ``schema elements are restricted to the CREATE family and GRANT`` () =
+    match parse "CREATE SCHEMA s CREATE VIEW v AS SELECT * FROM t" with
+    | CreateSchema { Elements = [ CreateView _ ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected a view element, got %A" res)
+
+    match parse "CREATE SCHEMA s GRANT SELECT ON TABLE t TO alice" with
+    | CreateSchema { Elements = [ Grant _ ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected a grant element, got %A" res)
+
+    // 11.1 <schema element> — DROP / ALTER / TRUNCATE / REVOKE are not schema elements
+    parseFails "CREATE SCHEMA s DROP TABLE t CASCADE"
+    parseFails "CREATE SCHEMA s ALTER TABLE t ADD COLUMN c INT"
+    parseFails "CREATE SCHEMA s TRUNCATE TABLE t"
+    parseFails "CREATE SCHEMA s REVOKE SELECT ON TABLE t FROM alice RESTRICT"
+    parseFails "CREATE SCHEMA s ALTER DOMAIN d DROP DEFAULT"
+    parseFails "CREATE SCHEMA s ALTER SEQUENCE q INCREMENT BY 1"
 
 [<Fact>]
 let ``referential triggered action verification`` () =
@@ -112,6 +195,15 @@ let ``Column-level constraints verification`` () =
     | res -> Assert.Fail(sprintf "Expected CreateTable with column constraints, got %A" res)
 
 [<Fact>]
+let ``named column constraint with characteristics verification`` () =
+    match parse "CREATE TABLE t (c INT CONSTRAINT nn NOT NULL NOT DEFERRABLE)" with
+    | CreateTable { Columns = [ { Constraints = [ columnConstraint ] } ] } ->
+        Assert.Equal(Identifier "NN", columnConstraint.Name.Value.Kind)
+        Assert.Equal(ColumnConstraintKind.NotNull, columnConstraint.Kind)
+        Assert.Equal(Some false, columnConstraint.Characteristics.Deferrable)
+    | res -> Assert.Fail(sprintf "Expected a named column constraint, got %A" res)
+
+[<Fact>]
 let ``DEFAULT CURRENT_TIMESTAMP verification`` () =
     match parse "CREATE TABLE t (created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)" with
     | CreateTable { Columns = [ { DefaultValue = Some { Kind = CurrentTimestamp None } } ] } -> ()
@@ -146,6 +238,28 @@ let ``<default option> rejects a general value expression`` () =
     parseFails "CREATE TABLE t (c INT DEFAULT ?)"
 
 [<Fact>]
+let ``IDENTITY column verification`` () =
+    match parse "CREATE TABLE t (id INT GENERATED ALWAYS AS IDENTITY)" with
+    | CreateTable { Columns = [ { Name = { Kind = Identifier "ID" }
+                                  Identity = Some { IsAlways = true; Options = [] } } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected GENERATED ALWAYS AS IDENTITY, got %A" res)
+
+    match parse "CREATE TABLE t (id INT GENERATED BY DEFAULT AS IDENTITY)" with
+    | CreateTable { Columns = [ { Identity = Some { IsAlways = false; Options = [] } } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected GENERATED BY DEFAULT AS IDENTITY, got %A" res)
+
+    match parse "CREATE TABLE t (id INT)" with
+    | CreateTable { Columns = [ { Identity = None } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected no Identity, got %A" res)
+
+[<Fact>]
+let ``IDENTITY with sequence options verification`` () =
+    match parse "CREATE TABLE t (id INT GENERATED ALWAYS AS IDENTITY (START WITH 100 INCREMENT BY 5))" with
+    | CreateTable { Columns = [ { Identity = Some { IsAlways = true
+                                                    Options = [ StartWith 100m; IncrementBy 5m ] } } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected IDENTITY with options, got %A" res)
+
+[<Fact>]
 let ``column generation clause verification`` () =
     match parse "CREATE TABLE t (c INT GENERATED ALWAYS AS (a + b))" with
     | CreateTable { Columns = [ { Generation = Some { Kind = BinaryOp(Add, _, _) } } ] } -> ()
@@ -166,21 +280,6 @@ let ``system time period column specification verification`` () =
     | res -> Assert.Fail(sprintf "Expected ROW END, got %A" res)
 
 [<Fact>]
-let ``column collate clause verification`` () =
-    match parse "CREATE TABLE t (c VARCHAR(10) COLLATE en_us)" with
-    | CreateTable { Columns = [ { Collation = Some { Kind = Identifier "EN_US" } } ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected a column COLLATE clause, got %A" res)
-
-[<Fact>]
-let ``named column constraint with characteristics verification`` () =
-    match parse "CREATE TABLE t (c INT CONSTRAINT nn NOT NULL NOT DEFERRABLE)" with
-    | CreateTable { Columns = [ { Constraints = [ columnConstraint ] } ] } ->
-        Assert.Equal(Identifier "NN", columnConstraint.Name.Value.Kind)
-        Assert.Equal(ColumnConstraintKind.NotNull, columnConstraint.Kind)
-        Assert.Equal(Some false, columnConstraint.Characteristics.Deferrable)
-    | res -> Assert.Fail(sprintf "Expected a named column constraint, got %A" res)
-
-[<Fact>]
 let ``IDENTITY combined with a default clause is rejected`` () =
     parseFails "CREATE TABLE t (c INT GENERATED ALWAYS AS IDENTITY DEFAULT 5)"
 
@@ -195,28 +294,6 @@ let ``the single-value clause precedes the column constraints`` () =
 
     parseFails "CREATE TABLE t (c INT NOT NULL DEFAULT 1)"
     parseFails "CREATE TABLE t (c INT NOT NULL GENERATED ALWAYS AS (b + 1))"
-
-[<Fact>]
-let ``User-defined type does not crash`` () =
-    match parse "CREATE TABLE t (c MyType)" with
-    | CreateTable { Columns = [ { DataType = UserDefinedType { Kind = Identifier "MYTYPE" } } ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected UserDefinedType, got %A" res)
-
-[<Fact>]
-let ``Array type is parsed`` () =
-    match parse "CREATE TABLE t (c INT ARRAY)" with
-    | CreateTable { Columns = [ { DataType = ArrayType(Integer, None) } ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected ArrayType, got %A" res)
-
-[<Fact>]
-let ``Nested collection types are parsed`` () =
-    match parse "CREATE TABLE t (c INT ARRAY ARRAY)" with
-    | CreateTable { Columns = [ { DataType = ArrayType(ArrayType(Integer, None), None) } ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected nested ArrayType, got %A" res)
-
-    match parse "CREATE TABLE t (c INT MULTISET ARRAY [3])" with
-    | CreateTable { Columns = [ { DataType = ArrayType(MultisetType Integer, Some 3) } ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected ArrayType of MultisetType, got %A" res)
 
 [<Fact>]
 let ``CREATE TABLE with table constraints verification`` () =
@@ -277,26 +354,38 @@ let ``table constraint with characteristics verification`` () =
     | res -> Assert.Fail(sprintf "Expected constraint characteristics, got %A" res)
 
 [<Fact>]
-let ``IDENTITY column verification`` () =
-    match parse "CREATE TABLE t (id INT GENERATED ALWAYS AS IDENTITY)" with
-    | CreateTable { Columns = [ { Name = { Kind = Identifier "ID" }
-                                  Identity = Some { IsAlways = true; Options = [] } } ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected GENERATED ALWAYS AS IDENTITY, got %A" res)
+let ``CREATE TABLE with table period definition verification`` () =
+    match parse "CREATE TABLE t (a INT, PERIOD FOR SYSTEM_TIME (valid_from, valid_to))" with
+    | CreateTable { Periods = [ period ] } ->
+        Assert.Equal(TimePeriodSpecification.SystemTimePeriod, period.Specification)
+        Assert.Equal(Identifier "VALID_FROM", period.BeginColumn.Kind)
+        Assert.Equal(Identifier "VALID_TO", period.EndColumn.Kind)
+    | res -> Assert.Fail(sprintf "Expected a table period definition, got %A" res)
 
-    match parse "CREATE TABLE t (id INT GENERATED BY DEFAULT AS IDENTITY)" with
-    | CreateTable { Columns = [ { Identity = Some { IsAlways = false; Options = [] } } ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected GENERATED BY DEFAULT AS IDENTITY, got %A" res)
-
-    match parse "CREATE TABLE t (id INT)" with
-    | CreateTable { Columns = [ { Identity = None } ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected no Identity, got %A" res)
+    match parse "CREATE TABLE t (a INT, PERIOD FOR business_time (bf, bt))" with
+    | CreateTable { Periods = [ period ] } ->
+        match period.Specification with
+        | TimePeriodSpecification.ApplicationTimePeriod { Kind = Identifier "BUSINESS_TIME" } -> ()
+        | s -> Assert.Fail(sprintf "Expected ApplicationTimePeriod, got %A" s)
+    | res -> Assert.Fail(sprintf "Expected an application time period, got %A" res)
 
 [<Fact>]
-let ``IDENTITY with sequence options verification`` () =
-    match parse "CREATE TABLE t (id INT GENERATED ALWAYS AS IDENTITY (START WITH 100 INCREMENT BY 5))" with
-    | CreateTable { Columns = [ { Identity = Some { IsAlways = true
-                                                    Options = [ StartWith 100m; IncrementBy 5m ] } } ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected IDENTITY with options, got %A" res)
+let ``CREATE TABLE verification`` () =
+    match parse "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100) NOT NULL)" with
+    | CreateTable { Table = { Kind = Identifier "USERS" }
+                    Columns = [ { Name = { Kind = Identifier "ID" }
+                                  DataType = Integer
+                                  IsPrimaryKey = true }
+                                { Name = { Kind = Identifier "NAME" }
+                                  DataType = Varchar(Some 100)
+                                  IsNullable = Some false } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateTable, got %A" res)
+
+[<Fact>]
+let ``CREATE TABLE schema-qualified verification`` () =
+    match parse "CREATE TABLE app.users (id INT)" with
+    | CreateTable { Table = { Kind = ColumnReference [ "APP"; "USERS" ] } } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateTable schema-qualified, got %A" res)
 
 [<Fact>]
 let ``CREATE TEMPORARY TABLE verification`` () =
@@ -314,91 +403,6 @@ let ``CREATE TEMPORARY TABLE verification`` () =
     | CreateTable { Table = { Kind = Identifier "PERSISTENT_T" }
                     TableScope = None } -> ()
     | res -> Assert.Fail(sprintf "Expected persistent table, got %A" res)
-
-[<Fact>]
-let ``DROP statements verification`` () =
-    match parse "DROP TABLE users CASCADE" with
-    | Drop(DropTable({ Kind = Identifier "USERS" }, true)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropTable CASCADE, got %A" res)
-
-    match parse "DROP TABLE users RESTRICT" with
-    | Drop(DropTable({ Kind = Identifier "USERS" }, false)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropTable RESTRICT, got %A" res)
-
-    match parse "DROP VIEW my_view CASCADE" with
-    | Drop(DropView({ Kind = Identifier "MY_VIEW" }, true)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropView CASCADE, got %A" res)
-
-    match parse "DROP VIEW my_view RESTRICT" with
-    | Drop(DropView({ Kind = Identifier "MY_VIEW" }, false)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropView RESTRICT, got %A" res)
-
-    match parse "DROP SEQUENCE order_seq CASCADE" with
-    | Drop(DropSequence({ Kind = Identifier "ORDER_SEQ" }, true)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropSequence CASCADE, got %A" res)
-
-    match parse "DROP SEQUENCE order_seq RESTRICT" with
-    | Drop(DropSequence({ Kind = Identifier "ORDER_SEQ" }, false)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropSequence RESTRICT, got %A" res)
-
-    match parse "DROP ROLE admin" with
-    | Drop(DropStatement.DropRole { Kind = Identifier "ADMIN" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropRole, got %A" res)
-
-[<Fact>]
-let ``DROP TABLE without drop behavior is rejected`` () = parseFails "DROP TABLE users"
-
-[<Fact>]
-let ``CREATE INDEX is rejected (not in SQL-2016)`` () =
-    parseFails "CREATE INDEX idx ON users (name)"
-    parseFails "CREATE UNIQUE INDEX idx ON users (name)"
-
-[<Fact>]
-let ``DROP INDEX is rejected (not in SQL-2016)`` () = parseFails "DROP INDEX idx"
-
-[<Fact>]
-let ``CREATE VIEW verification`` () =
-    match parse "CREATE VIEW my_view AS SELECT * FROM t1" with
-    | CreateView { Name = { Kind = Identifier "MY_VIEW" }
-                   IsRecursive = false
-                   Query = SelectQuery _ } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateView, got %A" res)
-
-    match parse "CREATE RECURSIVE VIEW my_view (a) AS SELECT x FROM t1" with
-    | CreateView { Name = { Kind = Identifier "MY_VIEW" }
-                   IsRecursive = true
-                   Query = SelectQuery _ } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateRecursiveView, got %A" res)
-
-[<Fact>]
-let ``CREATE VIEW with column list verification`` () =
-    match parse "CREATE VIEW my_view (a, b) AS SELECT x, y FROM t1" with
-    | CreateView { Name = { Kind = Identifier "MY_VIEW" }
-                   Columns = Some [ { Kind = Identifier "A" }; { Kind = Identifier "B" } ]
-                   Query = SelectQuery _ } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateView with column list, got %A" res)
-
-[<Fact>]
-let ``CREATE VIEW with CHECK OPTION verification`` () =
-    match parse "CREATE VIEW v AS SELECT * FROM t1 WITH CHECK OPTION" with
-    | CreateView { Name = { Kind = Identifier "V" }
-                   CheckOption = Some true } -> ()
-    | res -> Assert.Fail(sprintf "Expected WITH CHECK OPTION, got %A" res)
-
-    match parse "CREATE VIEW v AS SELECT * FROM t1 WITH CASCADED CHECK OPTION" with
-    | CreateView { Name = { Kind = Identifier "V" }
-                   CheckOption = Some true } -> ()
-    | res -> Assert.Fail(sprintf "Expected WITH CASCADED CHECK OPTION, got %A" res)
-
-    match parse "CREATE VIEW v AS SELECT * FROM t1 WITH LOCAL CHECK OPTION" with
-    | CreateView { Name = { Kind = Identifier "V" }
-                   CheckOption = Some false } -> ()
-    | res -> Assert.Fail(sprintf "Expected WITH LOCAL CHECK OPTION, got %A" res)
-
-    match parse "CREATE VIEW v AS SELECT * FROM t1" with
-    | CreateView { Name = { Kind = Identifier "V" }
-                   CheckOption = None } -> ()
-    | res -> Assert.Fail(sprintf "Expected no CHECK OPTION, got %A" res)
 
 [<Fact>]
 let ``CREATE TABLE AS SELECT verification`` () =
@@ -431,22 +435,6 @@ let ``CREATE TABLE with like clause verification`` () =
     | res -> Assert.Fail(sprintf "Expected no LIKE clause, got %A" res)
 
 [<Fact>]
-let ``CREATE TABLE with table period definition verification`` () =
-    match parse "CREATE TABLE t (a INT, PERIOD FOR SYSTEM_TIME (valid_from, valid_to))" with
-    | CreateTable { Periods = [ period ] } ->
-        Assert.Equal(TimePeriodSpecification.SystemTimePeriod, period.Specification)
-        Assert.Equal(Identifier "VALID_FROM", period.BeginColumn.Kind)
-        Assert.Equal(Identifier "VALID_TO", period.EndColumn.Kind)
-    | res -> Assert.Fail(sprintf "Expected a table period definition, got %A" res)
-
-    match parse "CREATE TABLE t (a INT, PERIOD FOR business_time (bf, bt))" with
-    | CreateTable { Periods = [ period ] } ->
-        match period.Specification with
-        | TimePeriodSpecification.ApplicationTimePeriod { Kind = Identifier "BUSINESS_TIME" } -> ()
-        | s -> Assert.Fail(sprintf "Expected ApplicationTimePeriod, got %A" s)
-    | res -> Assert.Fail(sprintf "Expected an application time period, got %A" res)
-
-[<Fact>]
 let ``CREATE TABLE with system versioning and ON COMMIT verification`` () =
     match parse "CREATE TABLE t (a INT) WITH SYSTEM VERSIONING" with
     | CreateTable { WithSystemVersioning = true
@@ -464,14 +452,155 @@ let ``CREATE TABLE with system versioning and ON COMMIT verification`` () =
     | res -> Assert.Fail(sprintf "Expected ON COMMIT DELETE ROWS, got %A" res)
 
 [<Fact>]
-let ``CREATE ROLE verification`` () =
-    match parse "CREATE ROLE admin" with
-    | CreateRole { Kind = Identifier "ADMIN" } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateRole, got %A" res)
+let ``CREATE TABLE OF type verification`` () =
+    match parse "CREATE TABLE t OF my_type" with
+    | CreateTable { Table = { Kind = Identifier "T" }
+                    Columns = []
+                    Constraints = []
+                    OfType = Some { Kind = Identifier "MY_TYPE" }
+                    Under = None
+                    TypedElements = [] } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateTable OF, got %A" res)
 
-    match parse "CREATE ROLE analyst WITH ADMIN CURRENT_USER" with
-    | CreateRole { Kind = Identifier "ANALYST" } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateRole WITH ADMIN, got %A" res)
+    // 11.3 <subtable clause> ::= UNDER <supertable clause>
+    match parse "CREATE TABLE sub_t OF my_type UNDER super_t" with
+    | CreateTable { OfType = Some { Kind = Identifier "MY_TYPE" }
+                    Under = Some { Kind = Identifier "SUPER_T" } } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateTable OF ... UNDER, got %A" res)
+
+    // 11.3 <typed table element list> ::=
+    //     ( <typed table element> [ { <comma> <typed table element> }... ] )
+    match
+        parse
+            "CREATE TABLE t OF my_type (c1 WITH OPTIONS SCOPE tbl DEFAULT 5 NOT NULL, REF IS r SYSTEM GENERATED, CONSTRAINT ck CHECK (x > 0))"
+    with
+    | CreateTable { OfType = Some { Kind = Identifier "MY_TYPE" }
+                    TypedElements = elements } ->
+        match elements with
+        | [ TypedTableElement.TypedColumnOptions columnOptions
+            TypedTableElement.TypedSelfReference selfReference
+            TypedTableElement.TypedTableConstraint constraintDefinition ] ->
+            Assert.Equal(Identifier "C1", columnOptions.Name.Kind)
+            Assert.Equal(Some(Identifier "TBL"), columnOptions.Scope |> Option.map (fun e -> e.Kind))
+            Assert.True(Option.isSome columnOptions.DefaultValue, "Expected a DEFAULT clause")
+
+            Assert.Equal<ColumnConstraintKind list>(
+                [ ColumnConstraintKind.NotNull ],
+                columnOptions.Constraints |> List.map (fun c -> c.Kind)
+            )
+
+            Assert.Equal(Identifier "R", selfReference.Name.Kind)
+            Assert.Equal(Some ReferenceGeneration.SystemGenerated, selfReference.Generation)
+
+            match constraintDefinition.Constraint with
+            | TableConstraint.Check(Some { Kind = Identifier "CK" }, _) -> ()
+            | c -> Assert.Fail(sprintf "Expected Check, got %A" c)
+        | other -> Assert.Fail(sprintf "Expected 3 typed table elements, got %A" other)
+    | res -> Assert.Fail(sprintf "Expected CreateTable OF with a typed table element list, got %A" res)
+
+[<Theory>]
+[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS)")>]
+[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS SCOPE tbl)")>]
+[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS DEFAULT 5 UNIQUE)")>]
+[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS CONSTRAINT nn NOT NULL)")>]
+[<InlineData("CREATE TABLE t OF my_type UNDER super_t (c1 WITH OPTIONS NOT NULL)")>]
+[<InlineData("CREATE TABLE t OF my_type (REF IS r)")>]
+[<InlineData("CREATE TABLE t OF my_type (REF IS r SYSTEM GENERATED)")>]
+[<InlineData("CREATE TABLE t OF my_type (REF IS r USER GENERATED)")>]
+[<InlineData("CREATE TABLE t OF my_type (REF IS r DERIVED)")>]
+[<InlineData("CREATE TABLE t OF my_type (PRIMARY KEY (c1))")>]
+[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS, REF IS r, UNIQUE (c1))")>]
+[<InlineData("CREATE VIEW v OF my_type (REF IS r DERIVED) AS SELECT * FROM t")>]
+[<InlineData("CREATE VIEW v OF my_type (a WITH OPTIONS SCOPE tbl) AS SELECT * FROM t")>]
+[<InlineData("CREATE VIEW v OF my_type UNDER super_v (REF IS r) AS SELECT * FROM t")>]
+let ``typed table and view element lists are accepted`` (sql: string) =
+    match parse sql with
+    | CreateTable _ -> ()
+    | CreateView _ -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateTable or CreateView, got %A" res)
+
+[<Theory>]
+[<InlineData("CREATE TABLE t OF my_type ()")>]
+[<InlineData("CREATE TABLE t OF my_type (c1)")>]
+[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS DEFAULT)")>]
+[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS DEFAULT 5 SCOPE tbl)")>]
+[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS NOT NULL")>]
+[<InlineData("CREATE VIEW v OF my_type (a WITH OPTIONS) AS SELECT * FROM t")>]
+[<InlineData("CREATE VIEW v OF my_type (a WITH OPTIONS DEFAULT 5) AS SELECT * FROM t")>]
+let ``malformed typed table and view element lists are rejected`` (sql: string) = parseFails sql
+
+[<Fact>]
+let ``CREATE VIEW with CHECK OPTION verification`` () =
+    match parse "CREATE VIEW v AS SELECT * FROM t1 WITH CHECK OPTION" with
+    | CreateView { Name = { Kind = Identifier "V" }
+                   CheckOption = Some true } -> ()
+    | res -> Assert.Fail(sprintf "Expected WITH CHECK OPTION, got %A" res)
+
+    match parse "CREATE VIEW v AS SELECT * FROM t1 WITH CASCADED CHECK OPTION" with
+    | CreateView { Name = { Kind = Identifier "V" }
+                   CheckOption = Some true } -> ()
+    | res -> Assert.Fail(sprintf "Expected WITH CASCADED CHECK OPTION, got %A" res)
+
+    match parse "CREATE VIEW v AS SELECT * FROM t1 WITH LOCAL CHECK OPTION" with
+    | CreateView { Name = { Kind = Identifier "V" }
+                   CheckOption = Some false } -> ()
+    | res -> Assert.Fail(sprintf "Expected WITH LOCAL CHECK OPTION, got %A" res)
+
+    match parse "CREATE VIEW v AS SELECT * FROM t1" with
+    | CreateView { Name = { Kind = Identifier "V" }
+                   CheckOption = None } -> ()
+    | res -> Assert.Fail(sprintf "Expected no CHECK OPTION, got %A" res)
+
+[<Fact>]
+let ``CREATE VIEW verification`` () =
+    match parse "CREATE VIEW my_view AS SELECT * FROM t1" with
+    | CreateView { Name = { Kind = Identifier "MY_VIEW" }
+                   IsRecursive = false
+                   Query = SelectQuery _ } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateView, got %A" res)
+
+    match parse "CREATE RECURSIVE VIEW my_view (a) AS SELECT x FROM t1" with
+    | CreateView { Name = { Kind = Identifier "MY_VIEW" }
+                   IsRecursive = true
+                   Query = SelectQuery _ } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateRecursiveView, got %A" res)
+
+[<Fact>]
+let ``CREATE VIEW with column list verification`` () =
+    match parse "CREATE VIEW my_view (a, b) AS SELECT x, y FROM t1" with
+    | CreateView { Name = { Kind = Identifier "MY_VIEW" }
+                   Columns = Some [ { Kind = Identifier "A" }; { Kind = Identifier "B" } ]
+                   Query = SelectQuery _ } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateView with column list, got %A" res)
+
+[<Fact>]
+let ``CREATE VIEW OF type verification`` () =
+    match parse "CREATE VIEW v OF my_type AS SELECT * FROM t" with
+    | CreateView { Name = { Kind = Identifier "V" }
+                   Columns = None
+                   OfType = Some { Kind = Identifier "MY_TYPE" }
+                   Under = None
+                   ViewElements = []
+                   Query = SelectQuery _ } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateView OF, got %A" res)
+
+    // 11.32 <subview clause> ::= UNDER <table name>
+    match parse "CREATE VIEW sub_v OF my_type UNDER super_v AS SELECT * FROM t" with
+    | CreateView { OfType = Some { Kind = Identifier "MY_TYPE" }
+                   Under = Some { Kind = Identifier "SUPER_V" } } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateView OF ... UNDER, got %A" res)
+
+    // 11.32 <view element list> ::=
+    //     ( <view element> [ { <comma> <view element> }... ] )
+    match parse "CREATE VIEW v OF my_type (REF IS r USER GENERATED, a WITH OPTIONS SCOPE tbl) AS SELECT * FROM t" with
+    | CreateView { OfType = Some { Kind = Identifier "MY_TYPE" }
+                   ViewElements = [ ViewElement.ViewSelfReference selfReference
+                                    ViewElement.ViewColumnOption columnOptions ] } ->
+        Assert.Equal(Identifier "R", selfReference.Name.Kind)
+        Assert.Equal(Some ReferenceGeneration.UserGenerated, selfReference.Generation)
+        Assert.Equal(Identifier "A", columnOptions.Name.Kind)
+        Assert.Equal(Identifier "TBL", columnOptions.Scope.Kind)
+    | res -> Assert.Fail(sprintf "Expected CreateView OF with a view element list, got %A" res)
 
 [<Fact>]
 let ``GRANT verification`` () =
@@ -506,6 +635,55 @@ let ``GRANT verification`` () =
                                       [ { Kind = Identifier "ALICE" } ],
                                       true)) -> ()
     | res -> Assert.Fail(sprintf "Expected GrantRoles, got %A" res)
+
+[<Fact>]
+let ``GRANT UNDER privilege verification`` () =
+    match parse "GRANT UNDER ON TABLE users TO alice" with
+    | Grant(GrantStatement.GrantPrivileges(Privileges.Actions [ PrivilegeAction.Under ],
+                                           { Kind = Identifier "USERS" },
+                                           [ { Kind = Identifier "ALICE" } ],
+                                           false,
+                                           false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected GrantPrivileges UNDER, got %A" res)
+
+[<Fact>]
+let ``GRANT EXECUTE ON routine verification`` () =
+    match parse "GRANT EXECUTE ON FUNCTION add TO alice" with
+    | Grant(GrantStatement.GrantPrivileges(Privileges.Actions [ PrivilegeAction.Execute ],
+                                           { Kind = Identifier "ADD" },
+                                           [ { Kind = Identifier "ALICE" } ],
+                                           false,
+                                           false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected GRANT EXECUTE ON FUNCTION, got %A" res)
+
+    match parse "GRANT SELECT ON PROCEDURE p TO bob" with
+    | Grant(GrantStatement.GrantPrivileges(Privileges.Actions [ PrivilegeAction.Select None ],
+                                           { Kind = Identifier "P" },
+                                           [ { Kind = Identifier "BOB" } ],
+                                           false,
+                                           false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected GRANT SELECT ON PROCEDURE, got %A" res)
+
+    match parse "GRANT SELECT (SPECIFIC FUNCTION f) ON TYPE my_type TO alice" with
+    | Grant(GrantStatement.GrantPrivileges(Privileges.Actions [ PrivilegeAction.Select(Some(PrivilegeMethods [ designator ])) ],
+                                           { Kind = Identifier "MY_TYPE" },
+                                           [ { Kind = Identifier "ALICE" } ],
+                                           false,
+                                           false)) ->
+        Assert.True(designator.IsSpecific)
+        Assert.Equal(Some RoutineType.Function, designator.RoutineType)
+        Assert.Equal(Identifier "F", designator.Name.Kind)
+    | res -> Assert.Fail(sprintf "Expected GRANT SELECT (method list), got %A" res)
+
+[<Fact>]
+let ``CREATE ROLE verification`` () =
+    match parse "CREATE ROLE admin" with
+    | CreateRole { Kind = Identifier "ADMIN" } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateRole, got %A" res)
+
+    match parse "CREATE ROLE analyst WITH ADMIN CURRENT_USER" with
+    | CreateRole { Kind = Identifier "ANALYST" } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateRole WITH ADMIN, got %A" res)
 
 [<Fact>]
 let ``REVOKE verification`` () =
@@ -553,14 +731,160 @@ let ``REVOKE requires drop behavior`` () =
     parseFails "REVOKE role_a FROM alice"
 
 [<Fact>]
-let ``GRANT UNDER privilege verification`` () =
-    match parse "GRANT UNDER ON TABLE users TO alice" with
-    | Grant(GrantStatement.GrantPrivileges(Privileges.Actions [ PrivilegeAction.Under ],
-                                           { Kind = Identifier "USERS" },
-                                           [ { Kind = Identifier "ALICE" } ],
-                                           false,
-                                           false)) -> ()
-    | res -> Assert.Fail(sprintf "Expected GrantPrivileges UNDER, got %A" res)
+let ``DROP statements verification`` () =
+    match parse "DROP TABLE users CASCADE" with
+    | Drop(DropTable({ Kind = Identifier "USERS" }, true)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropTable CASCADE, got %A" res)
+
+    match parse "DROP TABLE users RESTRICT" with
+    | Drop(DropTable({ Kind = Identifier "USERS" }, false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropTable RESTRICT, got %A" res)
+
+    match parse "DROP VIEW my_view CASCADE" with
+    | Drop(DropView({ Kind = Identifier "MY_VIEW" }, true)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropView CASCADE, got %A" res)
+
+    match parse "DROP VIEW my_view RESTRICT" with
+    | Drop(DropView({ Kind = Identifier "MY_VIEW" }, false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropView RESTRICT, got %A" res)
+
+    match parse "DROP SEQUENCE order_seq CASCADE" with
+    | Drop(DropSequence({ Kind = Identifier "ORDER_SEQ" }, true)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropSequence CASCADE, got %A" res)
+
+    match parse "DROP SEQUENCE order_seq RESTRICT" with
+    | Drop(DropSequence({ Kind = Identifier "ORDER_SEQ" }, false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropSequence RESTRICT, got %A" res)
+
+    match parse "DROP ROLE admin" with
+    | Drop(DropStatement.DropRole { Kind = Identifier "ADMIN" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropRole, got %A" res)
+
+[<Fact>]
+let ``DROP SCHEMA verification`` () =
+    match parse "DROP SCHEMA sales CASCADE" with
+    | Drop(DropSchema({ Kind = Identifier "SALES" }, true)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropSchema CASCADE, got %A" res)
+
+    match parse "DROP SCHEMA sales RESTRICT" with
+    | Drop(DropSchema({ Kind = Identifier "SALES" }, false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropSchema RESTRICT, got %A" res)
+
+[<Fact>]
+let ``DROP DOMAIN verification`` () =
+    match parse "DROP DOMAIN d CASCADE" with
+    | Drop(DropDomain({ Kind = Identifier "D" }, true)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropDomain CASCADE, got %A" res)
+
+    match parse "DROP DOMAIN d RESTRICT" with
+    | Drop(DropDomain({ Kind = Identifier "D" }, false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropDomain RESTRICT, got %A" res)
+
+    parseFails "DROP DOMAIN d"
+
+[<Fact>]
+let ``DROP CHARACTER SET verification`` () =
+    match parse "DROP CHARACTER SET utf8" with
+    | Drop(DropCharacterSet { Kind = Identifier "UTF8" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropCharacterSet, got %A" res)
+
+[<Fact>]
+let ``DROP COLLATION verification`` () =
+    match parse "DROP COLLATION my_coll CASCADE" with
+    | Drop(DropCollation({ Kind = Identifier "MY_COLL" }, true)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropCollation CASCADE, got %A" res)
+
+    match parse "DROP COLLATION my_coll RESTRICT" with
+    | Drop(DropCollation({ Kind = Identifier "MY_COLL" }, false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropCollation RESTRICT, got %A" res)
+
+[<Fact>]
+let ``DROP TRANSLATION verification`` () =
+    match parse "DROP TRANSLATION tr" with
+    | Drop(DropTransliteration { Kind = Identifier "TR" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropTransliteration, got %A" res)
+
+[<Fact>]
+let ``DROP ASSERTION verification`` () =
+    match parse "DROP ASSERTION a CASCADE" with
+    | Drop(DropAssertion({ Kind = Identifier "A" }, Some true)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropAssertion CASCADE, got %A" res)
+
+    match parse "DROP ASSERTION a" with
+    | Drop(DropAssertion({ Kind = Identifier "A" }, None)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropAssertion without behavior, got %A" res)
+
+[<Fact>]
+let ``DROP CAST verification`` () =
+    match parse "DROP CAST (INT AS BIGINT) CASCADE" with
+    | Drop(DropCast(Integer, BigInt, true)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropCast CASCADE, got %A" res)
+
+    match parse "DROP CAST (VARCHAR(5) AS VARCHAR(10)) RESTRICT" with
+    | Drop(DropCast(Varchar(Some 5), Varchar(Some 10), false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropCast RESTRICT, got %A" res)
+
+    parseFails "DROP CAST (INT AS BIGINT)"
+
+[<Fact>]
+let ``DROP ORDERING verification`` () =
+    match parse "DROP ORDERING FOR my_type CASCADE" with
+    | Drop(DropOrdering({ Kind = Identifier "MY_TYPE" }, true)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropOrdering CASCADE, got %A" res)
+
+    match parse "DROP ORDERING FOR my_type RESTRICT" with
+    | Drop(DropOrdering({ Kind = Identifier "MY_TYPE" }, false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropOrdering RESTRICT, got %A" res)
+
+    parseFails "DROP ORDERING FOR my_type"
+
+[<Fact>]
+let ``DROP TRANSFORM verification`` () =
+    match parse "DROP TRANSFORM ALL FOR my_type CASCADE" with
+    | Drop(DropTransform({ Kind = Identifier "MY_TYPE" }, TransformDropTarget.AllTransforms, true)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropTransform ALL CASCADE, got %A" res)
+
+    match parse "DROP TRANSFORMS g1 FOR my_type RESTRICT" with
+    | Drop(DropTransform({ Kind = Identifier "MY_TYPE" },
+                         TransformDropTarget.TransformGroup { Kind = Identifier "G1" },
+                         false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropTransform group RESTRICT, got %A" res)
+
+[<Fact>]
+let ``DROP ROUTINE verification`` () =
+    match parse "DROP FUNCTION add CASCADE" with
+    | Drop(DropRoutine({ Kind = Identifier "ADD" }, true)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropRoutine CASCADE, got %A" res)
+
+    match parse "DROP PROCEDURE p RESTRICT" with
+    | Drop(DropRoutine({ Kind = Identifier "P" }, false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropRoutine RESTRICT, got %A" res)
+
+[<Fact>]
+let ``DROP TRIGGER verification`` () =
+    match parse "DROP TRIGGER trg" with
+    | Drop(DropTrigger { Kind = Identifier "TRG" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropTrigger, got %A" res)
+
+[<Fact>]
+let ``DROP TYPE verification`` () =
+    match parse "DROP TYPE my_type RESTRICT" with
+    | Drop(DropType({ Kind = Identifier "MY_TYPE" }, false)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropType RESTRICT, got %A" res)
+
+    match parse "DROP TYPE my_type CASCADE" with
+    | Drop(DropType({ Kind = Identifier "MY_TYPE" }, true)) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropType CASCADE, got %A" res)
+
+[<Fact>]
+let ``DROP TABLE without drop behavior is rejected`` () = parseFails "DROP TABLE users"
+
+[<Fact>]
+let ``DROP TRANSFORM requires drop behavior`` () =
+    parseFails "DROP TRANSFORM ALL FOR my_type"
+
+[<Fact>]
+let ``DROP TYPE without behavior is rejected`` () = parseFails "DROP TYPE my_type"
 
 [<Fact>]
 let ``ALTER TABLE verification`` () =
@@ -781,84 +1105,6 @@ let ``ALTER TABLE RENAME is rejected (not in SQL-2016)`` () =
     parseFails "ALTER TABLE users RENAME COLUMN name TO full_name"
 
 [<Fact>]
-let ``TRUNCATE TABLE verification`` () =
-    match parse "TRUNCATE TABLE logs" with
-    | Truncate({ Kind = Identifier "LOGS" }, None) -> ()
-    | res -> Assert.Fail(sprintf "Expected Truncate, got %A" res)
-
-    match parse "TRUNCATE TABLE logs RESTART IDENTITY" with
-    | Truncate({ Kind = Identifier "LOGS" }, Some true) -> ()
-    | res -> Assert.Fail(sprintf "Expected Truncate RESTART IDENTITY, got %A" res)
-
-[<Fact>]
-let ``CREATE SCHEMA verification`` () =
-    match parse "CREATE SCHEMA sales AUTHORIZATION alice" with
-    | CreateSchema { Name = Some { Kind = Identifier "SALES" }
-                     Authorization = Some { Kind = Identifier "ALICE" }
-                     CharacterSet = None
-                     Path = None
-                     Elements = [] } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateSchema, got %A" res)
-
-    match parse "CREATE SCHEMA AUTHORIZATION bob" with
-    | CreateSchema { Name = None
-                     Authorization = Some { Kind = Identifier "BOB" }
-                     Elements = [] } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateSchema with only authorization, got %A" res)
-
-    match parse "CREATE SCHEMA s" with
-    | CreateSchema { Name = Some { Kind = Identifier "S" }
-                     Elements = [] } -> ()
-    | res -> Assert.Fail(sprintf "Expected minimal CreateSchema, got %A" res)
-
-    match parse "CREATE SCHEMA s PATH p1, p2 DEFAULT CHARACTER SET utf8" with
-    | CreateSchema { Name = Some { Kind = Identifier "S" }
-                     CharacterSet = Some { Kind = Identifier "UTF8" }
-                     Path = Some [ { Kind = Identifier "P1" }; { Kind = Identifier "P2" } ]
-                     Elements = [] } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateSchema with charset and path, got %A" res)
-
-    // 11.1 <schema character set or path> — the character set may precede the path
-    match parse "CREATE SCHEMA s DEFAULT CHARACTER SET utf8 PATH p1" with
-    | CreateSchema { Name = Some { Kind = Identifier "S" }
-                     CharacterSet = Some { Kind = Identifier "UTF8" }
-                     Path = Some [ { Kind = Identifier "P1" } ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateSchema with charset then path, got %A" res)
-
-    match parse "CREATE SCHEMA s CREATE TABLE t (id INT)" with
-    | CreateSchema { Name = Some { Kind = Identifier "S" }
-                     Elements = [ CreateTable _ ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateSchema with element, got %A" res)
-
-[<Fact>]
-let ``schema elements are restricted to the CREATE family and GRANT`` () =
-    match parse "CREATE SCHEMA s CREATE VIEW v AS SELECT * FROM t" with
-    | CreateSchema { Elements = [ CreateView _ ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected a view element, got %A" res)
-
-    match parse "CREATE SCHEMA s GRANT SELECT ON TABLE t TO alice" with
-    | CreateSchema { Elements = [ Grant _ ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected a grant element, got %A" res)
-
-    // 11.1 <schema element> — DROP / ALTER / TRUNCATE / REVOKE are not schema elements
-    parseFails "CREATE SCHEMA s DROP TABLE t CASCADE"
-    parseFails "CREATE SCHEMA s ALTER TABLE t ADD COLUMN c INT"
-    parseFails "CREATE SCHEMA s TRUNCATE TABLE t"
-    parseFails "CREATE SCHEMA s REVOKE SELECT ON TABLE t FROM alice RESTRICT"
-    parseFails "CREATE SCHEMA s ALTER DOMAIN d DROP DEFAULT"
-    parseFails "CREATE SCHEMA s ALTER SEQUENCE q INCREMENT BY 1"
-
-[<Fact>]
-let ``DROP SCHEMA verification`` () =
-    match parse "DROP SCHEMA sales CASCADE" with
-    | Drop(DropSchema({ Kind = Identifier "SALES" }, true)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropSchema CASCADE, got %A" res)
-
-    match parse "DROP SCHEMA sales RESTRICT" with
-    | Drop(DropSchema({ Kind = Identifier "SALES" }, false)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropSchema RESTRICT, got %A" res)
-
-[<Fact>]
 let ``CREATE DOMAIN verification`` () =
     match parse "CREATE DOMAIN positive_int AS INT DEFAULT 5 CHECK (x > 0)" with
     | CreateDomain { Name = { Kind = Identifier "POSITIVE_INT" }
@@ -885,38 +1131,6 @@ let ``CREATE DOMAIN verification`` () =
 let ``CREATE DOMAIN requires a data type`` () = parseFails "CREATE DOMAIN d"
 
 [<Fact>]
-let ``constraint characteristics verification`` () =
-    // 10.8 alternative 1: <constraint check time> [ [ NOT ] DEFERRABLE ] [ <constraint enforcement> ]
-    match parse "CREATE DOMAIN d AS INT CHECK (x > 0) INITIALLY DEFERRED" with
-    | CreateDomain { Constraints = [ c ] } ->
-        Assert.Equal(Some true, c.Characteristics.InitiallyDeferred)
-        Assert.True(Option.isNone c.Characteristics.Deferrable)
-        Assert.True(Option.isNone c.Characteristics.Enforced)
-    | res -> Assert.Fail(sprintf "Expected INITIALLY DEFERRED, got %A" res)
-
-    // 10.8 alternative 2: [ [ NOT ] DEFERRABLE ] <constraint check time> [ <constraint enforcement> ]
-    match parse "CREATE DOMAIN d AS INT CHECK (x > 0) DEFERRABLE INITIALLY IMMEDIATE NOT ENFORCED" with
-    | CreateDomain { Constraints = [ c ] } ->
-        Assert.Equal(Some false, c.Characteristics.InitiallyDeferred)
-        Assert.Equal(Some true, c.Characteristics.Deferrable)
-        Assert.Equal(Some false, c.Characteristics.Enforced)
-    | res -> Assert.Fail(sprintf "Expected deferrability-first characteristics, got %A" res)
-
-    // 10.8 alternative 3: <constraint enforcement> alone
-    match parse "CREATE DOMAIN d AS INT CHECK (x > 0) NOT DEFERRABLE" with
-    | CreateDomain { Constraints = [ c ] } -> Assert.Equal(Some false, c.Characteristics.Deferrable)
-    | res -> Assert.Fail(sprintf "Expected NOT DEFERRABLE, got %A" res)
-
-    match parse "CREATE DOMAIN d AS INT CHECK (x > 0) ENFORCED" with
-    | CreateDomain { Constraints = [ c ] } -> Assert.Equal(Some true, c.Characteristics.Enforced)
-    | res -> Assert.Fail(sprintf "Expected ENFORCED, got %A" res)
-
-    // only the three grammar alternatives are accepted
-    parseFails "CREATE DOMAIN d AS INT CHECK (x > 0) ENFORCED NOT DEFERRABLE"
-    parseFails "CREATE DOMAIN d AS INT CHECK (x > 0) INITIALLY DEFERRED INITIALLY IMMEDIATE"
-    parseFails "CREATE DOMAIN d AS INT CHECK (x > 0) DEFERRABLE DEFERRABLE"
-
-[<Fact>]
 let ``ALTER DOMAIN verification`` () =
     match parse "ALTER DOMAIN d SET DEFAULT 10" with
     | AlterDomain({ Kind = Identifier "D" }, DomainAlteration.SetDefault _) -> ()
@@ -936,18 +1150,6 @@ let ``ALTER DOMAIN verification`` () =
     | res -> Assert.Fail(sprintf "Expected AlterDomain DropConstraint, got %A" res)
 
 [<Fact>]
-let ``DROP DOMAIN verification`` () =
-    match parse "DROP DOMAIN d CASCADE" with
-    | Drop(DropDomain({ Kind = Identifier "D" }, true)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropDomain CASCADE, got %A" res)
-
-    match parse "DROP DOMAIN d RESTRICT" with
-    | Drop(DropDomain({ Kind = Identifier "D" }, false)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropDomain RESTRICT, got %A" res)
-
-    parseFails "DROP DOMAIN d"
-
-[<Fact>]
 let ``CREATE CHARACTER SET verification`` () =
     match parse "CREATE CHARACTER SET utf8 AS GET utf8" with
     | CreateCharacterSet({ Kind = Identifier "UTF8" }, { Kind = Identifier "UTF8" }, None) -> ()
@@ -957,12 +1159,6 @@ let ``CREATE CHARACTER SET verification`` () =
     | CreateCharacterSet({ Kind = Identifier "CS" }, { Kind = Identifier "LATIN1" }, Some { Kind = Identifier "EN_US" }) ->
         ()
     | res -> Assert.Fail(sprintf "Expected CreateCharacterSet with collation, got %A" res)
-
-[<Fact>]
-let ``DROP CHARACTER SET verification`` () =
-    match parse "DROP CHARACTER SET utf8" with
-    | Drop(DropCharacterSet { Kind = Identifier "UTF8" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropCharacterSet, got %A" res)
 
 [<Fact>]
 let ``CREATE COLLATION verification`` () =
@@ -980,16 +1176,6 @@ let ``CREATE COLLATION verification`` () =
     match parse "CREATE COLLATION c3 FOR utf8 FROM ec" with
     | CreateCollation({ Kind = Identifier "C3" }, _, _, None) -> ()
     | res -> Assert.Fail(sprintf "Expected CreateCollation without pad, got %A" res)
-
-[<Fact>]
-let ``DROP COLLATION verification`` () =
-    match parse "DROP COLLATION my_coll CASCADE" with
-    | Drop(DropCollation({ Kind = Identifier "MY_COLL" }, true)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropCollation CASCADE, got %A" res)
-
-    match parse "DROP COLLATION my_coll RESTRICT" with
-    | Drop(DropCollation({ Kind = Identifier "MY_COLL" }, false)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropCollation RESTRICT, got %A" res)
 
 [<Fact>]
 let ``CREATE TRANSLATION verification`` () =
@@ -1011,12 +1197,6 @@ let ``CREATE TRANSLATION verification`` () =
     | res -> Assert.Fail(sprintf "Expected CreateTransliteration with a routine, got %A" res)
 
 [<Fact>]
-let ``DROP TRANSLATION verification`` () =
-    match parse "DROP TRANSLATION tr" with
-    | Drop(DropTransliteration { Kind = Identifier "TR" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropTransliteration, got %A" res)
-
-[<Fact>]
 let ``CREATE ASSERTION verification`` () =
     match parse "CREATE ASSERTION a CHECK (x > 0) INITIALLY DEFERRED NOT DEFERRABLE" with
     | CreateAssertion({ Kind = Identifier "A" },
@@ -1029,16 +1209,6 @@ let ``CREATE ASSERTION verification`` () =
     match parse "CREATE ASSERTION a2 CHECK (x < 100) NOT ENFORCED" with
     | CreateAssertion({ Kind = Identifier "A2" }, _, { Enforced = Some false }) -> ()
     | res -> Assert.Fail(sprintf "Expected CreateAssertion NOT ENFORCED, got %A" res)
-
-[<Fact>]
-let ``DROP ASSERTION verification`` () =
-    match parse "DROP ASSERTION a CASCADE" with
-    | Drop(DropAssertion({ Kind = Identifier "A" }, Some true)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropAssertion CASCADE, got %A" res)
-
-    match parse "DROP ASSERTION a" with
-    | Drop(DropAssertion({ Kind = Identifier "A" }, None)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropAssertion without behavior, got %A" res)
 
 [<Fact>]
 let ``CREATE CAST verification`` () =
@@ -1072,18 +1242,6 @@ let ``CREATE CAST verification`` () =
     | res -> Assert.Fail(sprintf "Expected CreateCast METHOD, got %A" res)
 
 [<Fact>]
-let ``DROP CAST verification`` () =
-    match parse "DROP CAST (INT AS BIGINT) CASCADE" with
-    | Drop(DropCast(Integer, BigInt, true)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropCast CASCADE, got %A" res)
-
-    match parse "DROP CAST (VARCHAR(5) AS VARCHAR(10)) RESTRICT" with
-    | Drop(DropCast(Varchar(Some 5), Varchar(Some 10), false)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropCast RESTRICT, got %A" res)
-
-    parseFails "DROP CAST (INT AS BIGINT)"
-
-[<Fact>]
 let ``CREATE ORDERING verification`` () =
     match parse "CREATE ORDERING FOR my_type EQUALS ONLY BY RELATIVE WITH SPECIFIC FUNCTION f" with
     | CreateOrdering({ Kind = Identifier "MY_TYPE" }, OrderingForm.EqualsOnlyBy(OrderingCategory.Relative designator)) ->
@@ -1101,18 +1259,6 @@ let ``CREATE ORDERING verification`` () =
     match parse "CREATE ORDERING FOR t EQUALS ONLY BY STATE" with
     | CreateOrdering({ Kind = Identifier "T" }, OrderingForm.EqualsOnlyBy(OrderingCategory.State None)) -> ()
     | res -> Assert.Fail(sprintf "Expected CreateOrdering STATE, got %A" res)
-
-[<Fact>]
-let ``DROP ORDERING verification`` () =
-    match parse "DROP ORDERING FOR my_type CASCADE" with
-    | Drop(DropOrdering({ Kind = Identifier "MY_TYPE" }, true)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropOrdering CASCADE, got %A" res)
-
-    match parse "DROP ORDERING FOR my_type RESTRICT" with
-    | Drop(DropOrdering({ Kind = Identifier "MY_TYPE" }, false)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropOrdering RESTRICT, got %A" res)
-
-    parseFails "DROP ORDERING FOR my_type"
 
 [<Fact>]
 let ``CREATE TRANSFORM verification`` () =
@@ -1148,96 +1294,95 @@ let ``ALTER TRANSFORM verification`` () =
     | res -> Assert.Fail(sprintf "Expected AlterTransform TRANSFORMS, got %A" res)
 
 [<Fact>]
-let ``DROP TRANSFORM verification`` () =
-    match parse "DROP TRANSFORM ALL FOR my_type CASCADE" with
-    | Drop(DropTransform({ Kind = Identifier "MY_TYPE" }, TransformDropTarget.AllTransforms, true)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropTransform ALL CASCADE, got %A" res)
+let ``CREATE SEQUENCE verification`` () =
+    match parse "CREATE SEQUENCE order_seq START WITH 1 INCREMENT BY 2 MAXVALUE 100 CYCLE" with
+    | CreateSequence({ Kind = Identifier "ORDER_SEQ" },
+                     [ StartWith 1m; IncrementBy 2m; MaxValue(Some 100m); Cycle true ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateSequence, got %A" res)
 
-    match parse "DROP TRANSFORMS g1 FOR my_type RESTRICT" with
-    | Drop(DropTransform({ Kind = Identifier "MY_TYPE" },
-                         TransformDropTarget.TransformGroup { Kind = Identifier "G1" },
-                         false)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropTransform group RESTRICT, got %A" res)
+    match parse "CREATE SEQUENCE order_seq NO MINVALUE NO CYCLE" with
+    | CreateSequence({ Kind = Identifier "ORDER_SEQ" }, [ MinValue None; Cycle false ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateSequence NO MINVALUE NO CYCLE, got %A" res)
 
-[<Fact>]
-let ``DROP TRANSFORM requires drop behavior`` () =
-    parseFails "DROP TRANSFORM ALL FOR my_type"
-
-[<Fact>]
-let ``GRANT EXECUTE ON routine verification`` () =
-    match parse "GRANT EXECUTE ON FUNCTION add TO alice" with
-    | Grant(GrantStatement.GrantPrivileges(Privileges.Actions [ PrivilegeAction.Execute ],
-                                           { Kind = Identifier "ADD" },
-                                           [ { Kind = Identifier "ALICE" } ],
-                                           false,
-                                           false)) -> ()
-    | res -> Assert.Fail(sprintf "Expected GRANT EXECUTE ON FUNCTION, got %A" res)
-
-    match parse "GRANT SELECT ON PROCEDURE p TO bob" with
-    | Grant(GrantStatement.GrantPrivileges(Privileges.Actions [ PrivilegeAction.Select None ],
-                                           { Kind = Identifier "P" },
-                                           [ { Kind = Identifier "BOB" } ],
-                                           false,
-                                           false)) -> ()
-    | res -> Assert.Fail(sprintf "Expected GRANT SELECT ON PROCEDURE, got %A" res)
-
-    match parse "GRANT SELECT (SPECIFIC FUNCTION f) ON TYPE my_type TO alice" with
-    | Grant(GrantStatement.GrantPrivileges(Privileges.Actions [ PrivilegeAction.Select(Some(PrivilegeMethods [ designator ])) ],
-                                           { Kind = Identifier "MY_TYPE" },
-                                           [ { Kind = Identifier "ALICE" } ],
-                                           false,
-                                           false)) ->
-        Assert.True(designator.IsSpecific)
-        Assert.Equal(Some RoutineType.Function, designator.RoutineType)
-        Assert.Equal(Identifier "F", designator.Name.Kind)
-    | res -> Assert.Fail(sprintf "Expected GRANT SELECT (method list), got %A" res)
+    match parse "CREATE SEQUENCE order_seq MINVALUE 1" with
+    | CreateSequence({ Kind = Identifier "ORDER_SEQ" }, [ MinValue(Some 1m) ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateSequence MINVALUE, got %A" res)
 
 [<Fact>]
-let ``DROP ROUTINE verification`` () =
-    match parse "DROP FUNCTION add CASCADE" with
-    | Drop(DropRoutine({ Kind = Identifier "ADD" }, true)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropRoutine CASCADE, got %A" res)
+let ``ALTER SEQUENCE verification`` () =
+    match parse "ALTER SEQUENCE order_seq RESTART WITH 100" with
+    | AlterSequence({ Kind = Identifier "ORDER_SEQ" }, [ Restart(Some 100m) ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected AlterSequence RESTART, got %A" res)
 
-    match parse "DROP PROCEDURE p RESTRICT" with
-    | Drop(DropRoutine({ Kind = Identifier "P" }, false)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropRoutine RESTRICT, got %A" res)
-
-[<Fact>]
-let ``DROP TRIGGER verification`` () =
-    match parse "DROP TRIGGER trg" with
-    | Drop(DropTrigger { Kind = Identifier "TRG" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropTrigger, got %A" res)
+    match parse "ALTER SEQUENCE order_seq INCREMENT BY 5 MAXVALUE 1000" with
+    | AlterSequence({ Kind = Identifier "ORDER_SEQ" }, [ IncrementBy 5m; MaxValue(Some 1000m) ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected AlterSequence INCREMENT, got %A" res)
 
 [<Fact>]
-let ``CREATE PROCEDURE verification`` () =
+let ``TRUNCATE TABLE verification`` () =
+    match parse "TRUNCATE TABLE logs" with
+    | Truncate({ Kind = Identifier "LOGS" }, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected Truncate, got %A" res)
+
+    match parse "TRUNCATE TABLE logs RESTART IDENTITY" with
+    | Truncate({ Kind = Identifier "LOGS" }, Some true) -> ()
+    | res -> Assert.Fail(sprintf "Expected Truncate RESTART IDENTITY, got %A" res)
+
+[<Fact>]
+let ``LANGUAGE and PARAMETER STYLE are closed keyword sets verification`` () =
+    // 10.2 <language name> ::= ADA | C | COBOL | FORTRAN | M | MUMPS | PASCAL | PLI | SQL
+    parseFails "CREATE FUNCTION f () RETURNS INT LANGUAGE JS SELECT 1"
+    parse "CREATE FUNCTION f () RETURNS INT LANGUAGE FORTRAN SELECT 1" |> ignore
+    // 11.60 <parameter style> ::= SQL | GENERAL
+    parseFails "CREATE FUNCTION f () RETURNS INT PARAMETER STYLE FOO SELECT 1"
+
+[<Fact>]
+let ``CREATE TRIGGER verification`` () =
     match
-        parse "CREATE PROCEDURE add_employee (IN name VARCHAR(100), OUT id INT) LANGUAGE SQL DETERMINISTIC SELECT 1"
+        parse
+            "CREATE TRIGGER trg AFTER UPDATE OF salary ON employees REFERENCING OLD ROW AS old_row NEW ROW AS new_row FOR EACH ROW WHEN (new_row.salary > old_row.salary) UPDATE employees SET salary = new_row.salary"
     with
-    | CreateProcedure { Name = { Kind = Identifier "ADD_EMPLOYEE" }
-                        Parameters = [ first; second ]
-                        Returns = None
-                        Characteristics = [ Language "SQL"; Deterministic true ]
-                        Body = SqlRoutine(None, Select _) } ->
-        Assert.Equal(Some ParameterMode.In, first.Mode)
-        Assert.Equal(Some(Identifier "NAME"), first.Name |> Option.map (fun e -> e.Kind))
-        Assert.Equal(DataTypeParameter(Varchar(Some 100), false), first.ParameterType)
-        Assert.False(first.IsResult)
-        Assert.Equal(Some ParameterMode.Out, second.Mode)
-        Assert.Equal(Some(Identifier "ID"), second.Name |> Option.map (fun e -> e.Kind))
-        Assert.Equal(DataTypeParameter(Integer, false), second.ParameterType)
-    | res -> Assert.Fail(sprintf "Expected CreateProcedure, got %A" res)
+    | CreateTrigger { Name = { Kind = Identifier "TRG" }
+                      ActionTime = TriggerActionTime.After
+                      Event = TriggerEvent.Update(Some [ { Kind = Identifier "SALARY" } ])
+                      Table = { Kind = Identifier "EMPLOYEES" }
+                      Transitions = [ TransitionTableOrVariable.OldRow { Kind = Identifier "OLD_ROW" }
+                                      TransitionTableOrVariable.NewRow { Kind = Identifier "NEW_ROW" } ]
+                      Action = { ForEach = Some true
+                                 When = Some _
+                                 Statement = SingleStatement(Update _) } } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateTrigger, got %A" res)
 
 [<Fact>]
-let ``CREATE PROCEDURE with INOUT and DEFAULT verification`` () =
-    match parse "CREATE PROCEDURE p (INOUT x INT DEFAULT 5) SPECIFIC p_spec SELECT 1" with
-    | CreateProcedure { Parameters = [ param ]
-                        Characteristics = [ SpecificName { Kind = Identifier "P_SPEC" } ] } ->
-        Assert.Equal(Some ParameterMode.InOut, param.Mode)
-        Assert.Equal(Some(Identifier "X"), param.Name |> Option.map (fun e -> e.Kind))
-        Assert.Equal(DataTypeParameter(Integer, false), param.ParameterType)
-        Assert.False(param.IsResult)
-        Assert.True(Option.isSome param.Default)
-    | res -> Assert.Fail(sprintf "Expected CreateProcedure INOUT DEFAULT, got %A" res)
+let ``CREATE TRIGGER BEFORE INSERT verification`` () =
+    match parse "CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH STATEMENT INSERT INTO logs (msg) VALUES ('x')" with
+    | CreateTrigger { ActionTime = TriggerActionTime.Before
+                      Event = TriggerEvent.Insert
+                      Table = { Kind = Identifier "T" }
+                      Transitions = []
+                      Action = { ForEach = Some false
+                                 When = None
+                                 Statement = SingleStatement(Insert _) } } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateTrigger BEFORE INSERT, got %A" res)
+
+[<Fact>]
+let ``CREATE TRIGGER INSTEAD OF with transition tables verification`` () =
+    match
+        parse
+            "CREATE TRIGGER trg INSTEAD OF DELETE ON t REFERENCING OLD TABLE AS old_tbl NEW TABLE AS new_tbl BEGIN ATOMIC DELETE FROM t; END"
+    with
+    | CreateTrigger { ActionTime = TriggerActionTime.InsteadOf
+                      Event = TriggerEvent.Delete
+                      Transitions = [ TransitionTableOrVariable.OldTable { Kind = Identifier "OLD_TBL" }
+                                      TransitionTableOrVariable.NewTable { Kind = Identifier "NEW_TBL" } ]
+                      Action = { ForEach = None
+                                 When = None
+                                 Statement = TriggeredStatement.BeginAtomic [ Delete _ ] } } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateTrigger INSTEAD OF, got %A" res)
+
+[<Fact>]
+let ``CREATE TRIGGER without action is rejected`` () =
+    parseFails "CREATE TRIGGER trg AFTER INSERT ON t"
 
 [<Fact>]
 let ``CREATE PROCEDURE with DESCRIPTOR parameter default verification`` () =
@@ -1250,10 +1395,88 @@ let ``CREATE PROCEDURE with DESCRIPTOR parameter default verification`` () =
     | res -> Assert.Fail(sprintf "Expected CreateProcedure, got %A" res)
 
 [<Fact>]
-let ``CREATE PROCEDURE with BEGIN ATOMIC body verification`` () =
-    match parse "CREATE PROCEDURE p () BEGIN ATOMIC SELECT 1; SELECT 2; END" with
-    | CreateProcedure { Body = RoutineBody.BeginAtomic [ Select _; Select _ ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateProcedure BEGIN ATOMIC, got %A" res)
+let ``SQL parameter type verification`` () =
+    // `IN mytype` — the identifier after the mode is the <parameter type>, not a parameter name
+    match parse "CREATE PROCEDURE p (IN mytype) SELECT 1" with
+    | CreateProcedure { Parameters = [ param ] } ->
+        Assert.True(Option.isNone param.Name)
+
+        match param.ParameterType with
+        | DataTypeParameter(UserDefinedType { Kind = Identifier "MYTYPE" }, false) -> ()
+        | other -> Assert.Fail(sprintf "Expected an anonymous UDT parameter type, got %A" other)
+    | res -> Assert.Fail(sprintf "Expected an anonymous UDT parameter, got %A" res)
+
+    // a named parameter with a UDT type
+    match parse "CREATE PROCEDURE p (IN p1 mytype) SELECT 1" with
+    | CreateProcedure { Parameters = [ param ] } ->
+        Assert.Equal(Some(Identifier "P1"), param.Name |> Option.map (fun e -> e.Kind))
+
+        match param.ParameterType with
+        | DataTypeParameter(UserDefinedType { Kind = Identifier "MYTYPE" }, false) -> ()
+        | other -> Assert.Fail(sprintf "Expected a UDT parameter type, got %A" other)
+    | res -> Assert.Fail(sprintf "Expected a named UDT parameter, got %A" res)
+
+    // 11.60 <locator indication> ::= AS LOCATOR
+    match parse "CREATE PROCEDURE p (x INT AS LOCATOR) SELECT 1" with
+    | CreateProcedure { Parameters = [ param ] } -> Assert.Equal(DataTypeParameter(Integer, true), param.ParameterType)
+    | res -> Assert.Fail(sprintf "Expected AS LOCATOR, got %A" res)
+
+    // 11.60 <descriptor parameter type> ::= DESCRIPTOR
+    match parse "CREATE PROCEDURE p (d DESCRIPTOR) SELECT 1" with
+    | CreateProcedure { Parameters = [ param ] } ->
+        Assert.Equal(Some(Identifier "D"), param.Name |> Option.map (fun e -> e.Kind))
+        Assert.Equal(DescriptorParameter, param.ParameterType)
+    | res -> Assert.Fail(sprintf "Expected DESCRIPTOR parameter, got %A" res)
+
+[<Fact>]
+let ``generic table parameter type verification`` () =
+    match parse "CREATE PROCEDURE p (t TABLE) SELECT 1" with
+    | CreateProcedure { Parameters = [ param ] } -> Assert.Equal(GenericTableParameter(None, None), param.ParameterType)
+    | res -> Assert.Fail(sprintf "Expected TABLE parameter, got %A" res)
+
+    match parse "CREATE PROCEDURE p (t TABLE PASS THROUGH WITH ROW SEMANTICS) SELECT 1" with
+    | CreateProcedure { Parameters = [ param ] } ->
+        Assert.Equal(
+            GenericTableParameter(Some PassThroughOption.PassThrough, Some GenericTableSemantics.RowSemantics),
+            param.ParameterType
+        )
+    | res -> Assert.Fail(sprintf "Expected TABLE PASS THROUGH, got %A" res)
+
+    match parse "CREATE PROCEDURE p (t TABLE NO PASS THROUGH WITH SET SEMANTICS PRUNE ON EMPTY) SELECT 1" with
+    | CreateProcedure { Parameters = [ param ] } ->
+        Assert.Equal(
+            GenericTableParameter(
+                Some PassThroughOption.NoPassThrough,
+                Some(GenericTableSemantics.SetSemantics(Some GenericTablePruning.PruneOnEmpty))
+            ),
+            param.ParameterType
+        )
+    | res -> Assert.Fail(sprintf "Expected TABLE NO PASS THROUGH, got %A" res)
+
+    match parse "CREATE PROCEDURE p (t TABLE WITH SET SEMANTICS KEEP ON EMPTY) SELECT 1" with
+    | CreateProcedure { Parameters = [ param ] } ->
+        Assert.Equal(
+            GenericTableParameter(None, Some(GenericTableSemantics.SetSemantics(Some GenericTablePruning.KeepOnEmpty))),
+            param.ParameterType
+        )
+    | res -> Assert.Fail(sprintf "Expected TABLE KEEP ON EMPTY, got %A" res)
+
+[<Fact>]
+let ``CREATE PROCEDURE with rights clause verification`` () =
+    // 11.60 <SQL routine spec> ::= [ <rights clause> ] <SQL routine body>
+    match parse "CREATE PROCEDURE p () SQL SECURITY DEFINER SELECT 1" with
+    | CreateProcedure { Body = SqlRoutine(Some RightsClause.SqlSecurityDefiner, Select _) } -> ()
+    | res -> Assert.Fail(sprintf "Expected SQL SECURITY DEFINER, got %A" res)
+
+    match parse "CREATE FUNCTION f () RETURNS INT SQL SECURITY INVOKER SELECT 1" with
+    | CreateFunction { Body = SqlRoutine(Some RightsClause.SqlSecurityInvoker, Select _) } -> ()
+    | res -> Assert.Fail(sprintf "Expected SQL SECURITY INVOKER, got %A" res)
+
+    match parse "CREATE PROCEDURE p () SELECT 1" with
+    | CreateProcedure { Body = SqlRoutine(None, Select _) } -> ()
+    | res -> Assert.Fail(sprintf "Expected a bare SQL routine spec, got %A" res)
+
+    parseFails "CREATE PROCEDURE p () SQL SECURITY OWNER SELECT 1"
 
 [<Fact>]
 let ``CREATE PROCEDURE with EXTERNAL body verification`` () =
@@ -1341,116 +1564,88 @@ let ``CREATE FUNCTION with polymorphic table function body verification`` () =
     parseFails "CREATE FUNCTION f () RETURNS TABLE PRIVATE (x INT) SELECT 1"
 
 [<Fact>]
-let ``CREATE PROCEDURE with rights clause verification`` () =
-    // 11.60 <SQL routine spec> ::= [ <rights clause> ] <SQL routine body>
-    match parse "CREATE PROCEDURE p () SQL SECURITY DEFINER SELECT 1" with
-    | CreateProcedure { Body = SqlRoutine(Some RightsClause.SqlSecurityDefiner, Select _) } -> ()
-    | res -> Assert.Fail(sprintf "Expected SQL SECURITY DEFINER, got %A" res)
-
-    match parse "CREATE FUNCTION f () RETURNS INT SQL SECURITY INVOKER SELECT 1" with
-    | CreateFunction { Body = SqlRoutine(Some RightsClause.SqlSecurityInvoker, Select _) } -> ()
-    | res -> Assert.Fail(sprintf "Expected SQL SECURITY INVOKER, got %A" res)
-
-    match parse "CREATE PROCEDURE p () SELECT 1" with
-    | CreateProcedure { Body = SqlRoutine(None, Select _) } -> ()
-    | res -> Assert.Fail(sprintf "Expected a bare SQL routine spec, got %A" res)
-
-    parseFails "CREATE PROCEDURE p () SQL SECURITY OWNER SELECT 1"
-
-[<Fact>]
-let ``CREATE FUNCTION with dispatch clause verification`` () =
-    // 11.60 <dispatch clause> ::= STATIC DISPATCH — a <function specification> suffix
-    match parse "CREATE FUNCTION f () RETURNS INT STATIC DISPATCH SELECT 1" with
-    | CreateFunction { Dispatch = true } -> ()
-    | res -> Assert.Fail(sprintf "Expected STATIC DISPATCH, got %A" res)
-
-    match parse "CREATE FUNCTION f () RETURNS INT SELECT 1" with
-    | CreateFunction { Dispatch = false } -> ()
-    | res -> Assert.Fail(sprintf "Expected no dispatch clause, got %A" res)
-
-    // a procedure has no <dispatch clause> (11.60)
-    parseFails "CREATE PROCEDURE p () STATIC DISPATCH SELECT 1"
-
-[<Fact>]
-let ``CREATE FUNCTION verification`` () =
-    match parse "CREATE FUNCTION add (a INT, b INT) RETURNS INT LANGUAGE SQL DETERMINISTIC READS SQL DATA SELECT 1" with
-    | CreateFunction { Name = { Kind = Identifier "ADD" }
-                       Parameters = [ first; second ]
-                       Returns = returns
-                       Characteristics = [ Language "SQL"; Deterministic true; SqlDataAccess ReadsSqlData ]
-                       Body = SqlRoutine(None, Select _) } ->
-        Assert.Equal(Some(Identifier "A"), first.Name |> Option.map (fun e -> e.Kind))
-        Assert.Equal(DataTypeParameter(Integer, false), first.ParameterType)
-        Assert.Equal(Some(Identifier "B"), second.Name |> Option.map (fun e -> e.Kind))
+let ``CREATE FUNCTION with result sets and null-call verification`` () =
+    match parse "CREATE FUNCTION f () RETURNS INT DYNAMIC RESULT SETS 5 RETURNS NULL ON NULL INPUT SELECT 1" with
+    | CreateFunction { Returns = returns
+                       Characteristics = [ DynamicResultSets 5UL; NullCall true ] } ->
         Assert.Equal(Some(returnsData Integer), returns)
-    | res -> Assert.Fail(sprintf "Expected CreateFunction, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected CreateFunction characteristics, got %A" res)
+
+    match parse "CREATE FUNCTION f () RETURNS INT CALLED ON NULL INPUT SELECT 1" with
+    | CreateFunction { Returns = returns
+                       Characteristics = [ NullCall false ] } -> Assert.Equal(Some(returnsData Integer), returns)
+    | res -> Assert.Fail(sprintf "Expected CreateFunction CALLED ON NULL INPUT, got %A" res)
 
 [<Fact>]
-let ``SQL parameter type verification`` () =
-    // `IN mytype` — the identifier after the mode is the <parameter type>, not a parameter name
-    match parse "CREATE PROCEDURE p (IN mytype) SELECT 1" with
-    | CreateProcedure { Parameters = [ param ] } ->
-        Assert.True(Option.isNone param.Name)
-
-        match param.ParameterType with
-        | DataTypeParameter(UserDefinedType { Kind = Identifier "MYTYPE" }, false) -> ()
-        | other -> Assert.Fail(sprintf "Expected an anonymous UDT parameter type, got %A" other)
-    | res -> Assert.Fail(sprintf "Expected an anonymous UDT parameter, got %A" res)
-
-    // a named parameter with a UDT type
-    match parse "CREATE PROCEDURE p (IN p1 mytype) SELECT 1" with
-    | CreateProcedure { Parameters = [ param ] } ->
-        Assert.Equal(Some(Identifier "P1"), param.Name |> Option.map (fun e -> e.Kind))
-
-        match param.ParameterType with
-        | DataTypeParameter(UserDefinedType { Kind = Identifier "MYTYPE" }, false) -> ()
-        | other -> Assert.Fail(sprintf "Expected a UDT parameter type, got %A" other)
-    | res -> Assert.Fail(sprintf "Expected a named UDT parameter, got %A" res)
-
-    // 11.60 <locator indication> ::= AS LOCATOR
-    match parse "CREATE PROCEDURE p (x INT AS LOCATOR) SELECT 1" with
-    | CreateProcedure { Parameters = [ param ] } -> Assert.Equal(DataTypeParameter(Integer, true), param.ParameterType)
-    | res -> Assert.Fail(sprintf "Expected AS LOCATOR, got %A" res)
-
-    // 11.60 <descriptor parameter type> ::= DESCRIPTOR
-    match parse "CREATE PROCEDURE p (d DESCRIPTOR) SELECT 1" with
-    | CreateProcedure { Parameters = [ param ] } ->
-        Assert.Equal(Some(Identifier "D"), param.Name |> Option.map (fun e -> e.Kind))
-        Assert.Equal(DescriptorParameter, param.ParameterType)
-    | res -> Assert.Fail(sprintf "Expected DESCRIPTOR parameter, got %A" res)
+let ``routine characteristics are accepted in any order`` () =
+    // 11.60 <routine characteristics> ::= [ <routine characteristic>... ] — the order is unconstrained
+    match parse "CREATE FUNCTION f () RETURNS INT DETERMINISTIC LANGUAGE SQL READS SQL DATA SELECT 1" with
+    | CreateFunction { Characteristics = [ Deterministic true; Language "SQL"; SqlDataAccess ReadsSqlData ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected characteristics in the given order, got %A" res)
 
 [<Fact>]
-let ``generic table parameter type verification`` () =
-    match parse "CREATE PROCEDURE p (t TABLE) SELECT 1" with
-    | CreateProcedure { Parameters = [ param ] } -> Assert.Equal(GenericTableParameter(None, None), param.ParameterType)
-    | res -> Assert.Fail(sprintf "Expected TABLE parameter, got %A" res)
+let ``routine characteristic catalogue verification`` () =
+    let sql =
+        "CREATE FUNCTION f () RETURNS INT PARAMETER STYLE SQL SPECIFIC f_spec OLD SAVEPOINT LEVEL NO SQL SELECT 1"
 
-    match parse "CREATE PROCEDURE p (t TABLE PASS THROUGH WITH ROW SEMANTICS) SELECT 1" with
-    | CreateProcedure { Parameters = [ param ] } ->
-        Assert.Equal(
-            GenericTableParameter(Some PassThroughOption.PassThrough, Some GenericTableSemantics.RowSemantics),
-            param.ParameterType
-        )
-    | res -> Assert.Fail(sprintf "Expected TABLE PASS THROUGH, got %A" res)
+    match parse sql with
+    | CreateFunction { Characteristics = [ ParameterStyle "SQL"
+                                           SpecificName { Kind = Identifier "F_SPEC" }
+                                           SavepointLevel false
+                                           SqlDataAccess NoSql ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected the full characteristic catalogue, got %A" res)
 
-    match parse "CREATE PROCEDURE p (t TABLE NO PASS THROUGH WITH SET SEMANTICS PRUNE ON EMPTY) SELECT 1" with
-    | CreateProcedure { Parameters = [ param ] } ->
-        Assert.Equal(
-            GenericTableParameter(
-                Some PassThroughOption.NoPassThrough,
-                Some(GenericTableSemantics.SetSemantics(Some GenericTablePruning.PruneOnEmpty))
-            ),
-            param.ParameterType
-        )
-    | res -> Assert.Fail(sprintf "Expected TABLE NO PASS THROUGH, got %A" res)
+[<Fact>]
+let ``CREATE FUNCTION rejects duplicate characteristics`` () =
+    parseFails "CREATE FUNCTION f () RETURNS INT CALLED ON NULL INPUT RETURNS NULL ON NULL INPUT SELECT 1"
+    parseFails "CREATE FUNCTION f () RETURNS INT LANGUAGE SQL LANGUAGE SQL SELECT 1"
 
-    match parse "CREATE PROCEDURE p (t TABLE WITH SET SEMANTICS KEEP ON EMPTY) SELECT 1" with
-    | CreateProcedure { Parameters = [ param ] } ->
-        Assert.Equal(
-            GenericTableParameter(None, Some(GenericTableSemantics.SetSemantics(Some GenericTablePruning.KeepOnEmpty))),
-            param.ParameterType
-        )
-    | res -> Assert.Fail(sprintf "Expected TABLE KEEP ON EMPTY, got %A" res)
+[<Fact>]
+let ``CREATE routine rejects the 11.61-only NAME characteristic verification`` () =
+    // NAME <external routine name> belongs to 11.61 <alter routine characteristic>, not to
+    // 11.60 <routine characteristic>.
+    parseFails "CREATE PROCEDURE p () NAME ext SELECT 1"
+    parseFails "CREATE FUNCTION f () RETURNS INT NAME ext SELECT 1"
+
+[<Fact>]
+let ``CREATE PROCEDURE with BEGIN ATOMIC body verification`` () =
+    match parse "CREATE PROCEDURE p () BEGIN ATOMIC SELECT 1; SELECT 2; END" with
+    | CreateProcedure { Body = RoutineBody.BeginAtomic [ Select _; Select _ ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateProcedure BEGIN ATOMIC, got %A" res)
+
+[<Fact>]
+let ``CREATE PROCEDURE verification`` () =
+    match
+        parse "CREATE PROCEDURE add_employee (IN name VARCHAR(100), OUT id INT) LANGUAGE SQL DETERMINISTIC SELECT 1"
+    with
+    | CreateProcedure { Name = { Kind = Identifier "ADD_EMPLOYEE" }
+                        Parameters = [ first; second ]
+                        Returns = None
+                        Characteristics = [ Language "SQL"; Deterministic true ]
+                        Body = SqlRoutine(None, Select _) } ->
+        Assert.Equal(Some ParameterMode.In, first.Mode)
+        Assert.Equal(Some(Identifier "NAME"), first.Name |> Option.map (fun e -> e.Kind))
+        Assert.Equal(DataTypeParameter(Varchar(Some 100), false), first.ParameterType)
+        Assert.False(first.IsResult)
+        Assert.Equal(Some ParameterMode.Out, second.Mode)
+        Assert.Equal(Some(Identifier "ID"), second.Name |> Option.map (fun e -> e.Kind))
+        Assert.Equal(DataTypeParameter(Integer, false), second.ParameterType)
+    | res -> Assert.Fail(sprintf "Expected CreateProcedure, got %A" res)
+
+[<Fact>]
+let ``CREATE PROCEDURE with INOUT and DEFAULT verification`` () =
+    match parse "CREATE PROCEDURE p (INOUT x INT DEFAULT 5) SPECIFIC p_spec SELECT 1" with
+    | CreateProcedure { Parameters = [ param ]
+                        Characteristics = [ SpecificName { Kind = Identifier "P_SPEC" } ] } ->
+        Assert.Equal(Some ParameterMode.InOut, param.Mode)
+        Assert.Equal(Some(Identifier "X"), param.Name |> Option.map (fun e -> e.Kind))
+        Assert.Equal(DataTypeParameter(Integer, false), param.ParameterType)
+        Assert.False(param.IsResult)
+        Assert.True(Option.isSome param.Default)
+    | res -> Assert.Fail(sprintf "Expected CreateProcedure INOUT DEFAULT, got %A" res)
+
+[<Fact>]
+let ``CREATE PROCEDURE without body is rejected`` () = parseFails "CREATE PROCEDURE p ()"
 
 [<Fact>]
 let ``CREATE FUNCTION returns type verification`` () =
@@ -1489,71 +1684,36 @@ let ``CREATE FUNCTION returns type verification`` () =
     | res -> Assert.Fail(sprintf "Expected RETURNS INT AS LOCATOR, got %A" res)
 
 [<Fact>]
-let ``CREATE FUNCTION with result sets and null-call verification`` () =
-    match parse "CREATE FUNCTION f () RETURNS INT DYNAMIC RESULT SETS 5 RETURNS NULL ON NULL INPUT SELECT 1" with
-    | CreateFunction { Returns = returns
-                       Characteristics = [ DynamicResultSets 5UL; NullCall true ] } ->
+let ``CREATE FUNCTION with dispatch clause verification`` () =
+    // 11.60 <dispatch clause> ::= STATIC DISPATCH — a <function specification> suffix
+    match parse "CREATE FUNCTION f () RETURNS INT STATIC DISPATCH SELECT 1" with
+    | CreateFunction { Dispatch = true } -> ()
+    | res -> Assert.Fail(sprintf "Expected STATIC DISPATCH, got %A" res)
+
+    match parse "CREATE FUNCTION f () RETURNS INT SELECT 1" with
+    | CreateFunction { Dispatch = false } -> ()
+    | res -> Assert.Fail(sprintf "Expected no dispatch clause, got %A" res)
+
+    // a procedure has no <dispatch clause> (11.60)
+    parseFails "CREATE PROCEDURE p () STATIC DISPATCH SELECT 1"
+
+[<Fact>]
+let ``CREATE FUNCTION verification`` () =
+    match parse "CREATE FUNCTION add (a INT, b INT) RETURNS INT LANGUAGE SQL DETERMINISTIC READS SQL DATA SELECT 1" with
+    | CreateFunction { Name = { Kind = Identifier "ADD" }
+                       Parameters = [ first; second ]
+                       Returns = returns
+                       Characteristics = [ Language "SQL"; Deterministic true; SqlDataAccess ReadsSqlData ]
+                       Body = SqlRoutine(None, Select _) } ->
+        Assert.Equal(Some(Identifier "A"), first.Name |> Option.map (fun e -> e.Kind))
+        Assert.Equal(DataTypeParameter(Integer, false), first.ParameterType)
+        Assert.Equal(Some(Identifier "B"), second.Name |> Option.map (fun e -> e.Kind))
         Assert.Equal(Some(returnsData Integer), returns)
-    | res -> Assert.Fail(sprintf "Expected CreateFunction characteristics, got %A" res)
-
-    match parse "CREATE FUNCTION f () RETURNS INT CALLED ON NULL INPUT SELECT 1" with
-    | CreateFunction { Returns = returns
-                       Characteristics = [ NullCall false ] } -> Assert.Equal(Some(returnsData Integer), returns)
-    | res -> Assert.Fail(sprintf "Expected CreateFunction CALLED ON NULL INPUT, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected CreateFunction, got %A" res)
 
 [<Fact>]
-let ``CREATE FUNCTION rejects duplicate characteristics`` () =
-    parseFails "CREATE FUNCTION f () RETURNS INT CALLED ON NULL INPUT RETURNS NULL ON NULL INPUT SELECT 1"
-    parseFails "CREATE FUNCTION f () RETURNS INT LANGUAGE SQL LANGUAGE SQL SELECT 1"
-
-[<Fact>]
-let ``routine characteristics are accepted in any order`` () =
-    // 11.60 <routine characteristics> ::= [ <routine characteristic>... ] — the order is unconstrained
-    match parse "CREATE FUNCTION f () RETURNS INT DETERMINISTIC LANGUAGE SQL READS SQL DATA SELECT 1" with
-    | CreateFunction { Characteristics = [ Deterministic true; Language "SQL"; SqlDataAccess ReadsSqlData ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected characteristics in the given order, got %A" res)
-
-[<Fact>]
-let ``routine characteristic catalogue verification`` () =
-    let sql =
-        "CREATE FUNCTION f () RETURNS INT PARAMETER STYLE SQL SPECIFIC f_spec OLD SAVEPOINT LEVEL NO SQL SELECT 1"
-
-    match parse sql with
-    | CreateFunction { Characteristics = [ ParameterStyle "SQL"
-                                           SpecificName { Kind = Identifier "F_SPEC" }
-                                           SavepointLevel false
-                                           SqlDataAccess NoSql ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected the full characteristic catalogue, got %A" res)
-
-[<Fact>]
-let ``ALTER ROUTINE characteristic catalogue verification`` () =
-    // 11.61 <alter routine characteristic> = <language clause> | <parameter style clause>
-    //     | <SQL-data access indication> | <null-call clause> | <returned result sets characteristic>
-    //     | NAME <external routine name>
-    match parse "ALTER FUNCTION f LANGUAGE SQL NAME ext RETURNS NULL ON NULL INPUT" with
-    | AlterRoutine { Characteristics = [ Language "SQL"; ExternalName { Kind = Identifier "EXT" }; NullCall true ] } ->
-        ()
-    | res -> Assert.Fail(sprintf "Expected the 11.61 catalogue, got %A" res)
-
-    // 11.61 does not allow SPECIFIC / <deterministic characteristic> / <savepoint level indication>
-    parseFails "ALTER FUNCTION f DETERMINISTIC"
-    parseFails "ALTER FUNCTION f SPECIFIC f_spec"
-    parseFails "ALTER FUNCTION f OLD SAVEPOINT LEVEL"
-
-[<Fact>]
-let ``CREATE routine rejects the 11.61-only NAME characteristic verification`` () =
-    // NAME <external routine name> belongs to 11.61 <alter routine characteristic>, not to
-    // 11.60 <routine characteristic>.
-    parseFails "CREATE PROCEDURE p () NAME ext SELECT 1"
-    parseFails "CREATE FUNCTION f () RETURNS INT NAME ext SELECT 1"
-
-[<Fact>]
-let ``LANGUAGE and PARAMETER STYLE are closed keyword sets verification`` () =
-    // 10.2 <language name> ::= ADA | C | COBOL | FORTRAN | M | MUMPS | PASCAL | PLI | SQL
-    parseFails "CREATE FUNCTION f () RETURNS INT LANGUAGE JS SELECT 1"
-    parse "CREATE FUNCTION f () RETURNS INT LANGUAGE FORTRAN SELECT 1" |> ignore
-    // 11.60 <parameter style> ::= SQL | GENERAL
-    parseFails "CREATE FUNCTION f () RETURNS INT PARAMETER STYLE FOO SELECT 1"
+let ``CREATE FUNCTION without RETURNS is rejected`` () =
+    parseFails "CREATE FUNCTION f () SELECT 1"
 
 [<Fact>]
 let ``CREATE METHOD verification`` () =
@@ -1594,6 +1754,21 @@ let ``CREATE METHOD verification`` () =
     parseFails "CREATE METHOD m (x INT) FOR my_type LANGUAGE SQL SELECT 1"
 
 [<Fact>]
+let ``ALTER ROUTINE characteristic catalogue verification`` () =
+    // 11.61 <alter routine characteristic> = <language clause> | <parameter style clause>
+    //     | <SQL-data access indication> | <null-call clause> | <returned result sets characteristic>
+    //     | NAME <external routine name>
+    match parse "ALTER FUNCTION f LANGUAGE SQL NAME ext RETURNS NULL ON NULL INPUT" with
+    | AlterRoutine { Characteristics = [ Language "SQL"; ExternalName { Kind = Identifier "EXT" }; NullCall true ] } ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected the 11.61 catalogue, got %A" res)
+
+    // 11.61 does not allow SPECIFIC / <deterministic characteristic> / <savepoint level indication>
+    parseFails "ALTER FUNCTION f DETERMINISTIC"
+    parseFails "ALTER FUNCTION f SPECIFIC f_spec"
+    parseFails "ALTER FUNCTION f OLD SAVEPOINT LEVEL"
+
+[<Fact>]
 let ``ALTER ROUTINE verification`` () =
     match parse "ALTER FUNCTION add LANGUAGE SQL RESTRICT" with
     | AlterRoutine { Routine = routine
@@ -1619,61 +1794,6 @@ let ``ALTER ROUTINE verification`` () =
     | res -> Assert.Fail(sprintf "Expected AlterRoutine METHOD, got %A" res)
 
 [<Fact>]
-let ``CREATE TRIGGER verification`` () =
-    match
-        parse
-            "CREATE TRIGGER trg AFTER UPDATE OF salary ON employees REFERENCING OLD ROW AS old_row NEW ROW AS new_row FOR EACH ROW WHEN (new_row.salary > old_row.salary) UPDATE employees SET salary = new_row.salary"
-    with
-    | CreateTrigger { Name = { Kind = Identifier "TRG" }
-                      ActionTime = TriggerActionTime.After
-                      Event = TriggerEvent.Update(Some [ { Kind = Identifier "SALARY" } ])
-                      Table = { Kind = Identifier "EMPLOYEES" }
-                      Transitions = [ TransitionTableOrVariable.OldRow { Kind = Identifier "OLD_ROW" }
-                                      TransitionTableOrVariable.NewRow { Kind = Identifier "NEW_ROW" } ]
-                      Action = { ForEach = Some true
-                                 When = Some _
-                                 Statement = SingleStatement(Update _) } } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateTrigger, got %A" res)
-
-[<Fact>]
-let ``CREATE TRIGGER BEFORE INSERT verification`` () =
-    match parse "CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH STATEMENT INSERT INTO logs (msg) VALUES ('x')" with
-    | CreateTrigger { ActionTime = TriggerActionTime.Before
-                      Event = TriggerEvent.Insert
-                      Table = { Kind = Identifier "T" }
-                      Transitions = []
-                      Action = { ForEach = Some false
-                                 When = None
-                                 Statement = SingleStatement(Insert _) } } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateTrigger BEFORE INSERT, got %A" res)
-
-[<Fact>]
-let ``CREATE TRIGGER INSTEAD OF with transition tables verification`` () =
-    match
-        parse
-            "CREATE TRIGGER trg INSTEAD OF DELETE ON t REFERENCING OLD TABLE AS old_tbl NEW TABLE AS new_tbl BEGIN ATOMIC DELETE FROM t; END"
-    with
-    | CreateTrigger { ActionTime = TriggerActionTime.InsteadOf
-                      Event = TriggerEvent.Delete
-                      Transitions = [ TransitionTableOrVariable.OldTable { Kind = Identifier "OLD_TBL" }
-                                      TransitionTableOrVariable.NewTable { Kind = Identifier "NEW_TBL" } ]
-                      Action = { ForEach = None
-                                 When = None
-                                 Statement = TriggeredStatement.BeginAtomic [ Delete _ ] } } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateTrigger INSTEAD OF, got %A" res)
-
-[<Fact>]
-let ``CREATE PROCEDURE without body is rejected`` () = parseFails "CREATE PROCEDURE p ()"
-
-[<Fact>]
-let ``CREATE FUNCTION without RETURNS is rejected`` () =
-    parseFails "CREATE FUNCTION f () SELECT 1"
-
-[<Fact>]
-let ``CREATE TRIGGER without action is rejected`` () =
-    parseFails "CREATE TRIGGER trg AFTER INSERT ON t"
-
-[<Fact>]
 let ``CREATE TYPE with member list verification`` () =
     match parse "CREATE TYPE my_type AS (a INT, b VARCHAR(10))" with
     | CreateType { Name = { Kind = Identifier "MY_TYPE" }
@@ -1692,22 +1812,6 @@ let ``CREATE TYPE with member list verification`` () =
               Collate = None } ] -> ()
         | _ -> Assert.Fail(sprintf "Unexpected attributes: %A" attrs)
     | res -> Assert.Fail(sprintf "Expected CreateType member list, got %A" res)
-
-[<Fact>]
-let ``CREATE TYPE with UNDER verification`` () =
-    match parse "CREATE TYPE sub_type UNDER my_type AS (c INT)" with
-    | CreateType { Name = { Kind = Identifier "SUB_TYPE" }
-                   Under = Some { Kind = Identifier "MY_TYPE" }
-                   Representation = Some(TypeRepresentation.MemberList attrs)
-                   Options = []
-                   Methods = [] } ->
-        match attrs with
-        | [ { Name = { Kind = Identifier "C" }
-              DataType = Integer
-              Default = None
-              Collate = None } ] -> ()
-        | _ -> Assert.Fail(sprintf "Unexpected attributes: %A" attrs)
-    | res -> Assert.Fail(sprintf "Expected CreateType UNDER, got %A" res)
 
 [<Fact>]
 let ``CREATE TYPE with options verification`` () =
@@ -1758,6 +1862,22 @@ let ``CREATE TYPE with INSTANCE and OVERRIDING methods verification`` () =
     | res -> Assert.Fail(sprintf "Expected CreateType OVERRIDING method, got %A" res)
 
 [<Fact>]
+let ``CREATE TYPE with UNDER verification`` () =
+    match parse "CREATE TYPE sub_type UNDER my_type AS (c INT)" with
+    | CreateType { Name = { Kind = Identifier "SUB_TYPE" }
+                   Under = Some { Kind = Identifier "MY_TYPE" }
+                   Representation = Some(TypeRepresentation.MemberList attrs)
+                   Options = []
+                   Methods = [] } ->
+        match attrs with
+        | [ { Name = { Kind = Identifier "C" }
+              DataType = Integer
+              Default = None
+              Collate = None } ] -> ()
+        | _ -> Assert.Fail(sprintf "Unexpected attributes: %A" attrs)
+    | res -> Assert.Fail(sprintf "Expected CreateType UNDER, got %A" res)
+
+[<Fact>]
 let ``ALTER TYPE attribute actions verification`` () =
     match parse "ALTER TYPE my_type ADD ATTRIBUTE c INT" with
     | AlterType { Name = { Kind = Identifier "MY_TYPE" }
@@ -1785,132 +1905,12 @@ let ``ALTER TYPE method actions verification`` () =
     | res -> Assert.Fail(sprintf "Expected AlterType DROP METHOD, got %A" res)
 
 [<Fact>]
-let ``DROP TYPE verification`` () =
-    match parse "DROP TYPE my_type RESTRICT" with
-    | Drop(DropType({ Kind = Identifier "MY_TYPE" }, false)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropType RESTRICT, got %A" res)
-
-    match parse "DROP TYPE my_type CASCADE" with
-    | Drop(DropType({ Kind = Identifier "MY_TYPE" }, true)) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropType CASCADE, got %A" res)
-
-[<Fact>]
-let ``CREATE TABLE OF type verification`` () =
-    match parse "CREATE TABLE t OF my_type" with
-    | CreateTable { Table = { Kind = Identifier "T" }
-                    Columns = []
-                    Constraints = []
-                    OfType = Some { Kind = Identifier "MY_TYPE" }
-                    Under = None
-                    TypedElements = [] } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateTable OF, got %A" res)
-
-    // 11.3 <subtable clause> ::= UNDER <supertable clause>
-    match parse "CREATE TABLE sub_t OF my_type UNDER super_t" with
-    | CreateTable { OfType = Some { Kind = Identifier "MY_TYPE" }
-                    Under = Some { Kind = Identifier "SUPER_T" } } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateTable OF ... UNDER, got %A" res)
-
-    // 11.3 <typed table element list> ::=
-    //     ( <typed table element> [ { <comma> <typed table element> }... ] )
-    match
-        parse
-            "CREATE TABLE t OF my_type (c1 WITH OPTIONS SCOPE tbl DEFAULT 5 NOT NULL, REF IS r SYSTEM GENERATED, CONSTRAINT ck CHECK (x > 0))"
-    with
-    | CreateTable { OfType = Some { Kind = Identifier "MY_TYPE" }
-                    TypedElements = elements } ->
-        match elements with
-        | [ TypedTableElement.TypedColumnOptions columnOptions
-            TypedTableElement.TypedSelfReference selfReference
-            TypedTableElement.TypedTableConstraint constraintDefinition ] ->
-            Assert.Equal(Identifier "C1", columnOptions.Name.Kind)
-            Assert.Equal(Some(Identifier "TBL"), columnOptions.Scope |> Option.map (fun e -> e.Kind))
-            Assert.True(Option.isSome columnOptions.DefaultValue, "Expected a DEFAULT clause")
-
-            Assert.Equal<ColumnConstraintKind list>(
-                [ ColumnConstraintKind.NotNull ],
-                columnOptions.Constraints |> List.map (fun c -> c.Kind)
-            )
-
-            Assert.Equal(Identifier "R", selfReference.Name.Kind)
-            Assert.Equal(Some ReferenceGeneration.SystemGenerated, selfReference.Generation)
-
-            match constraintDefinition.Constraint with
-            | TableConstraint.Check(Some { Kind = Identifier "CK" }, _) -> ()
-            | c -> Assert.Fail(sprintf "Expected Check, got %A" c)
-        | other -> Assert.Fail(sprintf "Expected 3 typed table elements, got %A" other)
-    | res -> Assert.Fail(sprintf "Expected CreateTable OF with a typed table element list, got %A" res)
-
-[<Fact>]
-let ``CREATE VIEW OF type verification`` () =
-    match parse "CREATE VIEW v OF my_type AS SELECT * FROM t" with
-    | CreateView { Name = { Kind = Identifier "V" }
-                   Columns = None
-                   OfType = Some { Kind = Identifier "MY_TYPE" }
-                   Under = None
-                   ViewElements = []
-                   Query = SelectQuery _ } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateView OF, got %A" res)
-
-    // 11.32 <subview clause> ::= UNDER <table name>
-    match parse "CREATE VIEW sub_v OF my_type UNDER super_v AS SELECT * FROM t" with
-    | CreateView { OfType = Some { Kind = Identifier "MY_TYPE" }
-                   Under = Some { Kind = Identifier "SUPER_V" } } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateView OF ... UNDER, got %A" res)
-
-    // 11.32 <view element list> ::=
-    //     ( <view element> [ { <comma> <view element> }... ] )
-    match parse "CREATE VIEW v OF my_type (REF IS r USER GENERATED, a WITH OPTIONS SCOPE tbl) AS SELECT * FROM t" with
-    | CreateView { OfType = Some { Kind = Identifier "MY_TYPE" }
-                   ViewElements = [ ViewElement.ViewSelfReference selfReference
-                                    ViewElement.ViewColumnOption columnOptions ] } ->
-        Assert.Equal(Identifier "R", selfReference.Name.Kind)
-        Assert.Equal(Some ReferenceGeneration.UserGenerated, selfReference.Generation)
-        Assert.Equal(Identifier "A", columnOptions.Name.Kind)
-        Assert.Equal(Identifier "TBL", columnOptions.Scope.Kind)
-    | res -> Assert.Fail(sprintf "Expected CreateView OF with a view element list, got %A" res)
-
-[<Theory>]
-[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS)")>]
-[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS SCOPE tbl)")>]
-[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS DEFAULT 5 UNIQUE)")>]
-[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS CONSTRAINT nn NOT NULL)")>]
-[<InlineData("CREATE TABLE t OF my_type UNDER super_t (c1 WITH OPTIONS NOT NULL)")>]
-[<InlineData("CREATE TABLE t OF my_type (REF IS r)")>]
-[<InlineData("CREATE TABLE t OF my_type (REF IS r SYSTEM GENERATED)")>]
-[<InlineData("CREATE TABLE t OF my_type (REF IS r USER GENERATED)")>]
-[<InlineData("CREATE TABLE t OF my_type (REF IS r DERIVED)")>]
-[<InlineData("CREATE TABLE t OF my_type (PRIMARY KEY (c1))")>]
-[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS, REF IS r, UNIQUE (c1))")>]
-[<InlineData("CREATE VIEW v OF my_type (REF IS r DERIVED) AS SELECT * FROM t")>]
-[<InlineData("CREATE VIEW v OF my_type (a WITH OPTIONS SCOPE tbl) AS SELECT * FROM t")>]
-[<InlineData("CREATE VIEW v OF my_type UNDER super_v (REF IS r) AS SELECT * FROM t")>]
-let ``typed table and view element lists are accepted`` (sql: string) =
-    match parse sql with
-    | CreateTable _ -> ()
-    | CreateView _ -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateTable or CreateView, got %A" res)
-
-[<Theory>]
-[<InlineData("CREATE TABLE t OF my_type ()")>]
-[<InlineData("CREATE TABLE t OF my_type (c1)")>]
-[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS DEFAULT)")>]
-[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS DEFAULT 5 SCOPE tbl)")>]
-[<InlineData("CREATE TABLE t OF my_type (c1 WITH OPTIONS NOT NULL")>]
-[<InlineData("CREATE VIEW v OF my_type (a WITH OPTIONS) AS SELECT * FROM t")>]
-[<InlineData("CREATE VIEW v OF my_type (a WITH OPTIONS DEFAULT 5) AS SELECT * FROM t")>]
-let ``malformed typed table and view element lists are rejected`` (sql: string) = parseFails sql
-
-[<Fact>]
-let ``CREATE TABLE with REF type verification`` () =
-    match parse "CREATE TABLE t (r REF(my_type) SCOPE users)" with
-    | CreateTable { Columns = [ { Name = { Kind = Identifier "R" }
-                                  DataType = ReferenceType(UserDefinedType { Kind = Identifier "MY_TYPE" },
-                                                           Some { Kind = Identifier "USERS" }) } ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateTable REF, got %A" res)
-
-[<Fact>]
 let ``ALTER TYPE without action is rejected`` () = parseFails "ALTER TYPE my_type"
 
 [<Fact>]
-let ``DROP TYPE without behavior is rejected`` () = parseFails "DROP TYPE my_type"
+let ``CREATE INDEX is rejected (not in SQL-2016)`` () =
+    parseFails "CREATE INDEX idx ON users (name)"
+    parseFails "CREATE UNIQUE INDEX idx ON users (name)"
+
+[<Fact>]
+let ``DROP INDEX is rejected (not in SQL-2016)`` () = parseFails "DROP INDEX idx"

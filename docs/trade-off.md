@@ -40,6 +40,22 @@ file reads roughly top-to-bottom like `sql-2016-grammar.txt`.
 - No test enforces ordering; `RuleNumberingTests` validates the citation
   *numbers* only. Ordering is a review convention (see `AGENTS.md`).
 
+### Test order mirrors definition order
+
+Test functions in `SqlParser.Tests/*.fs` follow the definitions they exercise:
+first by the `SqlParser.fsproj` compile order of the target module, then by the
+target symbol's definition order, then by test priority (happy path → error →
+fault). Tests that drive a symbol from another module are ordered by that
+module's compile position, so a file may open with tests for an earlier-compiled
+module.
+
+- **Trade-off:** Each test file reads as a mirror of the modules it covers, which
+  makes a missing test or a stale expectation easy to spot. The cost is that a
+  definition reorder must be followed by a matching test reorder (the 2026-09-13
+  clause-order reorder left several test files stale until they were re-sorted),
+  and feature-adjacent tests that target different modules end up separated.
+  Ordering is review-only — no test enforces it.
+
 ### Compile order is part of the design
 
 F# requires definition before use, so `SqlParser.fsproj` lists modules leaf-first.

@@ -160,19 +160,13 @@ let ``EXECUTE without clauses verification`` () =
     | res -> Assert.Fail(sprintf "Expected Execute without clauses, got %A" res)
 
 [<Fact>]
+let ``EXECUTE without statement name is rejected`` () = parseFails "EXECUTE"
+
+[<Fact>]
 let ``EXECUTE IMMEDIATE verification`` () =
     match parse "EXECUTE IMMEDIATE 'SELECT 1'" with
     | ExecuteImmediate { Kind = Literal(String "SELECT 1") } -> ()
     | res -> Assert.Fail(sprintf "Expected ExecuteImmediate, got %A" res)
-
-[<Fact>]
-let ``PIPE ROW verification`` () =
-    match parse "PIPE ROW d1" with
-    | PipeRow { Kind = Identifier "D1" } -> ()
-    | res -> Assert.Fail(sprintf "Expected PipeRow, got %A" res)
-
-[<Fact>]
-let ``EXECUTE without statement name is rejected`` () = parseFails "EXECUTE"
 
 [<Fact>]
 let ``DYNAMIC DECLARE CURSOR verification`` () =
@@ -263,3 +257,9 @@ let ``ALLOCATE RECEIVED CURSOR with specific routine designator verification`` (
 
 [<Fact>]
 let ``ALLOCATE without cursor name is rejected`` () = parseFails "ALLOCATE c"
+
+[<Fact>]
+let ``PIPE ROW verification`` () =
+    match parse "PIPE ROW d1" with
+    | PipeRow { Kind = Identifier "D1" } -> ()
+    | res -> Assert.Fail(sprintf "Expected PipeRow, got %A" res)

@@ -27,6 +27,62 @@ let parseStatementFails (sql: string) =
     | Error _ -> ()
 
 [<Fact>]
+let ``DELETE with alias verification`` () =
+    match parse "DELETE FROM users AS u WHERE u.id = 1" with
+    | Delete { Target = TableTarget({ Kind = Identifier "USERS" }, false)
+               TableAlias = Some { Kind = Identifier "U" } } -> ()
+    | res -> Assert.Fail(sprintf "Expected Delete with alias, got %A" res)
+
+[<Fact>]
+let ``DELETE verification`` () =
+    match parse "DELETE FROM users WHERE id = 1" with
+    | Delete { Target = TableTarget({ Kind = Identifier "USERS" }, false)
+               Where = Some { Kind = BinaryOp(Equal, { Kind = Identifier "ID" }, { Kind = Literal(Number 1m) }) } } ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected Delete, got %A" res)
+
+[<Fact>]
+let ``DELETE ONLY target table verification`` () =
+    match parse "DELETE FROM ONLY (app.users)" with
+    | Delete { Target = TableTarget({ Kind = ColumnReference [ "APP"; "USERS" ] }, true) } -> ()
+    | res -> Assert.Fail(sprintf "Expected DELETE ONLY, got %A" res)
+
+[<Fact>]
+let ``DELETE positioned (WHERE CURRENT OF) verification`` () =
+    match parseStatement "DELETE FROM users WHERE CURRENT OF cur" with
+    | Delete { Target = TableTarget({ Kind = Identifier "USERS" }, false)
+               Cursor = Some { Kind = Identifier "CUR" }
+               Where = None } -> ()
+    | res -> Assert.Fail(sprintf "Expected positioned Delete, got %A" res)
+
+[<Fact>]
+let ``DELETE without target table (20.25) verification`` () =
+    // 20.25 <preparable dynamic delete statement: positioned>
+    match parseStatement "DELETE WHERE CURRENT OF cur" with
+    | Delete { Target = OmittedTarget
+               Cursor = Some { Kind = Identifier "CUR" }
+               Where = None } -> ()
+    | res -> Assert.Fail(sprintf "Expected Delete without target table, got %A" res)
+
+[<Fact>]
+let ``DELETE without target table and search WHERE is rejected`` () =
+    parseStatementFails "DELETE WHERE id = 1"
+
+[<Fact>]
+let ``DELETE without target table and alias is rejected`` () =
+    parseStatementFails "DELETE AS u WHERE CURRENT OF cur"
+
+[<Fact>]
+let ``DELETE without target table and FOR PORTION OF is rejected`` () =
+    parseStatementFails "DELETE FOR PORTION OF p FROM x TO y WHERE CURRENT OF cur"
+
+[<Fact>]
+let ``DELETE without FROM and without CURRENT OF is rejected`` () = parseFails "DELETE"
+
+[<Fact>]
+let ``DELETE FROM without a table name is rejected`` () = parseFails "DELETE FROM"
+
+[<Fact>]
 let ``INSERT verification`` () =
     match parse "INSERT INTO users (id, name) VALUES (1, 'alice')" with
     | Insert { Table = { Kind = Identifier "USERS" }
@@ -39,26 +95,6 @@ let ``INSERT into schema-qualified table verification`` () =
     match parse "INSERT INTO app.users (id) VALUES (1)" with
     | Insert { Table = { Kind = ColumnReference [ "APP"; "USERS" ] } } -> ()
     | res -> Assert.Fail(sprintf "Expected Insert into schema-qualified table, got %A" res)
-
-[<Fact>]
-let ``UPDATE verification`` () =
-    match parse "UPDATE users SET name = 'bob' WHERE id = 1" with
-    | Update { Target = TableTarget({ Kind = Identifier "USERS" }, false)
-               Set = [ SingleSet({ Kind = Identifier "NAME" }, { Kind = Literal(String "bob") }) ]
-               Where = Some { Kind = BinaryOp(Equal, { Kind = Identifier "ID" }, { Kind = Literal(Number 1m) }) } } ->
-        ()
-    | res -> Assert.Fail(sprintf "Expected Update, got %A" res)
-
-[<Fact>]
-let ``UPDATE ONLY target table verification`` () =
-    // 14.13/14.14 <target table> ::= <table name> | ONLY ( <table name> )
-    match parse "UPDATE ONLY (users) SET name = 'bob'" with
-    | Update { Target = TableTarget({ Kind = Identifier "USERS" }, true) } -> ()
-    | res -> Assert.Fail(sprintf "Expected UPDATE ONLY, got %A" res)
-
-    match parse "UPDATE app.users SET name = 'bob'" with
-    | Update { Target = TableTarget({ Kind = ColumnReference [ "APP"; "USERS" ] }, false) } -> ()
-    | res -> Assert.Fail(sprintf "Expected UPDATE without ONLY, got %A" res)
 
 [<Fact>]
 let ``INSERT DEFAULT VALUES verification`` () =
@@ -82,6 +118,86 @@ let ``INSERT VALUES DEFAULT verification`` () =
     match parse "INSERT INTO users (name, age) VALUES (DEFAULT, 30)" with
     | Insert { Source = Values [ [ { Kind = Default }; { Kind = Literal(Number 30m) } ] ] } -> ()
     | res -> Assert.Fail(sprintf "Expected Insert VALUES DEFAULT, got %A" res)
+
+[<Fact>]
+let ``INSERT insertion target does not accept ONLY`` () =
+    // <insertion target> is a plain <table name> (14.11), unlike <target table>.
+    parseFails "INSERT INTO ONLY (users) VALUES (1)"
+
+[<Fact>]
+let ``MERGE verification`` () =
+    match
+        parse
+            "MERGE INTO target AS t USING source AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name WHEN NOT MATCHED THEN INSERT (id, name) VALUES (s.id, s.name)"
+    with
+    | Merge { Target = { Kind = Identifier "TARGET" }
+              TargetAlias = Some { Kind = Identifier "T" }
+              On = { Kind = BinaryOp(Equal,
+                                     { Kind = ColumnReference [ "T"; "ID" ] },
+                                     { Kind = ColumnReference [ "S"; "ID" ] }) } } -> ()
+    | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)
+
+[<Fact>]
+let ``MERGE INSERT OVERRIDING SYSTEM VALUE verification`` () =
+    match
+        parse
+            "MERGE INTO t USING s ON t.id = s.id WHEN NOT MATCHED THEN INSERT (id) OVERRIDING SYSTEM VALUE VALUES (DEFAULT)"
+    with
+    | Merge { WhenClauses = [ clause ] } ->
+        match clause.Action with
+        | MergeInsert(cols, Some false, [ { Kind = Default } ]) ->
+            match cols with
+            | Some [ col ] ->
+                match col.Kind with
+                | Identifier "ID" -> ()
+                | _ -> Assert.Fail(sprintf "Expected insert column ID, got %A" col)
+            | _ -> Assert.Fail(sprintf "Expected insert column list, got %A" cols)
+        | res -> Assert.Fail(sprintf "Expected MergeInsert, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)
+
+[<Fact>]
+let ``MERGE ONLY target table verification`` () =
+    match parse "MERGE INTO ONLY (target) USING source ON target.id = source.id WHEN MATCHED THEN DELETE" with
+    | Merge { Target = { Kind = Identifier "TARGET" }
+              TargetIsOnly = true } -> ()
+    | res -> Assert.Fail(sprintf "Expected MERGE ONLY, got %A" res)
+
+[<Fact>]
+let ``MERGE INSERT OVERRIDING USER VALUE verification`` () =
+    match
+        parse "MERGE INTO t USING s ON t.id = s.id WHEN NOT MATCHED THEN INSERT (id) OVERRIDING USER VALUE VALUES (1)"
+    with
+    | Merge { WhenClauses = [ clause ] } ->
+        match clause.Action with
+        | MergeInsert(cols, Some true, [ { Kind = Literal(Number 1m) } ]) ->
+            match cols with
+            | Some [ col ] ->
+                match col.Kind with
+                | Identifier "ID" -> ()
+                | _ -> Assert.Fail(sprintf "Expected insert column ID, got %A" col)
+            | _ -> Assert.Fail(sprintf "Expected insert column list, got %A" cols)
+        | res -> Assert.Fail(sprintf "Expected MergeInsert, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)
+
+[<Fact>]
+let ``UPDATE verification`` () =
+    match parse "UPDATE users SET name = 'bob' WHERE id = 1" with
+    | Update { Target = TableTarget({ Kind = Identifier "USERS" }, false)
+               Set = [ SingleSet({ Kind = Identifier "NAME" }, { Kind = Literal(String "bob") }) ]
+               Where = Some { Kind = BinaryOp(Equal, { Kind = Identifier "ID" }, { Kind = Literal(Number 1m) }) } } ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected Update, got %A" res)
+
+[<Fact>]
+let ``UPDATE ONLY target table verification`` () =
+    // 14.13/14.14 <target table> ::= <table name> | ONLY ( <table name> )
+    match parse "UPDATE ONLY (users) SET name = 'bob'" with
+    | Update { Target = TableTarget({ Kind = Identifier "USERS" }, true) } -> ()
+    | res -> Assert.Fail(sprintf "Expected UPDATE ONLY, got %A" res)
+
+    match parse "UPDATE app.users SET name = 'bob'" with
+    | Update { Target = TableTarget({ Kind = ColumnReference [ "APP"; "USERS" ] }, false) } -> ()
+    | res -> Assert.Fail(sprintf "Expected UPDATE without ONLY, got %A" res)
 
 [<Fact>]
 let ``UPDATE multiple assignment verification`` () =
@@ -161,119 +277,3 @@ let ``UPDATE without target table and alias is rejected`` () =
 [<Fact>]
 let ``UPDATE without target table and FOR PORTION OF is rejected`` () =
     parseStatementFails "UPDATE FOR PORTION OF p FROM x TO y SET name = 'x' WHERE CURRENT OF cur"
-
-[<Fact>]
-let ``DELETE with alias verification`` () =
-    match parse "DELETE FROM users AS u WHERE u.id = 1" with
-    | Delete { Target = TableTarget({ Kind = Identifier "USERS" }, false)
-               TableAlias = Some { Kind = Identifier "U" } } -> ()
-    | res -> Assert.Fail(sprintf "Expected Delete with alias, got %A" res)
-
-[<Fact>]
-let ``DELETE verification`` () =
-    match parse "DELETE FROM users WHERE id = 1" with
-    | Delete { Target = TableTarget({ Kind = Identifier "USERS" }, false)
-               Where = Some { Kind = BinaryOp(Equal, { Kind = Identifier "ID" }, { Kind = Literal(Number 1m) }) } } ->
-        ()
-    | res -> Assert.Fail(sprintf "Expected Delete, got %A" res)
-
-[<Fact>]
-let ``DELETE ONLY target table verification`` () =
-    match parse "DELETE FROM ONLY (app.users)" with
-    | Delete { Target = TableTarget({ Kind = ColumnReference [ "APP"; "USERS" ] }, true) } -> ()
-    | res -> Assert.Fail(sprintf "Expected DELETE ONLY, got %A" res)
-
-[<Fact>]
-let ``DELETE positioned (WHERE CURRENT OF) verification`` () =
-    match parseStatement "DELETE FROM users WHERE CURRENT OF cur" with
-    | Delete { Target = TableTarget({ Kind = Identifier "USERS" }, false)
-               Cursor = Some { Kind = Identifier "CUR" }
-               Where = None } -> ()
-    | res -> Assert.Fail(sprintf "Expected positioned Delete, got %A" res)
-
-[<Fact>]
-let ``DELETE without target table (20.25) verification`` () =
-    // 20.25 <preparable dynamic delete statement: positioned>
-    match parseStatement "DELETE WHERE CURRENT OF cur" with
-    | Delete { Target = OmittedTarget
-               Cursor = Some { Kind = Identifier "CUR" }
-               Where = None } -> ()
-    | res -> Assert.Fail(sprintf "Expected Delete without target table, got %A" res)
-
-[<Fact>]
-let ``DELETE without target table and search WHERE is rejected`` () =
-    parseStatementFails "DELETE WHERE id = 1"
-
-[<Fact>]
-let ``DELETE without target table and alias is rejected`` () =
-    parseStatementFails "DELETE AS u WHERE CURRENT OF cur"
-
-[<Fact>]
-let ``DELETE without target table and FOR PORTION OF is rejected`` () =
-    parseStatementFails "DELETE FOR PORTION OF p FROM x TO y WHERE CURRENT OF cur"
-
-[<Fact>]
-let ``DELETE without FROM and without CURRENT OF is rejected`` () = parseFails "DELETE"
-
-[<Fact>]
-let ``DELETE FROM without a table name is rejected`` () = parseFails "DELETE FROM"
-
-[<Fact>]
-let ``MERGE verification`` () =
-    match
-        parse
-            "MERGE INTO target AS t USING source AS s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = s.name WHEN NOT MATCHED THEN INSERT (id, name) VALUES (s.id, s.name)"
-    with
-    | Merge { Target = { Kind = Identifier "TARGET" }
-              TargetAlias = Some { Kind = Identifier "T" }
-              On = { Kind = BinaryOp(Equal,
-                                     { Kind = ColumnReference [ "T"; "ID" ] },
-                                     { Kind = ColumnReference [ "S"; "ID" ] }) } } -> ()
-    | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)
-
-[<Fact>]
-let ``MERGE INSERT OVERRIDING SYSTEM VALUE verification`` () =
-    match
-        parse
-            "MERGE INTO t USING s ON t.id = s.id WHEN NOT MATCHED THEN INSERT (id) OVERRIDING SYSTEM VALUE VALUES (DEFAULT)"
-    with
-    | Merge { WhenClauses = [ clause ] } ->
-        match clause.Action with
-        | MergeInsert(cols, Some false, [ { Kind = Default } ]) ->
-            match cols with
-            | Some [ col ] ->
-                match col.Kind with
-                | Identifier "ID" -> ()
-                | _ -> Assert.Fail(sprintf "Expected insert column ID, got %A" col)
-            | _ -> Assert.Fail(sprintf "Expected insert column list, got %A" cols)
-        | res -> Assert.Fail(sprintf "Expected MergeInsert, got %A" res)
-    | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)
-
-[<Fact>]
-let ``MERGE ONLY target table verification`` () =
-    match parse "MERGE INTO ONLY (target) USING source ON target.id = source.id WHEN MATCHED THEN DELETE" with
-    | Merge { Target = { Kind = Identifier "TARGET" }
-              TargetIsOnly = true } -> ()
-    | res -> Assert.Fail(sprintf "Expected MERGE ONLY, got %A" res)
-
-[<Fact>]
-let ``INSERT insertion target does not accept ONLY`` () =
-    // <insertion target> is a plain <table name> (14.11), unlike <target table>.
-    parseFails "INSERT INTO ONLY (users) VALUES (1)"
-
-[<Fact>]
-let ``MERGE INSERT OVERRIDING USER VALUE verification`` () =
-    match
-        parse "MERGE INTO t USING s ON t.id = s.id WHEN NOT MATCHED THEN INSERT (id) OVERRIDING USER VALUE VALUES (1)"
-    with
-    | Merge { WhenClauses = [ clause ] } ->
-        match clause.Action with
-        | MergeInsert(cols, Some true, [ { Kind = Literal(Number 1m) } ]) ->
-            match cols with
-            | Some [ col ] ->
-                match col.Kind with
-                | Identifier "ID" -> ()
-                | _ -> Assert.Fail(sprintf "Expected insert column ID, got %A" col)
-            | _ -> Assert.Fail(sprintf "Expected insert column list, got %A" cols)
-        | res -> Assert.Fail(sprintf "Expected MergeInsert, got %A" res)
-    | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)

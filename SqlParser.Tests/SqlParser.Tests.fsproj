@@ -11,15 +11,15 @@
     <Compile Include="LexerTests.fs" />
     <Compile Include="ExpressionTests.fs" />
     <Compile Include="QueryTests.fs" />
-    <Compile Include="DmlTests.fs" />
     <Compile Include="DdlTests.fs" />
-    <Compile Include="TransactionTests.fs" />
-    <Compile Include="ControlTests.fs" />
-    <Compile Include="SessionTests.fs" />
     <Compile Include="CursorTests.fs" />
+    <Compile Include="DmlTests.fs" />
+    <Compile Include="ControlTests.fs" />
+    <Compile Include="TransactionTests.fs" />
     <Compile Include="ConnectionTests.fs" />
-    <Compile Include="DiagnosticsTests.fs" />
+    <Compile Include="SessionTests.fs" />
     <Compile Include="DynamicTests.fs" />
+    <Compile Include="DiagnosticsTests.fs" />
     <Compile Include="SqlParserTests.fs" />
     <Compile Include="RuleNumberingTests.fs" />
   </ItemGroup>

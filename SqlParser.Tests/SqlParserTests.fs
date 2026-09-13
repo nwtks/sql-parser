@@ -40,24 +40,6 @@ let ``Direct SQL statement with trailing whitespace verification`` () =
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
-let ``Direct SQL statement without semicolon is rejected`` () =
-    match SqlParser.parse "SELECT 1" with
-    | Error _ -> ()
-    | Ok res -> Assert.Fail(sprintf "Expected a missing semicolon to be rejected, got %A" res)
-
-[<Fact>]
-let ``Direct SQL statement with two semicolons is rejected`` () =
-    match SqlParser.parse "SELECT 1;;" with
-    | Error _ -> ()
-    | Ok res -> Assert.Fail(sprintf "Expected a second semicolon to be rejected, got %A" res)
-
-[<Fact>]
-let ``Direct SQL statement with only a semicolon is rejected`` () =
-    match SqlParser.parse ";" with
-    | Error _ -> ()
-    | Ok res -> Assert.Fail(sprintf "Expected a bare semicolon to be rejected, got %A" res)
-
-[<Fact>]
 let ``Direct SQL statement accepts the direct SQL data families`` () =
     match SqlParser.parse "INSERT INTO t VALUES (1);" with
     | Ok { Kind = Insert _ } -> ()
@@ -87,6 +69,24 @@ let ``Direct SQL statement accepts the direct SQL data families`` () =
     match SqlParser.parse "WITH cte AS (SELECT 1) SELECT * FROM cte;" with
     | Ok { Kind = WithStatement _ } -> ()
     | res -> Assert.Fail(sprintf "Expected WithStatement, got %A" res)
+
+[<Fact>]
+let ``Direct SQL statement without semicolon is rejected`` () =
+    match SqlParser.parse "SELECT 1" with
+    | Error _ -> ()
+    | Ok res -> Assert.Fail(sprintf "Expected a missing semicolon to be rejected, got %A" res)
+
+[<Fact>]
+let ``Direct SQL statement with two semicolons is rejected`` () =
+    match SqlParser.parse "SELECT 1;;" with
+    | Error _ -> ()
+    | Ok res -> Assert.Fail(sprintf "Expected a second semicolon to be rejected, got %A" res)
+
+[<Fact>]
+let ``Direct SQL statement with only a semicolon is rejected`` () =
+    match SqlParser.parse ";" with
+    | Error _ -> ()
+    | Ok res -> Assert.Fail(sprintf "Expected a bare semicolon to be rejected, got %A" res)
 
 [<Fact>]
 let ``Direct SQL statement rejects a positioned UPDATE / DELETE (22.1)`` () =

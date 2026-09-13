@@ -15,6 +15,18 @@ let parseFails (sql: string) =
     | Error _ -> ()
 
 [<Fact>]
+let ``SET SESSION CHARACTERISTICS verification`` () =
+    match parse "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ ONLY" with
+    | SetSessionCharacteristics [ Isolation Serializable; AccessMode ReadOnly ] -> ()
+    | res -> Assert.Fail(sprintf "Expected SetSessionCharacteristics, got %A" res)
+
+[<Fact>]
+let ``SET SESSION AUTHORIZATION verification`` () =
+    match parse "SET SESSION AUTHORIZATION 'alice'" with
+    | SetSessionAuthorization { Kind = Literal(String "alice") } -> ()
+    | res -> Assert.Fail(sprintf "Expected SetSessionAuthorization, got %A" res)
+
+[<Fact>]
 let ``SET ROLE verification`` () =
     match parse "SET ROLE admin" with
     | SetRole(Some { Kind = Identifier "ADMIN" }) -> ()
@@ -26,18 +38,6 @@ let ``SET ROLE verification`` () =
 
 [<Fact>]
 let ``SET ROLE without role is rejected`` () = parseFails "SET ROLE"
-
-[<Fact>]
-let ``SET SESSION CHARACTERISTICS verification`` () =
-    match parse "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ ONLY" with
-    | SetSessionCharacteristics [ Isolation Serializable; AccessMode ReadOnly ] -> ()
-    | res -> Assert.Fail(sprintf "Expected SetSessionCharacteristics, got %A" res)
-
-[<Fact>]
-let ``SET SESSION AUTHORIZATION verification`` () =
-    match parse "SET SESSION AUTHORIZATION 'alice'" with
-    | SetSessionAuthorization { Kind = Literal(String "alice") } -> ()
-    | res -> Assert.Fail(sprintf "Expected SetSessionAuthorization, got %A" res)
 
 [<Fact>]
 let ``SET TIME ZONE LOCAL verification`` () =

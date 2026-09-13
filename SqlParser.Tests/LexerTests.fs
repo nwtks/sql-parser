@@ -43,17 +43,10 @@ let ``Delimited identifiers are parsed correctly`` () =
     Assert.Equal("Quoted \" quote", test pIdentifier "\"Quoted \"\" quote\"")
 
 [<Fact>]
-let ``Schema qualified names are parsed correctly`` () =
-    Assert.Equal<string list>([ "APP" ], test pSchemaQualifiedName "app")
-    Assert.Equal<string list>([ "APP"; "USERS" ], test pSchemaQualifiedName "app.users")
-    Assert.Equal<string list>([ "CAT"; "APP"; "USERS" ], test pSchemaQualifiedName "cat.app.users")
-    Assert.Equal<string list>([ "APP"; "USERS" ], test pSchemaQualifiedName "app . users")
-    Assert.Equal<string list>([ "APP"; "USERS" ], test pSchemaQualifiedName "app.\"USERS\"")
-
-[<Fact>]
-let ``Schema qualified names with reserved words are rejected`` () =
-    testFails pSchemaQualifiedName "app.SELECT"
-    testFails pSchemaQualifiedName "SELECT.app"
+let ``Unicode escape sequences are decoded correctly`` () =
+    Assert.Equal("A", test pUnicodeCharacterStringLiteral "U&'\\0041'")
+    Assert.Equal("AB", test pUnicodeCharacterStringLiteral "U&'\\0041\\0042'")
+    Assert.Equal("A", test pUnicodeDelimitedIdentifier "U&\"\\0041\"")
 
 [<Fact>]
 let ``Numeric literals are parsed correctly`` () =
@@ -62,6 +55,11 @@ let ``Numeric literals are parsed correctly`` () =
     Assert.Equal(0.45m, test pUnsignedNumericLiteral ".45")
     Assert.Equal(12300m, test pUnsignedNumericLiteral "1.23E4")
     Assert.Equal(0.0123m, test pUnsignedNumericLiteral "1.23E-2")
+
+[<Fact>]
+let ``Large exponent literals do not overflow`` () =
+    let result = test pUnsignedNumericLiteral "1E400"
+    Assert.True(result > 0m)
 
 [<Fact>]
 let ``String literals are parsed correctly`` () =
@@ -78,29 +76,10 @@ let ``Hex literal with spaces between hexit pairs is parsed`` () =
     Assert.Equal<byte array>([| 0x01uy; 0xAFuy; 0x02uy |], test pBinaryStringLiteral "X'01 AF 02'")
 
 [<Fact>]
-let ``Invalid date values are rejected`` () =
-    testFails pDateLiteral "DATE '2023-13-01'"
-    testFails pDateLiteral "DATE '2023-01-40'"
-    testFails pDateLiteral "DATE '2023--1-01'"
-
-[<Fact>]
-let ``Invalid interval values are rejected`` () =
-    testFails pIntervalLiteral "INTERVAL 'abc' YEAR"
-    testFails pIntervalLiteral "INTERVAL '1-2' YEAR"
-
-    Assert.Equal(
-        { IsNegative = false
-          ValueString = "1"
-          Qualifier = IntervalQualifier.SingleField(Year, None) },
-        test pIntervalLiteral "INTERVAL '1' YEAR"
-    )
-
-    Assert.Equal(
-        { IsNegative = false
-          ValueString = "1:30"
-          Qualifier = IntervalQualifier.Range(Hour, Minute, None) },
-        test pIntervalLiteral "INTERVAL '1:30' HOUR TO MINUTE"
-    )
+let ``Boolean literals are parsed correctly`` () =
+    Assert.Equal(Some true, test pBooleanLiteral "TRUE")
+    Assert.Equal(Some false, test pBooleanLiteral "FALSE")
+    Assert.Equal(None, test pBooleanLiteral "UNKNOWN")
 
 [<Fact>]
 let ``Date, Time, Timestamp literals are parsed correctly`` () =
@@ -123,6 +102,18 @@ let ``Date, Time, Timestamp literals are parsed correctly`` () =
               TzOffset = None } },
         test pTimestampLiteral "TIMESTAMP '2023-01-01 12:00:00'"
     )
+
+[<Fact>]
+let ``Invalid date values are rejected`` () =
+    testFails pDateLiteral "DATE '2023-13-01'"
+    testFails pDateLiteral "DATE '2023-01-40'"
+    testFails pDateLiteral "DATE '2023--1-01'"
+
+[<Fact>]
+let ``Invalid time seconds fail cleanly`` () =
+    match run (pTimeLiteral .>> eof) "TIME '12:00:00.5.5'" with
+    | Failure _ -> ()
+    | Success _ -> Assert.Fail("Expected TIME literal with invalid seconds to fail")
 
 [<Fact>]
 let ``Interval literals are parsed correctly`` () =
@@ -205,6 +196,25 @@ let ``Interval range with fractional seconds precision on SECOND end is parsed``
     )
 
 [<Fact>]
+let ``Invalid interval values are rejected`` () =
+    testFails pIntervalLiteral "INTERVAL 'abc' YEAR"
+    testFails pIntervalLiteral "INTERVAL '1-2' YEAR"
+
+    Assert.Equal(
+        { IsNegative = false
+          ValueString = "1"
+          Qualifier = IntervalQualifier.SingleField(Year, None) },
+        test pIntervalLiteral "INTERVAL '1' YEAR"
+    )
+
+    Assert.Equal(
+        { IsNegative = false
+          ValueString = "1:30"
+          Qualifier = IntervalQualifier.Range(Hour, Minute, None) },
+        test pIntervalLiteral "INTERVAL '1:30' HOUR TO MINUTE"
+    )
+
+[<Fact>]
 let ``Interval precision with invalid value shape is rejected`` () =
     // The precision clause is parsed, but the value string must still match the qualifier shape.
     testFails pIntervalLiteral "INTERVAL '1-2' YEAR(4)"
@@ -212,24 +222,14 @@ let ``Interval precision with invalid value shape is rejected`` () =
     testFails pIntervalLiteral "INTERVAL '1:30' HOUR TO SECOND(3)"
 
 [<Fact>]
-let ``Unicode escape sequences are decoded correctly`` () =
-    Assert.Equal("A", test pUnicodeCharacterStringLiteral "U&'\\0041'")
-    Assert.Equal("AB", test pUnicodeCharacterStringLiteral "U&'\\0041\\0042'")
-    Assert.Equal("A", test pUnicodeDelimitedIdentifier "U&\"\\0041\"")
+let ``Schema qualified names are parsed correctly`` () =
+    Assert.Equal<string list>([ "APP" ], test pSchemaQualifiedName "app")
+    Assert.Equal<string list>([ "APP"; "USERS" ], test pSchemaQualifiedName "app.users")
+    Assert.Equal<string list>([ "CAT"; "APP"; "USERS" ], test pSchemaQualifiedName "cat.app.users")
+    Assert.Equal<string list>([ "APP"; "USERS" ], test pSchemaQualifiedName "app . users")
+    Assert.Equal<string list>([ "APP"; "USERS" ], test pSchemaQualifiedName "app.\"USERS\"")
 
 [<Fact>]
-let ``Large exponent literals do not overflow`` () =
-    let result = test pUnsignedNumericLiteral "1E400"
-    Assert.True(result > 0m)
-
-[<Fact>]
-let ``Invalid time seconds fail cleanly`` () =
-    match run (pTimeLiteral .>> eof) "TIME '12:00:00.5.5'" with
-    | Failure _ -> ()
-    | Success _ -> Assert.Fail("Expected TIME literal with invalid seconds to fail")
-
-[<Fact>]
-let ``Boolean literals are parsed correctly`` () =
-    Assert.Equal(Some true, test pBooleanLiteral "TRUE")
-    Assert.Equal(Some false, test pBooleanLiteral "FALSE")
-    Assert.Equal(None, test pBooleanLiteral "UNKNOWN")
+let ``Schema qualified names with reserved words are rejected`` () =
+    testFails pSchemaQualifiedName "app.SELECT"
+    testFails pSchemaQualifiedName "SELECT.app"

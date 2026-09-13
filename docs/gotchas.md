@@ -387,3 +387,13 @@ pattern (which ignores `Pos`) or assert on individual fields.
 `RuleNumberingTests` extracts citations with `(\d+\.\d+)\s*<([^<>]+)>`. Capturing
 `(\s*<…>)` and stripping with `Substring(1, len-2)` drops the closing `>` and
 silently skips every citation, so the test passes vacuously.
+
+### Reordering definitions means reordering their tests
+
+`AGENTS.md` requires test functions to follow the source definitions they
+exercise (by `SqlParser.fsproj` compile order, then definition order). Because
+the order is review-only, a definition reorder compiles and passes without any
+warning while the tests silently drift out of order. When moving a definition,
+move the matching test block in the same change; reordering a whole file is
+safest done with a block-level rewrite that re-inserts every test exactly once
+(an insert+delete pair applied out of order can duplicate or drop a block).
