@@ -468,7 +468,7 @@ module QueryParser =
                           let pos' = { Line = pos.Line; Column = pos.Column }
 
                           let baseTable =
-                              { TableSource.Kind = Table(name, alias)
+                              { TableSource.Kind = TableSourceKind.Table(name, alias)
                                 Pos = pos' }
 
                           match sysTime with

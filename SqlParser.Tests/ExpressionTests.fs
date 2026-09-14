@@ -98,7 +98,7 @@ let ``Literal expressions verification`` () =
 [<Fact>]
 let ``General value specification keyword forms verification`` () =
     match parse "SELECT CURRENT_USER" with
-    | CurrentUser -> ()
+    | ExpressionKind.CurrentUser -> ()
     | res -> Assert.Fail(sprintf "Expected CurrentUser, got %A" res)
 
     match parse "SELECT SESSION_USER" with
@@ -130,7 +130,7 @@ let ``General value specification keyword forms verification`` () =
     | res -> Assert.Fail(sprintf "Expected CurrentPath, got %A" res)
 
     match parse "SELECT CURRENT_ROLE" with
-    | CurrentRole -> ()
+    | ExpressionKind.CurrentRole -> ()
     | res -> Assert.Fail(sprintf "Expected CurrentRole, got %A" res)
 
     match parse "SELECT CURRENT_DEFAULT_TRANSFORM_GROUP" with

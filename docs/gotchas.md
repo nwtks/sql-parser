@@ -354,3 +354,14 @@ drift. When moving a definition, move the matching test block in the same change
 reordering a whole file is safest done with a block-level rewrite that re-inserts
 every test exactly once (an insert+delete pair applied out of order can duplicate
 or drop a block).
+
+### `ROUTINE` is a regular identifier - try the designator branch first
+
+In `<object name>` (12.3) the kind branch (`opt <object kind> <qualified name>`)
+accepts `ROUTINE` as a plain name because `ROUTINE` is a non-reserved word.
+When the routine-designator branch comes second, `GRANT EXECUTE ON ROUTINE add TO u`
+therefore parses `ROUTINE` as the object name, fails at the missing `TO` (the
+whole `attempt`ed branch backtracks) and the error surfaces as
+`Expecting: . or TO`. The routine branch (`<routine type> <qualified name>`,
+with the `<routine type>` keyword mandatory) must come first - `pRoutineType`
+fails on ordinary names, so plain names still reach the kind branch.

@@ -187,7 +187,7 @@ let ``SELECT INTO verification`` () =
     | SelectInto { IsDistinct = false
                    Columns = [ Column({ Kind = Identifier "A" }, None); Column({ Kind = Identifier "B" }, None) ]
                    Into = [ { Kind = Identifier "X" }; { Kind = Identifier "Y" } ]
-                   From = [ { Kind = Table({ Kind = Identifier "T" }, None) } ]
+                   From = [ { Kind = TableSourceKind.Table({ Kind = Identifier "T" }, None) } ]
                    Where = Some _ } -> ()
     | res -> Assert.Fail(sprintf "Expected SelectInto, got %A" res)
 
@@ -197,7 +197,7 @@ let ``SELECT DISTINCT INTO verification`` () =
     | SelectInto { IsDistinct = true
                    Columns = [ Column({ Kind = Identifier "A" }, None) ]
                    Into = [ { Kind = Identifier "X" } ]
-                   From = [ { Kind = Table({ Kind = Identifier "T" }, None) } ] } -> ()
+                   From = [ { Kind = TableSourceKind.Table({ Kind = Identifier "T" }, None) } ] } -> ()
     | res -> Assert.Fail(sprintf "Expected SelectInto DISTINCT, got %A" res)
 
 [<Fact>]

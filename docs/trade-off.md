@@ -201,10 +201,18 @@ dialects:
   `CreateTable`/`CreateView`/`AlterTable` are modelled. `DROP ROLE` is therefore
   the single `StatementKind.DropRole`. The payload is `Expression * bool` except
   `DropRole`, `DropCharacterSet`, `DropTransliteration` and `DropTrigger`
-  (`Expression`) and `DropAssertion` (`bool option`). `GRANT`/`REVOKE` distinguish
-  privileges from roles because the `ON` clause and `WITH GRANT OPTION` vs
-  `WITH ADMIN OPTION` differ; `GRANTED BY` is parsed and discarded, and
-  `PrivilegeSelectTarget` separates method lists from column lists.
+  (`Expression`) and `DropAssertion` (`bool option`). `GRANT`/`REVOKE` follow the
+  same flat-case model: one `StatementKind` case per 12.3 `<object name>` kind
+  (`GrantTable`, `GrantDomain`, …, plus `GrantObject`/`RevokeObject` for the
+  optional `[ TABLE ]` form and `GrantRoutine`/`RevokeRoutine` for the
+  `<specific routine designator>` form, which keeps the 10.6 `<routine type>`)
+  wrapping a shared `GrantPrivilegeStatement` / `RevokePrivilegeStatement` record;
+  `GrantRoles` / `RevokeRoles` stay separate because `WITH GRANT OPTION` vs
+  `WITH ADMIN OPTION` differ. `GRANTED BY` / `WITH ADMIN` keep the 12.3 `<grantor>`
+  as `Grantor = CurrentUser | CurrentRole | AuthorizationId` — the grammar allows
+  only the two keywords, but the parser also accepts an `<authorization identifier>`
+  in the `<grantor>` position (over-permissive). `PrivilegeSelectTarget` separates
+  method lists from column lists.
 
 ## Routines, triggers and types
 
@@ -228,8 +236,9 @@ dialects:
   `PARAMETER STYLE`.
 - **`<specific routine designator>` is a record** (`IsSpecific`, `RoutineType`,
   `Name`, `DataTypeList`, `ForType`) so it is round-trippable across its seven AST
-  positions; `RoutineType` stays an option, and `pRoutineDesignatorWithType` (an
-  `Expression`) is still used for `GRANT ... ON FUNCTION f`.
+  positions; `RoutineType` stays an option, and `pRoutineDesignatorWithType` is now
+  only used by `DROP ... <routine>` — the `GRANT`/`REVOKE` object name uses a local
+  `pRoutineType .>>. <qualified name>` parser that keeps the `<routine type>`.
 - **Parameter and return types.** `ParameterType` (`DataTypeParameter |
   GenericTableParameter | DescriptorParameter`) and `ReturnsType` (`ReturnsData |
   ReturnsTable | ReturnsOnlyPassThrough`) make return tables, result casts and

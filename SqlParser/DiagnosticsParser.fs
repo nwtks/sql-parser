@@ -51,10 +51,10 @@ module DiagnosticsParser =
               pKeyword "TRIGGER_SCHEMA" ]
 
     // 23.1 <statement information item> ::= <simple target specification> <equals operator> <statement information item name>
-    // 23.1 <condition information item> ::= <simple target specification> <equals operator> <condition information item name>
     let pStatementInfoItem =
         pQualifiedNameExpr .>> token (pstring "=") .>>. pStatementInfoItemName
 
+    // 23.1 <condition information item> ::= <simple target specification> <equals operator> <condition information item name>
     let pConditionInfoItem =
         pQualifiedNameExpr .>> token (pstring "=") .>>. pConditionInfoItemName
 

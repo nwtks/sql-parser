@@ -292,9 +292,9 @@ module ExpressionParser =
               pKeyword "CURRENT_DEFAULT_TRANSFORM_GROUP" >>% CurrentDefaultTransformGroup
               |> withExprPosition
               pKeyword "CURRENT_PATH" >>% CurrentPath |> withExprPosition
-              pKeyword "CURRENT_ROLE" >>% CurrentRole |> withExprPosition
+              pKeyword "CURRENT_ROLE" >>% ExpressionKind.CurrentRole |> withExprPosition
               pKeyword "CURRENT_SCHEMA" >>% CurrentSchema |> withExprPosition
-              pKeyword "CURRENT_USER" >>% CurrentUser |> withExprPosition
+              pKeyword "CURRENT_USER" >>% ExpressionKind.CurrentUser |> withExprPosition
               pKeyword "SESSION_USER" >>% SessionUser |> withExprPosition
               pKeyword "SYSTEM_USER" >>% SystemUser |> withExprPosition
               pKeyword "USER" >>% User |> withExprPosition

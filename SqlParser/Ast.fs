@@ -1726,17 +1726,50 @@ and RevokeOptionExtension =
     | GrantOptionFor
     | HierarchyOptionFor
 
-and GrantStatement =
-    // 12.2: (privileges, object name, grantees, withHierarchyOption, withGrantOption)
-    | GrantPrivileges of Privileges * Expression * Expression list * bool * bool
-    // 12.5: (roles, grantees, withAdminOption)
-    | GrantRoles of Expression list * Expression list * bool
+// 12.3 <grantor> ::= CURRENT_USER | CURRENT_ROLE
+// The grammar only allows the two keywords in the <grantor> position; the parser also
+// accepts an <authorization identifier> there (over-permissive — see docs/trade-off.md),
+// which AuthorizationId carries.
+and Grantor =
+    | AuthorizationId of Expression
+    | CurrentUser
+    | CurrentRole
 
-and RevokeStatement =
-    // 12.7: (privileges, object name, grantees, option, cascade)
-    | RevokePrivileges of Privileges * Expression * Expression list * RevokeOptionExtension * bool
-    // 12.7: (roles, grantees, adminOptionFor, cascade)
-    | RevokeRoles of Expression list * Expression list * bool * bool
+// 12.3 <object name> — the kind keyword of each qualified-name alternative. TABLE is
+// optional in the grammar ([ TABLE ] <table name>); the other six are mandatory. The
+// <specific routine designator> alternative is not a kind keyword — it is modelled by
+// StatementKind.GrantRoutine / RevokeRoutine (carrying the 10.6 <routine type>).
+and ObjectKind =
+    | Table
+    | Domain
+    | Collation
+    | CharacterSet
+    | Translation
+    | Type
+    | Sequence
+
+// 12.2 <grant privilege statement> — payload shared by the flat StatementKind cases
+// (GrantObject / GrantTable / … / GrantRoutine), which encode the 12.3 <object name> kind.
+and GrantPrivilegeStatement =
+    { Privileges: Privileges
+      Object: Expression
+      Grantees: Expression list
+      WithHierarchyOption: bool
+      WithGrantOption: bool
+      // 12.3 <grantor> — None when the GRANTED BY clause is absent
+      Grantor: Grantor option }
+
+// 12.7 <revoke privilege statement> — payload shared by the flat StatementKind cases
+// (RevokeObject / RevokeTable / … / RevokeRoutine).
+and RevokePrivilegeStatement =
+    { Privileges: Privileges
+      Object: Expression
+      Grantees: Expression list
+      Option: RevokeOptionExtension
+      // 12.7 <revoke privilege statement> — GRANTED BY <grantor>
+      Grantor: Grantor option
+      // <drop behavior> (true = CASCADE, false = RESTRICT)
+      DropBehavior: bool }
 
 // 14.1 <declare cursor> ::= DECLARE <cursor name> <cursor properties> FOR <cursor specification>
 // 14.3 <cursor specification> ::= <query expression> [ <updatability clause> ]
@@ -2098,14 +2131,38 @@ and StatementKind =
     | AlterSequence of Expression * SequenceOption list
     // 11.74 <drop sequence generator statement>
     | DropSequence of Expression * bool
-    // 12.1 <grant statement>
-    | Grant of GrantStatement
-    // 12.4 <role definition> ::= CREATE ROLE <role name>
-    | CreateRole of Expression
+    // 12.2 <grant privilege statement> — one flat StatementKind case per 12.3 <object name>
+    // alternative: the optional-kind form (GrantObject), one case per kind keyword and the
+    // <specific routine designator> form (GrantRoutine, carrying the 10.6 <routine type>).
+    // The payload is the shared GrantPrivilegeStatement record.
+    | GrantObject of GrantPrivilegeStatement
+    | GrantTable of GrantPrivilegeStatement
+    | GrantDomain of GrantPrivilegeStatement
+    | GrantCollation of GrantPrivilegeStatement
+    | GrantCharacterSet of GrantPrivilegeStatement
+    | GrantTranslation of GrantPrivilegeStatement
+    | GrantType of GrantPrivilegeStatement
+    | GrantSequence of GrantPrivilegeStatement
+    | GrantRoutine of RoutineType * GrantPrivilegeStatement
+    // 12.4 <role definition> ::= CREATE ROLE <role name> [ WITH ADMIN <grantor> ]
+    | CreateRole of Expression * Grantor option
+    // 12.5 <grant role statement>
+    | GrantRoles of Expression list * Expression list * bool * Grantor option
     // 12.6 <drop role statement> ::= DROP ROLE <role name>
     | DropRole of Expression
-    // 12.7 <revoke statement>
-    | Revoke of RevokeStatement
+    // 12.7 <revoke privilege statement> — flat cases mirroring the GRANT side; the payload
+    // is the shared RevokePrivilegeStatement record.
+    | RevokeObject of RevokePrivilegeStatement
+    | RevokeTable of RevokePrivilegeStatement
+    | RevokeDomain of RevokePrivilegeStatement
+    | RevokeCollation of RevokePrivilegeStatement
+    | RevokeCharacterSet of RevokePrivilegeStatement
+    | RevokeTranslation of RevokePrivilegeStatement
+    | RevokeType of RevokePrivilegeStatement
+    | RevokeSequence of RevokePrivilegeStatement
+    | RevokeRoutine of RoutineType * RevokePrivilegeStatement
+    // 12.7 <revoke role statement>
+    | RevokeRoles of Expression list * Expression list * bool * Grantor option * bool
     // 14.1 <declare cursor>
     | DeclareCursor of DeclareCursorStatement
     // 14.4 <open statement>

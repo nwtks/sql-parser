@@ -6,11 +6,14 @@ open SqlParser.ExpressionParser
 open SqlParser.SchemaParser
 
 module AccessControlParser =
-    // 12.2 <grantor> ::= CURRENT_USER | CURRENT_ROLE
+    // 12.3 <grantor> ::= CURRENT_USER | CURRENT_ROLE
+    // (an <authorization identifier> is also accepted in the <grantor> position — see
+    //  docs/trade-off.md; the keywords are reserved words, so pIdentifierExpr fails on
+    //  them and the keyword alternatives are reachable)
     let pGrantor =
-        pIdentifierExpr |>> ignore
-        <|> (pKeyword "CURRENT_USER" |>> ignore)
-        <|> (pKeyword "CURRENT_ROLE" |>> ignore)
+        pIdentifierExpr |>> Grantor.AuthorizationId
+        <|> (pKeyword "CURRENT_USER" >>% Grantor.CurrentUser)
+        <|> (pKeyword "CURRENT_ROLE" >>% Grantor.CurrentRole)
 
     // 12.3 <privileges> ::= ALL PRIVILEGES | <action> [ { <comma> <action> }... ]
     // The three 12.3 sub-rules below are local because <privileges> is their only consumer.
@@ -54,24 +57,36 @@ module AccessControlParser =
             [ attempt (pKeyword "ALL" >>. pKeyword "PRIVILEGES" >>% Privileges.AllPrivileges)
               attempt (sepBy1 pPrivilegeAction (token (pstring ",")) |>> Privileges.Actions) ]
 
-    // 12.3 <object name> / 12.2 <grant privilege statement> — <object name> ::= [ <object kind> ] <qualified name> | <specific routine designator>
+    // 12.3 <object name> ::= [ TABLE ] <table name> | DOMAIN <domain name> | COLLATION <collation name>
+    //     | CHARACTER SET <character set name> | TRANSLATION <transliteration name>
+    //     | TYPE <schema-resolved user-defined type name> | SEQUENCE <sequence generator name>
+    //     | <specific routine designator>
+    // Returns the kind keyword (None = the optional [ TABLE ] is absent), the 10.6 <routine type>
+    // of the routine-designator alternative (None = absent) and the qualified name. The two
+    // options are mutually exclusive; pGrantStatement / pRevokeStatement turn them into the
+    // flat StatementKind cases.
     let pObjectName =
         let pKind =
             choice
-                [ pKeyword "TABLE"
-                  pKeyword "DOMAIN"
-                  pKeyword "COLLATION"
-                  attempt (pKeyword "CHARACTER" >>. pKeyword "SET")
-                  pKeyword "TYPE"
-                  pKeyword "SEQUENCE"
-                  pKeyword "TRANSLATION" ]
+                [ pKeyword "TABLE" >>% ObjectKind.Table
+                  pKeyword "DOMAIN" >>% ObjectKind.Domain
+                  pKeyword "COLLATION" >>% ObjectKind.Collation
+                  attempt (pKeyword "CHARACTER" >>. pKeyword "SET" >>% ObjectKind.CharacterSet)
+                  pKeyword "TRANSLATION" >>% ObjectKind.Translation
+                  pKeyword "TYPE" >>% ObjectKind.Type
+                  pKeyword "SEQUENCE" >>% ObjectKind.Sequence ]
 
+        // The <specific routine designator> branch must be tried first: ROUTINE is a
+        // non-reserved word, so the kind branch below would otherwise consume it as a
+        // plain <qualified name>. A local variant of pRoutineDesignatorWithType (which
+        // pDropStatement shares) is used so the <routine type> is kept in the AST.
         choice
-            [ attempt (opt pKind >>. pQualifiedNameExpr)
-              attempt pRoutineDesignatorWithType ]
+            [ attempt (pRoutineType .>>. pQualifiedNameExpr |>> fun (rt, name) -> (None, Some rt, name))
+              attempt (opt pKind .>>. pQualifiedNameExpr |>> fun (kind, name) -> (kind, None, name)) ]
 
     // 12.2 <grant privilege statement> ::= GRANT <privileges> TO <grantee> [ { , <grantee> }... ]
     //     [ WITH HIERARCHY OPTION ] [ WITH GRANT OPTION ] [ GRANTED BY <grantor> ]
+    // (12.3 <privileges> ::= <object privileges> ON <object name>)
     let pGrantStatement =
         pKeyword "GRANT"
         >>. choice
@@ -81,14 +96,25 @@ module AccessControlParser =
                       .>>. opt (attempt (pKeyword "WITH" >>. pKeyword "HIERARCHY" >>. pKeyword "OPTION"))
                       .>>. opt (attempt (pKeyword "WITH" >>. pKeyword "GRANT" >>. pKeyword "OPTION"))
                       .>>. opt (attempt (pKeyword "GRANTED" >>. pKeyword "BY" >>. pGrantor))
-                      |>> fun (((((privs, obj), grantees), withHier), withOpt), _) ->
-                          GrantStatement.GrantPrivileges(
-                              privs,
-                              obj,
-                              grantees,
-                              Option.isSome withHier,
-                              Option.isSome withOpt
-                          )
+                      |>> fun (((((privs, (kind, rt, name)), grantees), withHier), withOpt), grantor) ->
+                          let stmt: GrantPrivilegeStatement =
+                              { Privileges = privs
+                                Object = name
+                                Grantees = grantees
+                                WithHierarchyOption = Option.isSome withHier
+                                WithGrantOption = Option.isSome withOpt
+                                Grantor = grantor }
+
+                          match kind, rt with
+                          | _, Some rt -> GrantRoutine(rt, stmt)
+                          | Some ObjectKind.Table, _ -> GrantTable stmt
+                          | Some ObjectKind.Domain, _ -> GrantDomain stmt
+                          | Some ObjectKind.Collation, _ -> GrantCollation stmt
+                          | Some ObjectKind.CharacterSet, _ -> GrantCharacterSet stmt
+                          | Some ObjectKind.Translation, _ -> GrantTranslation stmt
+                          | Some ObjectKind.Type, _ -> GrantType stmt
+                          | Some ObjectKind.Sequence, _ -> GrantSequence stmt
+                          | None, None -> GrantObject stmt
                   )
                   // 12.5 <grant role statement> ::= GRANT <role granted> [ { , <role granted> }... ]
                   //     TO <grantee> [ { , <grantee> }... ] [ WITH ADMIN OPTION ] [ GRANTED BY <grantor> ]
@@ -97,16 +123,15 @@ module AccessControlParser =
                       .>>. sepBy1 pIdentifierExpr (token (pstring ","))
                       .>>. opt (attempt (pKeyword "WITH" >>. pKeyword "ADMIN" >>. pKeyword "OPTION"))
                       .>>. opt (attempt (pKeyword "GRANTED" >>. pKeyword "BY" >>. pGrantor))
-                      |>> fun (((roles, grantees), withAdm), _) ->
-                          GrantStatement.GrantRoles(roles, grantees, Option.isSome withAdm)
+                      |>> fun (((roles, grantees), withAdm), grantor) ->
+                          GrantRoles(roles, grantees, Option.isSome withAdm, grantor)
                   ) ]
-        |>> Grant
 
     // 12.4 <role definition> ::= CREATE ROLE <role name> [ WITH ADMIN <grantor> ]
     let pCreateRoleStatement =
         pKeyword "CREATE" >>. pKeyword "ROLE" >>. pIdentifierExpr
         .>>. opt (pKeyword "WITH" >>. pKeyword "ADMIN" >>. pGrantor)
-        |>> fun (name, _) -> CreateRole name
+        |>> fun (name, grantor) -> CreateRole(name, grantor)
 
     // 12.7 <revoke statement> ::= <revoke privilege statement> | <revoke role statement>
     // 12.7 <revoke option extension> ::= GRANT OPTION FOR | HIERARCHY OPTION FOR
@@ -120,6 +145,7 @@ module AccessControlParser =
 
     // 12.7 <revoke privilege statement> ::= REVOKE [ <revoke option extension> ] <privileges>
     //     FROM <grantee> [ { , <grantee> }... ] [ GRANTED BY <grantor> ] <drop behavior>
+    // (12.3 <privileges> ::= <object privileges> ON <object name>)
     let pRevokeStatement =
         pKeyword "REVOKE"
         >>. choice
@@ -130,14 +156,25 @@ module AccessControlParser =
                       .>>. sepBy1 pIdentifierExpr (token (pstring ","))
                       .>>. opt (attempt (pKeyword "GRANTED" >>. pKeyword "BY" >>. pGrantor))
                       .>>. pDropBehavior
-                      |>> fun (((((optOpt, privs), obj), grantees), _), cascade) ->
-                          RevokeStatement.RevokePrivileges(
-                              privs,
-                              obj,
-                              grantees,
-                              Option.defaultValue NoOption optOpt,
-                              cascade
-                          )
+                      |>> fun (((((optOpt, privs), (kind, rt, name)), grantees), grantor), cascade) ->
+                          let stmt: RevokePrivilegeStatement =
+                              { Privileges = privs
+                                Object = name
+                                Grantees = grantees
+                                Option = Option.defaultValue NoOption optOpt
+                                Grantor = grantor
+                                DropBehavior = cascade }
+
+                          match kind, rt with
+                          | _, Some rt -> RevokeRoutine(rt, stmt)
+                          | Some ObjectKind.Table, _ -> RevokeTable stmt
+                          | Some ObjectKind.Domain, _ -> RevokeDomain stmt
+                          | Some ObjectKind.Collation, _ -> RevokeCollation stmt
+                          | Some ObjectKind.CharacterSet, _ -> RevokeCharacterSet stmt
+                          | Some ObjectKind.Translation, _ -> RevokeTranslation stmt
+                          | Some ObjectKind.Type, _ -> RevokeType stmt
+                          | Some ObjectKind.Sequence, _ -> RevokeSequence stmt
+                          | None, None -> RevokeObject stmt
                   )
                   // 12.7 <revoke role statement> ::= REVOKE [ ADMIN OPTION FOR ] <role revoked>
                   //     [ { , <role revoked> }... ] FROM <grantee> [ { , <grantee> }... ]
@@ -149,7 +186,6 @@ module AccessControlParser =
                       .>>. sepBy1 pIdentifierExpr (token (pstring ","))
                       .>>. opt (attempt (pKeyword "GRANTED" >>. pKeyword "BY" >>. pGrantor))
                       .>>. pDropBehavior
-                      |>> fun ((((adminFor, roles), grantees), _), cascade) ->
-                          RevokeStatement.RevokeRoles(roles, grantees, Option.defaultValue false adminFor, cascade)
+                      |>> fun ((((adminFor, roles), grantees), grantor), cascade) ->
+                          RevokeRoles(roles, grantees, Option.defaultValue false adminFor, grantor, cascade)
                   ) ]
-        |>> Revoke

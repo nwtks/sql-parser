@@ -268,8 +268,8 @@ module SchemaParser =
               attempt (pSignedNumericLiteral |>> Number |>> Literal |> withExprPosition)
               attempt pDateTimeValueFunction
               attempt (pKeyword "USER" >>% User |> withExprPosition)
-              attempt (pKeyword "CURRENT_USER" >>% CurrentUser |> withExprPosition)
-              attempt (pKeyword "CURRENT_ROLE" >>% CurrentRole |> withExprPosition)
+              attempt (pKeyword "CURRENT_USER" >>% ExpressionKind.CurrentUser |> withExprPosition)
+              attempt (pKeyword "CURRENT_ROLE" >>% ExpressionKind.CurrentRole |> withExprPosition)
               attempt (pKeyword "SESSION_USER" >>% SessionUser |> withExprPosition)
               attempt (pKeyword "SYSTEM_USER" >>% SystemUser |> withExprPosition)
               attempt (pKeyword "CURRENT_CATALOG" >>% CurrentCatalog |> withExprPosition)

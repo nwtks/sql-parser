@@ -227,7 +227,7 @@ let ``TABLESAMPLE SYSTEM verification`` () =
     match parse "SELECT * FROM users TABLESAMPLE SYSTEM (10)" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = TableSample({ Kind = Table({ Kind = Identifier "USERS" }, None) },
+        | [ { Kind = TableSample({ Kind = TableSourceKind.Table({ Kind = Identifier "USERS" }, None) },
                                  "SYSTEM",
                                  { Kind = Literal(Number 10m) },
                                  None) } ] -> ()
@@ -243,7 +243,7 @@ let ``TABLESAMPLE verification`` () =
     match parse "SELECT * FROM users TABLESAMPLE BERNOULLI (10)" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = TableSample({ Kind = Table({ Kind = Identifier "USERS" }, None) },
+        | [ { Kind = TableSample({ Kind = TableSourceKind.Table({ Kind = Identifier "USERS" }, None) },
                                  "BERNOULLI",
                                  { Kind = Literal(Number 10m) },
                                  None) } ] -> ()
@@ -255,7 +255,8 @@ let ``FOR SYSTEM_TIME verification`` () =
     match parse "SELECT * FROM t FOR SYSTEM_TIME AS OF '2020-01-01'" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = SystemTime({ Kind = Table({ Kind = Identifier "T" }, None) }, SystemTimeSpec.AsOf _) } ] -> ()
+        | [ { Kind = SystemTime({ Kind = TableSourceKind.Table({ Kind = Identifier "T" }, None) }, SystemTimeSpec.AsOf _) } ] ->
+            ()
         | res -> Assert.Fail(sprintf "Expected SystemTime AsOf, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
@@ -635,14 +636,14 @@ let ``TableSource types verification`` () =
     match parse "SELECT * FROM users" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = Table({ Kind = Identifier "USERS" }, None) } ] -> ()
+        | [ { Kind = TableSourceKind.Table({ Kind = Identifier "USERS" }, None) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected Table, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
     match parse "SELECT * FROM users AS u" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = Table({ Kind = Identifier "USERS" }, Some { Kind = Identifier "U" }) } ] -> ()
+        | [ { Kind = TableSourceKind.Table({ Kind = Identifier "USERS" }, Some { Kind = Identifier "U" }) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected Table, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
@@ -660,7 +661,7 @@ let ``Schema-qualified table name verification`` () =
     match parse "SELECT * FROM app.users" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = Table({ Kind = ColumnReference [ "APP"; "USERS" ] }, None) } ] -> ()
+        | [ { Kind = TableSourceKind.Table({ Kind = ColumnReference [ "APP"; "USERS" ] }, None) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected schema-qualified table, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
@@ -1023,8 +1024,8 @@ let ``Comma-separated FROM list verification`` () =
     match parse "SELECT * FROM users, orders" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = Table({ Kind = Identifier "USERS" }, None) }
-            { Kind = Table({ Kind = Identifier "ORDERS" }, None) } ] -> ()
+        | [ { Kind = TableSourceKind.Table({ Kind = Identifier "USERS" }, None) }
+            { Kind = TableSourceKind.Table({ Kind = Identifier "ORDERS" }, None) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected two tables, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 

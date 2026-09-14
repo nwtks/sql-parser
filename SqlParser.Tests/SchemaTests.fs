@@ -119,7 +119,7 @@ let ``schema elements are restricted to the CREATE family and GRANT`` () =
     | res -> Assert.Fail(sprintf "Expected a view element, got %A" res)
 
     match parse "CREATE SCHEMA s GRANT SELECT ON TABLE t TO alice" with
-    | CreateSchema { Elements = [ Grant _ ] } -> ()
+    | CreateSchema { Elements = [ GrantTable _ ] } -> ()
     | res -> Assert.Fail(sprintf "Expected a grant element, got %A" res)
 
     // 11.1 <schema element> — DROP / ALTER / TRUNCATE / REVOKE are not schema elements
