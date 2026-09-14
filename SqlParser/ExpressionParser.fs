@@ -1016,8 +1016,10 @@ module ExpressionParser =
               |>> fun () -> NumericValueFunction(NumericFunction.MatchNumber, []) ]
         |> withExprPosition
 
-    // 6.30 <regex occurrences function> / <regex position expression>
-    // 6.32 <regex substring function> / <regex transliteration>
+    // 6.30 <regex occurrences function>
+    // 6.30 <regex position expression>
+    // 6.32 <regex substring function>
+    // 6.32 <regex transliteration>
     // — all four share the argument shape
     //   <pattern> [ FLAG <flag> ] IN <subject> [ WITH <replacement> ] [ FROM <start> ]
     //   [ USING <char length units> ] [ OCCURRENCE <occurrence> ] [ GROUP <capture group> ]
@@ -1488,7 +1490,9 @@ module ExpressionParser =
         // reserved word (EXISTS, UNIQUE, PERIOD, VALUE_OF, SELECT, ...) is rejected,
         // and the dedicated parsers for the special forms are tried before this one.
         let functionKeywords =
-            [ // <aggregate function> / <binary set function> / <hypothetical set function>
+            [ // <aggregate function>
+              // <binary set function>
+              // <hypothetical set function>
               yield! aggregateFunctionKeywords
               // <inverse distribution function type>
               "PERCENTILE_CONT"

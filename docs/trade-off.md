@@ -196,11 +196,15 @@ dialects:
   has no omitted form). `ONLY ( <table> )` is a pair of flags, and `INSERT` keeps a
   plain name (14.11 has no `ONLY` form).
 - **`DROP`, `GRANT` and `REVOKE`.** One drop parser covers every `DROP` in the
-  grammar; `DropStatement` is `Expression * bool` except `DropRole` and
-  `DropAssertion` (`bool option`). `GRANT`/`REVOKE` distinguish privileges from
-  roles because the `ON` clause and `WITH GRANT OPTION` vs `WITH ADMIN OPTION`
-  differ; `GRANTED BY` is parsed and discarded, and `PrivilegeSelectTarget`
-  separates method lists from column lists.
+  grammar; each variant is a flat `StatementKind` case (`DropTable`, `DropView`,
+  `DropSchema`, …) rather than a nested `DropStatement` DU, matching how
+  `CreateTable`/`CreateView`/`AlterTable` are modelled. `DROP ROLE` is therefore
+  the single `StatementKind.DropRole`. The payload is `Expression * bool` except
+  `DropRole`, `DropCharacterSet`, `DropTransliteration` and `DropTrigger`
+  (`Expression`) and `DropAssertion` (`bool option`). `GRANT`/`REVOKE` distinguish
+  privileges from roles because the `ON` clause and `WITH GRANT OPTION` vs
+  `WITH ADMIN OPTION` differ; `GRANTED BY` is parsed and discarded, and
+  `PrivilegeSelectTarget` separates method lists from column lists.
 
 ## Routines, triggers and types
 

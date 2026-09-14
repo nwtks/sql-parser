@@ -1630,51 +1630,51 @@ let ``ALTER TRANSFORM verification`` () =
 [<Fact>]
 let ``DROP statements verification`` () =
     match parse "DROP TABLE users CASCADE" with
-    | Drop(DropTable({ Kind = Identifier "USERS" }, true)) -> ()
+    | DropTable({ Kind = Identifier "USERS" }, true) -> ()
     | res -> Assert.Fail(sprintf "Expected DropTable CASCADE, got %A" res)
 
     match parse "DROP TABLE users RESTRICT" with
-    | Drop(DropTable({ Kind = Identifier "USERS" }, false)) -> ()
+    | DropTable({ Kind = Identifier "USERS" }, false) -> ()
     | res -> Assert.Fail(sprintf "Expected DropTable RESTRICT, got %A" res)
 
     match parse "DROP VIEW my_view CASCADE" with
-    | Drop(DropView({ Kind = Identifier "MY_VIEW" }, true)) -> ()
+    | DropView({ Kind = Identifier "MY_VIEW" }, true) -> ()
     | res -> Assert.Fail(sprintf "Expected DropView CASCADE, got %A" res)
 
     match parse "DROP VIEW my_view RESTRICT" with
-    | Drop(DropView({ Kind = Identifier "MY_VIEW" }, false)) -> ()
+    | DropView({ Kind = Identifier "MY_VIEW" }, false) -> ()
     | res -> Assert.Fail(sprintf "Expected DropView RESTRICT, got %A" res)
 
     match parse "DROP SEQUENCE order_seq CASCADE" with
-    | Drop(DropSequence({ Kind = Identifier "ORDER_SEQ" }, true)) -> ()
+    | DropSequence({ Kind = Identifier "ORDER_SEQ" }, true) -> ()
     | res -> Assert.Fail(sprintf "Expected DropSequence CASCADE, got %A" res)
 
     match parse "DROP SEQUENCE order_seq RESTRICT" with
-    | Drop(DropSequence({ Kind = Identifier "ORDER_SEQ" }, false)) -> ()
+    | DropSequence({ Kind = Identifier "ORDER_SEQ" }, false) -> ()
     | res -> Assert.Fail(sprintf "Expected DropSequence RESTRICT, got %A" res)
 
     match parse "DROP ROLE admin" with
-    | Drop(DropStatement.DropRole { Kind = Identifier "ADMIN" }) -> ()
+    | DropRole { Kind = Identifier "ADMIN" } -> ()
     | res -> Assert.Fail(sprintf "Expected DropRole, got %A" res)
 
 [<Fact>]
 let ``DROP SCHEMA verification`` () =
     match parse "DROP SCHEMA sales CASCADE" with
-    | Drop(DropSchema({ Kind = Identifier "SALES" }, true)) -> ()
+    | DropSchema({ Kind = Identifier "SALES" }, true) -> ()
     | res -> Assert.Fail(sprintf "Expected DropSchema CASCADE, got %A" res)
 
     match parse "DROP SCHEMA sales RESTRICT" with
-    | Drop(DropSchema({ Kind = Identifier "SALES" }, false)) -> ()
+    | DropSchema({ Kind = Identifier "SALES" }, false) -> ()
     | res -> Assert.Fail(sprintf "Expected DropSchema RESTRICT, got %A" res)
 
 [<Fact>]
 let ``DROP DOMAIN verification`` () =
     match parse "DROP DOMAIN d CASCADE" with
-    | Drop(DropDomain({ Kind = Identifier "D" }, true)) -> ()
+    | DropDomain({ Kind = Identifier "D" }, true) -> ()
     | res -> Assert.Fail(sprintf "Expected DropDomain CASCADE, got %A" res)
 
     match parse "DROP DOMAIN d RESTRICT" with
-    | Drop(DropDomain({ Kind = Identifier "D" }, false)) -> ()
+    | DropDomain({ Kind = Identifier "D" }, false) -> ()
     | res -> Assert.Fail(sprintf "Expected DropDomain RESTRICT, got %A" res)
 
     parseFails "DROP DOMAIN d"
@@ -1682,43 +1682,43 @@ let ``DROP DOMAIN verification`` () =
 [<Fact>]
 let ``DROP CHARACTER SET verification`` () =
     match parse "DROP CHARACTER SET utf8" with
-    | Drop(DropCharacterSet { Kind = Identifier "UTF8" }) -> ()
+    | DropCharacterSet { Kind = Identifier "UTF8" } -> ()
     | res -> Assert.Fail(sprintf "Expected DropCharacterSet, got %A" res)
 
 [<Fact>]
 let ``DROP COLLATION verification`` () =
     match parse "DROP COLLATION my_coll CASCADE" with
-    | Drop(DropCollation({ Kind = Identifier "MY_COLL" }, true)) -> ()
+    | DropCollation({ Kind = Identifier "MY_COLL" }, true) -> ()
     | res -> Assert.Fail(sprintf "Expected DropCollation CASCADE, got %A" res)
 
     match parse "DROP COLLATION my_coll RESTRICT" with
-    | Drop(DropCollation({ Kind = Identifier "MY_COLL" }, false)) -> ()
+    | DropCollation({ Kind = Identifier "MY_COLL" }, false) -> ()
     | res -> Assert.Fail(sprintf "Expected DropCollation RESTRICT, got %A" res)
 
 [<Fact>]
 let ``DROP TRANSLATION verification`` () =
     match parse "DROP TRANSLATION tr" with
-    | Drop(DropTransliteration { Kind = Identifier "TR" }) -> ()
+    | DropTransliteration { Kind = Identifier "TR" } -> ()
     | res -> Assert.Fail(sprintf "Expected DropTransliteration, got %A" res)
 
 [<Fact>]
 let ``DROP ASSERTION verification`` () =
     match parse "DROP ASSERTION a CASCADE" with
-    | Drop(DropAssertion({ Kind = Identifier "A" }, Some true)) -> ()
+    | DropAssertion({ Kind = Identifier "A" }, Some true) -> ()
     | res -> Assert.Fail(sprintf "Expected DropAssertion CASCADE, got %A" res)
 
     match parse "DROP ASSERTION a" with
-    | Drop(DropAssertion({ Kind = Identifier "A" }, None)) -> ()
+    | DropAssertion({ Kind = Identifier "A" }, None) -> ()
     | res -> Assert.Fail(sprintf "Expected DropAssertion without behavior, got %A" res)
 
 [<Fact>]
 let ``DROP CAST verification`` () =
     match parse "DROP CAST (INT AS BIGINT) CASCADE" with
-    | Drop(DropCast(Integer, BigInt, true)) -> ()
+    | DropCast(Integer, BigInt, true) -> ()
     | res -> Assert.Fail(sprintf "Expected DropCast CASCADE, got %A" res)
 
     match parse "DROP CAST (VARCHAR(5) AS VARCHAR(10)) RESTRICT" with
-    | Drop(DropCast(Varchar(Some 5), Varchar(Some 10), false)) -> ()
+    | DropCast(Varchar(Some 5), Varchar(Some 10), false) -> ()
     | res -> Assert.Fail(sprintf "Expected DropCast RESTRICT, got %A" res)
 
     parseFails "DROP CAST (INT AS BIGINT)"
@@ -1726,11 +1726,11 @@ let ``DROP CAST verification`` () =
 [<Fact>]
 let ``DROP ORDERING verification`` () =
     match parse "DROP ORDERING FOR my_type CASCADE" with
-    | Drop(DropOrdering({ Kind = Identifier "MY_TYPE" }, true)) -> ()
+    | DropOrdering({ Kind = Identifier "MY_TYPE" }, true) -> ()
     | res -> Assert.Fail(sprintf "Expected DropOrdering CASCADE, got %A" res)
 
     match parse "DROP ORDERING FOR my_type RESTRICT" with
-    | Drop(DropOrdering({ Kind = Identifier "MY_TYPE" }, false)) -> ()
+    | DropOrdering({ Kind = Identifier "MY_TYPE" }, false) -> ()
     | res -> Assert.Fail(sprintf "Expected DropOrdering RESTRICT, got %A" res)
 
     parseFails "DROP ORDERING FOR my_type"
@@ -1738,39 +1738,39 @@ let ``DROP ORDERING verification`` () =
 [<Fact>]
 let ``DROP TRANSFORM verification`` () =
     match parse "DROP TRANSFORM ALL FOR my_type CASCADE" with
-    | Drop(DropTransform({ Kind = Identifier "MY_TYPE" }, TransformDropTarget.AllTransforms, true)) -> ()
+    | DropTransform({ Kind = Identifier "MY_TYPE" }, TransformDropTarget.AllTransforms, true) -> ()
     | res -> Assert.Fail(sprintf "Expected DropTransform ALL CASCADE, got %A" res)
 
     match parse "DROP TRANSFORMS g1 FOR my_type RESTRICT" with
-    | Drop(DropTransform({ Kind = Identifier "MY_TYPE" },
-                         TransformDropTarget.TransformGroup { Kind = Identifier "G1" },
-                         false)) -> ()
+    | DropTransform({ Kind = Identifier "MY_TYPE" },
+                    TransformDropTarget.TransformGroup { Kind = Identifier "G1" },
+                    false) -> ()
     | res -> Assert.Fail(sprintf "Expected DropTransform group RESTRICT, got %A" res)
 
 [<Fact>]
 let ``DROP ROUTINE verification`` () =
     match parse "DROP FUNCTION add CASCADE" with
-    | Drop(DropRoutine({ Kind = Identifier "ADD" }, true)) -> ()
+    | DropRoutine({ Kind = Identifier "ADD" }, true) -> ()
     | res -> Assert.Fail(sprintf "Expected DropRoutine CASCADE, got %A" res)
 
     match parse "DROP PROCEDURE p RESTRICT" with
-    | Drop(DropRoutine({ Kind = Identifier "P" }, false)) -> ()
+    | DropRoutine({ Kind = Identifier "P" }, false) -> ()
     | res -> Assert.Fail(sprintf "Expected DropRoutine RESTRICT, got %A" res)
 
 [<Fact>]
 let ``DROP TRIGGER verification`` () =
     match parse "DROP TRIGGER trg" with
-    | Drop(DropTrigger { Kind = Identifier "TRG" }) -> ()
+    | DropTrigger { Kind = Identifier "TRG" } -> ()
     | res -> Assert.Fail(sprintf "Expected DropTrigger, got %A" res)
 
 [<Fact>]
 let ``DROP TYPE verification`` () =
     match parse "DROP TYPE my_type RESTRICT" with
-    | Drop(DropType({ Kind = Identifier "MY_TYPE" }, false)) -> ()
+    | DropType({ Kind = Identifier "MY_TYPE" }, false) -> ()
     | res -> Assert.Fail(sprintf "Expected DropType RESTRICT, got %A" res)
 
     match parse "DROP TYPE my_type CASCADE" with
-    | Drop(DropType({ Kind = Identifier "MY_TYPE" }, true)) -> ()
+    | DropType({ Kind = Identifier "MY_TYPE" }, true) -> ()
     | res -> Assert.Fail(sprintf "Expected DropType CASCADE, got %A" res)
 
 [<Fact>]

@@ -376,7 +376,8 @@ module QueryParser =
                           Only(name, alias, cols)
                   )
                   |> withTablePosition
-                  // <table function derived table> / <PTF derived table> ::= TABLE ( <expr> )
+                  // 7.6 <table function derived table>
+                  // 7.6 <PTF derived table> ::= TABLE ( <expr> )
                   // A routine invocation (function call) is classified as a PTF table;
                   // any other collection value expression as a table function.
                   attempt (

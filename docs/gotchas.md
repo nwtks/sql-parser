@@ -15,7 +15,6 @@ defined).
 |-----------|-----------------|
 | `Select`, `Insert`, `Update`, `Delete` | `StatementKind` vs `PrivilegeAction` |
 | `Unique`, `PrimaryKey`, `Check` | `ExpressionKind`/`ColumnConstraintKind` vs `TableConstraint` |
-| `DropRole`, `DropType` | `StatementKind` vs `DropStatement` |
 | `SetDefault`, `DropDefault`, `AddConstraint`, `DropConstraint` | `ReferentialAction`/`ColumnAlteration`/`AlterTableAction`/`DomainAlteration` |
 | `Final` | `ResultOption` vs `TypeOption` vs `RunningOrFinal` |
 | `Between` | `ExpressionKind` vs `SystemTimeSpec` |

@@ -246,7 +246,9 @@ module DynamicParser =
     let pExecuteImmediateStatement =
         pKeyword "EXECUTE" >>. pKeyword "IMMEDIATE" >>. pExpression |>> ExecuteImmediate
 
-    // 20.15 <statement name> / <extended statement name> / 20.17 <extended cursor name>
+    // 20.15 <statement name>
+    // 20.17 <extended statement name>
+    // 20.17 <extended cursor name>
     //     ::= [ <scope option> ] <simple value specification>
     let pExtendedName =
         opt (attempt pScopeOption) .>>. pSimpleValueSpecification

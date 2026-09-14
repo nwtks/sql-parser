@@ -3,20 +3,24 @@ namespace SqlParser
 type Position = { Line: int64; Column: int64 }
 type ParseError = ParseError of string * Position
 
-// 5.3 <date literal> / <date string>
+// 5.3 <date literal>
+// 5.3 <date string>
 type DateValue = { Year: int; Month: int; Day: int }
 
-// 5.3 <time literal> / <time string> — <time zone interval>
+// 5.3 <time literal>
+// 5.3 <time string> — <time zone interval>
 type TimeZoneOffset = { Sign: int; Hours: int; Minutes: int }
 
-// 5.3 <time literal> / <time string>
+// 5.3 <time literal>
+// 5.3 <time string>
 type TimeValue =
     { Hour: int
       Minute: int
       Second: decimal
       TzOffset: TimeZoneOffset option }
 
-// 5.3 <timestamp literal> / <timestamp string>
+// 5.3 <timestamp literal>
+// 5.3 <timestamp string>
 type TimestampValue = { Date: DateValue; Time: TimeValue }
 
 // 10.1 <interval qualifier> — <datetime field>
@@ -42,26 +46,37 @@ type IntervalQualifier =
     | SingleField of DateTimeField * IntervalPrecision option
     | Range of DateTimeField * DateTimeField * IntervalPrecision option
 
-// 5.3 <interval literal> / <interval string>
+// 5.3 <interval literal>
+// 5.3 <interval string>
 type IntervalValue =
     { IsNegative: bool
       ValueString: string
       Qualifier: IntervalQualifier }
 
-// 5.3 <literal> / <general literal> — <character string literal> | <national character string literal>
-//     | <Unicode character string literal> | <binary string literal> | <exact numeric literal>
-//     | <boolean literal> | <date literal> | <time literal> | <timestamp literal> | <interval literal> | <null>
+// 5.3 <literal>
+// 5.3 <general literal>
 type Literal =
+    // 5.3 <character string literal>
     | String of string
+    // 5.3 <national character string literal>
     | NationalString of string
+    // 5.3 <Unicode character string literal>
     | UnicodeString of string
+    // 5.3 <exact numeric literal>
     | Number of decimal
+    // 5.3 <boolean literal>
     | Bool of bool option
+    // 5.3 <date literal>
     | Date of DateValue
+    // 5.3 <time literal>
     | Time of TimeValue
+    // 5.3 <timestamp literal>
     | Timestamp of TimestampValue
+    // 5.3 <interval literal>
     | Interval of IntervalValue
+    // 5.3 <binary string literal>
     | Binary of byte[]
+    // 5.3 <null>
     | Null
 
 // 5.4 <scope option> ::= GLOBAL | LOCAL
@@ -88,6 +103,7 @@ type JoinType =
     | LeftJoin
     | RightJoin
     | FullJoin
+    // 7.10 <cross join>
     | CrossJoin
 
 // 7.15 <window frame units> ::= ROWS | RANGE | GROUPS
@@ -102,22 +118,30 @@ type SetOperatorKind =
     | Intersect
     | Except
 
-// 8.2 <comp op> / 6.29 <term> <factor> / <concatenation> / <boolean value expression>
+// 6.29 <term>
+// 6.31 <concatenation>
+// 6.39 <boolean value expression>
+// 8.2 <comp op>
 // <binary operator> ::= + | - | * | / | = | <> | < | <= | > | >= | AND | OR | ||
 type BinaryOperator =
+    // 6.29 <numeric value expression>
     | Add
     | Subtract
+    // 6.29 <term>
     | Multiply
     | Divide
+    // 6.31 <concatenation>
+    | Concatenate
+    // 6.39 <boolean value expression>
+    | And
+    | Or
+    // 8.2 <comp op>
     | Equal
     | NotEqual
     | LessThan
     | LessThanOrEqual
     | GreaterThan
     | GreaterThanOrEqual
-    | And
-    | Or
-    | Concatenate
 
 // 8.9 <quantifier> ::= ALL | ANY | SOME
 type Quantifier =
@@ -223,96 +247,22 @@ and JsonValueBehavior =
     | JsonNull
     | JsonDefault of Expression
 
-// 6.28 <value expression> / 6.29 <numeric value expression> / 6.31 <string value expression>
-// 8.x <predicate> — the full expression grammar
+// 6.28 <value expression>
+// 6.29 <numeric value expression>
+// 6.31 <string value expression>
+// 8.x <predicate>
+// — the full expression grammar
 and ExpressionKind =
-    // 5.3 <literal> / <general literal>
+    // 5.3 <literal>
+    // 5.3 <general literal>
     | Literal of Literal
-    // 6.7 <column reference> | <identifier>
-    | Identifier of string
-    // 6.29 <term> | <factor> | 8.2 <comp op> | 6.31 <concatenation>
-    | BinaryOp of BinaryOperator * Expression * Expression
-    // 5.3 <signed numeric literal> | 6.39 <boolean factor>
+    // 5.3 <signed numeric literal>
+    // 6.39 <boolean factor>
     | UnaryOp of UnaryOperator * Expression
-    // 10.9 <aggregate function> / 6.10 <window function> / 10.4 <routine invocation>
-    | FunctionCall of
-        Expression *
-        bool *
-        Expression list *
-        WindowDefinition option *
-        Expression option *
-        (Expression * bool * NullsOrder option) list option
-    // 6.13 <cast specification> ::= CAST ( <value expression> AS <data type> )
-    | Cast of Expression * DataType
-    // 6.12 <case expression> ::= CASE ... END
-    | Case of Expression option * (Expression * Expression) list * Expression option
-    // 7.19 <scalar subquery> ::= <subquery>
-    | SubqueryExpression of Query
-    // 7.1 <explicit row value constructor> ::= ( <row value constructor element> <comma> <list> ) | ROW ( <list> )
-    | RowValueConstructor of Expression list
-    // 7.16 <asterisk> ::= *
-    | Star
-    // 7.16 <qualified asterisk> ::= <identifier chain> . *
-    | QualifiedStar of string list
-    // 7.16 <all fields reference> ::= <value expression primary> . * [ AS ( <column list> ) ]
-    | AllFieldsReference of Expression * Expression list option
-    // 6.4 <dynamic parameter specification> / <host parameter specification>
+    // 6.4 <dynamic parameter specification>
+    // 6.4 <host parameter specification>
     | Parameter of string
-    // 20.16 <descriptor value constructor> ::= DESCRIPTOR ( <descriptor column list> )
-    | DescriptorValueConstructor of (Expression * DataType option) list
-    // 6.10 <window function> ::= <window function type> OVER <window name or specification>
-    | WindowFunction of WindowFunction
-    // 6.7 <column reference> ::= [ <table name> . ] <column name>
-    | ColumnReference of string list
-    // 8.3 <between predicate> ::= <row value predicand> [ NOT ] BETWEEN [ ASYMMETRIC | SYMMETRIC ] <left> AND <right>
-    | Between of Expression * bool * bool * Expression * Expression
-    // 8.4 <in predicate> — <in predicate value> IN <in predicate value list>
-    | InList of Expression * bool * Expression list
-    // 8.4 <in predicate> — <row value predicand> [ NOT ] IN <table subquery>
-    | InSubquery of Expression * bool * Query
-    // 8.8 <null predicate> ::= <row value predicand> IS [ NOT ] NULL
-    | IsNull of Expression * bool
-    // 6.39 <boolean test> ::= <boolean predicand> IS [ NOT ] [ <truth value> ]
-    | IsBoolean of Expression * bool * bool option
-    // 8.10 <exists predicate> ::= EXISTS <table subquery>
-    | Exists of Query
-    // 8.11 <unique predicate> ::= UNIQUE <table subquery>
-    | Unique of Query
-    // 8.15 <distinct predicate> ::= <row value predicand> IS [ NOT ] DISTINCT FROM <row value predicand>
-    | IsDistinctFrom of Expression * bool * Expression
-    // 8.14 <overlaps predicate> ::= <row value predicand> OVERLAPS <row value predicand>
-    | Overlaps of Expression * Expression
-    // 8.9 <quantified comparison predicate> ::= <row value predicand> <comp op> <quantifier> <table subquery>
-    | QuantifiedComparison of BinaryOperator * Quantifier * Expression * Query
-    // 8.9 <quantified comparison predicate> — row value constructor <quantifier> <table subquery>
-    | QuantifiedSubquery of Quantifier * Query
-    // 10.7 <collate clause> ::= COLLATE <collation name>
-    | Collate of Expression * Expression
-    // 8.5 <like predicate> ::= <character string predicand> [ NOT ] LIKE <pattern> [ ESCAPE <escape> ]
-    | Like of Expression * bool * Expression * Expression option
-    // 8.6 <similar predicate> ::= <character string predicand> [ NOT ] SIMILAR TO <pattern> [ ESCAPE <escape> ]
-    | SimilarTo of Expression * bool * Expression * Expression option
-    // 6.30 <extract expression> ::= EXTRACT ( <extract field> FROM <extract source> )
-    | Extract of Expression * Expression
-    // 6.30 <character position expression> ::= POSITION ( ... IN ... [ USING ... ] )
-    | Position of Expression * Expression * Expression option
-    // 6.32 <trim function> ::= TRIM ( [ [ <trim specification> ] [ <trim character> ] FROM ] <trim source> )
-    | Trim of TrimSpecification option * Expression option * Expression
-    // 6.36 <current date value function> / <current time/timestamp/localtime/localtimestamp>
-    | CurrentDate
-    | CurrentTime of int option
-    | CurrentTimestamp of int option
-    | LocalTime of int option
-    | LocalTimestamp of int option
-    // 6.32 <character substring function> ::= SUBSTRING ( <character value expression> FROM <start> [ FOR <length> ] [ USING ... ] )
-    | Substring of Expression * Expression * Expression option * string option
-    // 6.32 <character overlay function> ::= OVERLAY ( <character value expression> PLACING <replacement> FROM <start> [ FOR <length> ] )
-    | Overlay of Expression * Expression * Expression * Expression option
-    // 6.5 <default specification> ::= DEFAULT
-    | Default
-    // 6.14 <next value expression> ::= NEXT VALUE FOR <sequence generator name>
-    | NextValueFor of Expression
-    // 6.4 <general value specification> keyword forms
+    // 6.4 <general value specification>
     | CurrentCatalog
     | CurrentDefaultTransformGroup
     | CurrentPath
@@ -325,82 +275,78 @@ and ExpressionKind =
     | User
     | Value
     | CollationFor of Expression
-    // 6.42 <array value constructor> / 6.45 <multiset value constructor>
-    | ArrayConstructor of Expression list
-    | ArrayQuery of Query
-    | MultisetConstructor of Expression list
-    | MultisetQuery of Query
-    // 6.45 <multiset value constructor> ::= ... | <table value constructor by query>
-    //   <table value constructor by query> ::= TABLE <table subquery>
-    | TableQuery of Query
-    // 6.24 <array element reference> ::= <array value expression> [ <numeric value expression> ]
-    | ArrayElement of Expression * Expression
-    // 6.16 <subtype treatment> / 6.23 <reference resolution> / 6.25 <multiset element reference>
-    | Treat of Expression * DataType
-    | Deref of Expression
-    | Element of Expression
-    // 6.17 <method invocation> (direct form) / 6.18 <static method invocation>
-    // 6.19 <new specification> / 6.15 <field reference>
-    | MethodInvocation of Expression * Expression * Expression list
-    | StaticMethodInvocation of Expression * Expression * Expression list
-    | NewSpecification of Expression * Expression list
-    | FieldReference of Expression * Expression
-    // 8.12 <normalized predicate> / 8.19 <type predicate> / 8.22 <JSON predicate>
-    | IsNormalized of Expression * bool * NormalForm option
-    | IsOfType of Expression * bool * TypeSpec list
-    | IsJson of Expression * bool * JsonTypeConstraint option * bool option
-    // 8.7 <regex like predicate> / 8.13 <match predicate>
-    | RegexLike of Expression * bool * Expression * Expression option
-    | Match of Expression * bool * MatchOption option * Query
-    // 8.16 <member predicate> / 8.17 <submultiset predicate> / 8.18 <set predicate>
-    | MemberOf of Expression * bool * Expression
-    | SubmultisetOf of Expression * bool * Expression
-    | IsSet of Expression * bool
-    // 8.20 <period predicate> (OVERLAPS is covered by the existing Overlaps case)
-    | PeriodPredicate of PeriodPredicateKind * Expression * Expression
-    // 8.20 <period predicand> ::= <period reference> | PERIOD ( <start> , <end> )
-    | PeriodValue of Expression * Expression
-    // 8.23 <JSON exists predicate>
-    | JsonExists of JsonApiCommon * JsonExistsErrorBehavior option
-    // 6.27 <JSON value function> / 6.34 <JSON query> / 6.33 <JSON value constructor>
-    //     / 10.11 <JSON aggregate function>
-    | JsonValue of JsonApiCommon * JsonReturning option * JsonValueBehavior option * JsonValueBehavior option
-    | JsonQuery of
-        JsonApiCommon *
-        JsonOutput option *
-        JsonQueryWrapper option *
-        JsonQueryQuotes option *
-        JsonQueryBehavior option *
-        JsonQueryBehavior option
-    | JsonObject of JsonNameValue list * JsonConstructorNull option * bool option * JsonOutput option
-    | JsonArray of Expression list * JsonConstructorNull option * JsonOutput option
-    | JsonObjectAgg of JsonNameValue * JsonConstructorNull option * bool option * JsonOutput option
-    | JsonArrayAgg of
-        Expression *
-        (Expression * bool * NullsOrder option) list option *
-        JsonConstructorNull option *
-        JsonOutput option
-    // 6.11 <nested window function> ::= <nested row number function> | <value_of expression at row>
-    | NestedRowNumber of RowMarker
-    | ValueOf of Expression * RowMarkerExpression * Expression option
+    // 6.5 <default specification> ::= DEFAULT
+    | Default
+    // 6.7 <column reference>
+    | Identifier of string
+    // 6.7 <column reference> ::= [ <table name> . ] <column name>
+    | ColumnReference of string list
     // 6.9 <set function specification> ::= [ <running or final> ] <aggregate function> | <grouping operation>
     | SetFunction of RunningOrFinal option * Expression
     | Grouping of Expression list
+    // 6.10 <window function> ::= <window function type> OVER <window name or specification>
+    | WindowFunction of WindowFunction
+    // 6.11 <nested row number function>
+    | NestedRowNumber of RowMarker
+    // 6.11 <value_of expression at row>
+    | ValueOf of Expression * RowMarkerExpression * Expression option
+    // 6.12 <case expression> ::= CASE ... END
+    | Case of Expression option * (Expression * Expression) list * Expression option
+    // 6.13 <cast specification> ::= CAST ( <value expression> AS <data type> )
+    | Cast of Expression * DataType
+    // 6.14 <next value expression> ::= NEXT VALUE FOR <sequence generator name>
+    | NextValueFor of Expression
+    // 6.15 <field reference>
+    | FieldReference of Expression * Expression
+    // 6.16 <subtype treatment>
+    | Treat of Expression * DataType
+    // 6.17 <method invocation>
+    | MethodInvocation of Expression * Expression * Expression list
     // 6.17 <generalized invocation> ::= ( <value expression primary> AS <data type> ) <period> <method name> [ <SQL argument list> ]
     | GeneralizedInvocation of Expression * DataType * Expression * Expression list option
-    // 6.20 <attribute or method reference> / 6.21 <dereference operation> / 6.22 <method reference>
+    // 6.18 <static method invocation>
+    | StaticMethodInvocation of Expression * Expression * Expression list
+    // 6.19 <new specification>
+    | NewSpecification of Expression * Expression list
+    // 6.20 <attribute or method reference>
+    // 6.21 <dereference operation>
+    // 6.22 <method reference>
     //   <value expression primary> <dereference operator> <qualified identifier> [ <SQL argument list> ]
     //   (no argument list = 6.21 attribute access, argument list = 6.22 method reference)
     | Dereference of Expression * Expression * Expression list option
+    // 6.23 <reference resolution>
+    | Deref of Expression
+    // 6.24 <array element reference> ::= <array value expression> [ <numeric value expression> ]
+    | ArrayElement of Expression * Expression
+    // 6.25 <multiset element reference>
+    | Element of Expression
     // 6.26 <row pattern navigation operation>
     | RowPatternNavigation of RowPatternNavigation
+    // 6.27 <JSON value function>
+    | JsonValue of JsonApiCommon * JsonReturning option * JsonValueBehavior option * JsonValueBehavior option
+    // 6.29 <term>
+    // 6.29 <factor>
+    // 8.2 <comp op>
+    // 6.31 <concatenation>
+    | BinaryOp of BinaryOperator * Expression * Expression
+    // 6.30 <extract expression> ::= EXTRACT ( <extract field> FROM <extract source> )
+    | Extract of Expression * Expression
+    // 6.30 <character position expression> ::= POSITION ( ... IN ... [ USING ... ] )
+    | Position of Expression * Expression * Expression option
     // 6.30 <length expression> ::= <char length expression> | <octet length expression>
     | LengthExpression of LengthFunction * Expression * string option
     // 6.30 <numeric value function> — the built-ins of the shape <name> ( <args> )
     | NumericValueFunction of NumericFunction * Expression list
-    // 6.30 <regex occurrences function> / <regex position expression>
+    // 6.30 <regex occurrences function>
     | RegexOccurrences of RegexArgument
+    // 6.30 <regex position expression>
     | RegexPosition of RegexStart option * RegexArgument
+    // 6.32 <trim function> ::= TRIM ( [ [ <trim specification> ] [ <trim character> ] FROM ] <trim source> )
+    | Trim of TrimSpecification option * Expression option * Expression
+    // 6.32 <character substring function> ::= SUBSTRING ( <character value expression> FROM <start> [ FOR <length> ] [ USING ... ] )
+    | Substring of Expression * Expression * Expression option * string option
+    // 6.32 <character overlay function> ::= OVERLAY ( <character value expression> PLACING <replacement> FROM <start> [ FOR <length> ] )
+    | Overlay of Expression * Expression * Expression * Expression option
     // 6.32 <regular expression substring function> ::= SUBSTRING ( <src> SIMILAR <pattern> ESCAPE <escape> )
     | SubstringSimilar of Expression * Expression * Expression
     // 6.32 <fold> ::= { UPPER | LOWER } ( <character value expression> )
@@ -409,8 +355,9 @@ and ExpressionKind =
     | Transcoding of Expression * Expression
     // 6.32 <character transliteration> ::= TRANSLATE ( <character value expression> USING <transliteration name> )
     | CharacterTransliteration of Expression * Expression
-    // 6.32 <regex substring function> / <regex transliteration>
+    // 6.32 <regex substring function>
     | RegexSubstring of RegexArgument
+    // 6.32 <regex transliteration>
     | RegexTransliterate of RegexArgument
     // 6.32 <normalize function> ::= NORMALIZE ( <character value expression> [ , <normal form> [ , <result length> ] ] )
     | NormalizeFunction of Expression * NormalForm option * Expression option
@@ -418,20 +365,128 @@ and ExpressionKind =
     | SpecificTypeMethod of Expression * bool
     // 6.32 <classifier function> ::= CLASSIFIER ( [ <row pattern variable name> ] )
     | Classifier of Expression option
+    // 6.33 <JSON value constructor>
+    | JsonObject of JsonNameValue list * JsonConstructorNull option * bool option * JsonOutput option
+    | JsonArray of Expression list * JsonConstructorNull option * JsonOutput option
+    // 6.34 <JSON query>
+    | JsonQuery of
+        JsonApiCommon *
+        JsonOutput option *
+        JsonQueryWrapper option *
+        JsonQueryQuotes option *
+        JsonQueryBehavior option *
+        JsonQueryBehavior option
     // 6.35 <time zone> ::= AT <time zone specifier>
     | AtTimeZone of Expression * TimeZoneSpecifier
+    // 6.36 <current date value function>
+    | CurrentDate
+    // 6.36 <current time value function>
+    | CurrentTime of int option
+    // 6.36 <current timestamp value function>
+    | CurrentTimestamp of int option
+    // 6.36 <local time value function>
+    | LocalTime of int option
+    // 6.36 <local timestamp value function>
+    | LocalTimestamp of int option
     // 6.37 <interval value expression> ::= ... | ( <datetime value expression> <minus sign> <datetime term> ) <interval qualifier>
     | DatetimeDifference of Expression * Expression * IntervalQualifier
     // 6.37 <interval primary> ::= <value expression primary> [ <interval qualifier> ]
     // Only built when an <interval qualifier> is present; a qualifier-less
     // <interval primary> is represented by its <value expression primary>.
     | IntervalPrimary of Expression * IntervalQualifier
+    // 6.39 <boolean test> ::= <boolean predicand> IS [ NOT ] [ <truth value> ]
+    | IsBoolean of Expression * bool * bool option
     // 6.41 <trim array function> ::= TRIM_ARRAY ( <array value expression> , <numeric value expression> )
     | TrimArray of Expression * Expression
+    // 6.42 <array value constructor>
+    | ArrayConstructor of Expression list
+    | ArrayQuery of Query
     // 6.43 <multiset value expression> ::= ... MULTISET { UNION | INTERSECT | EXCEPT } [ ALL | DISTINCT ] ...
     | MultisetSetOperation of MultisetSetOperator * bool option * Expression * Expression
     // 6.44 <multiset set function> ::= SET ( <multiset value expression> )
     | MultisetSetFunction of Expression
+    // 6.45 <multiset value constructor>
+    | MultisetConstructor of Expression list
+    | MultisetQuery of Query
+    // 6.45 <table value constructor by query> ::= TABLE <table subquery>
+    | TableQuery of Query
+    // 7.1 <explicit row value constructor> ::= ( <row value constructor element> <comma> <list> ) | ROW ( <list> )
+    | RowValueConstructor of Expression list
+    // 7.16 <asterisk> ::= *
+    | Star
+    // 7.16 <qualified asterisk> ::= <identifier chain> . *
+    | QualifiedStar of string list
+    // 7.16 <all fields reference> ::= <value expression primary> . * [ AS ( <column list> ) ]
+    | AllFieldsReference of Expression * Expression list option
+    // 7.19 <scalar subquery> ::= <subquery>
+    | SubqueryExpression of Query
+    // 8.3 <between predicate> ::= <row value predicand> [ NOT ] BETWEEN [ ASYMMETRIC | SYMMETRIC ] <left> AND <right>
+    | Between of Expression * bool * bool * Expression * Expression
+    // 8.4 <in predicate> — <in predicate value> IN <in predicate value list>
+    | InList of Expression * bool * Expression list
+    // 8.4 <in predicate> — <row value predicand> [ NOT ] IN <table subquery>
+    | InSubquery of Expression * bool * Query
+    // 8.5 <like predicate> ::= <character string predicand> [ NOT ] LIKE <pattern> [ ESCAPE <escape> ]
+    | Like of Expression * bool * Expression * Expression option
+    // 8.6 <similar predicate> ::= <character string predicand> [ NOT ] SIMILAR TO <pattern> [ ESCAPE <escape> ]
+    | SimilarTo of Expression * bool * Expression * Expression option
+    // 8.7 <regex like predicate>
+    | RegexLike of Expression * bool * Expression * Expression option
+    // 8.8 <null predicate> ::= <row value predicand> IS [ NOT ] NULL
+    | IsNull of Expression * bool
+    // 8.9 <quantified comparison predicate> ::= <row value predicand> <comp op> <quantifier> <table subquery>
+    | QuantifiedComparison of BinaryOperator * Quantifier * Expression * Query
+    // 8.9 <quantified comparison predicate> — row value constructor <quantifier> <table subquery>
+    | QuantifiedSubquery of Quantifier * Query
+    // 8.10 <exists predicate> ::= EXISTS <table subquery>
+    | Exists of Query
+    // 8.11 <unique predicate> ::= UNIQUE <table subquery>
+    | Unique of Query
+    // 8.12 <normalized predicate>
+    | IsNormalized of Expression * bool * NormalForm option
+    // 8.13 <match predicate>
+    | Match of Expression * bool * MatchOption option * Query
+    // 8.14 <overlaps predicate> ::= <row value predicand> OVERLAPS <row value predicand>
+    | Overlaps of Expression * Expression
+    // 8.15 <distinct predicate> ::= <row value predicand> IS [ NOT ] DISTINCT FROM <row value predicand>
+    | IsDistinctFrom of Expression * bool * Expression
+    // 8.16 <member predicate>
+    | MemberOf of Expression * bool * Expression
+    // 8.17 <submultiset predicate>
+    | SubmultisetOf of Expression * bool * Expression
+    // 8.18 <set predicate>
+    | IsSet of Expression * bool
+    // 8.19 <type predicate>
+    | IsOfType of Expression * bool * TypeSpec list
+    // 8.20 <period predicate> (OVERLAPS is covered by the existing Overlaps case)
+    | PeriodPredicate of PeriodPredicateKind * Expression * Expression
+    // 8.20 <period predicand> ::= <period reference> | PERIOD ( <start> , <end> )
+    | PeriodValue of Expression * Expression
+    // 8.22 <JSON predicate>
+    | IsJson of Expression * bool * JsonTypeConstraint option * bool option
+    // 8.23 <JSON exists predicate>
+    | JsonExists of JsonApiCommon * JsonExistsErrorBehavior option
+    // 10.7 <collate clause> ::= COLLATE <collation name>
+    | Collate of Expression * Expression
+    // 10.9 <aggregate function>
+    // 6.10 <window function>
+    // 10.4 <routine invocation>
+    | FunctionCall of
+        Expression *
+        bool *
+        Expression list *
+        WindowDefinition option *
+        Expression option *
+        (Expression * bool * NullsOrder option) list option
+    // 10.11 <JSON aggregate function>
+    | JsonObjectAgg of JsonNameValue * JsonConstructorNull option * bool option * JsonOutput option
+    | JsonArrayAgg of
+        Expression *
+        (Expression * bool * NullsOrder option) list option *
+        JsonConstructorNull option *
+        JsonOutput option
+    // 20.16 <descriptor value constructor> ::= DESCRIPTOR ( <descriptor column list> )
+    | DescriptorValueConstructor of (Expression * DataType option) list
 
 // 6.28 <value expression> — wrapper carrying source position
 and Expression = { Kind: ExpressionKind; Pos: Position }
@@ -468,8 +523,10 @@ and NumericFunction =
     | WidthBucket
     | MatchNumber
 
-// 6.30 <regex occurrences function> / <regex position expression>
-// 6.32 <regex substring function> / <regex transliteration>
+// 6.30 <regex occurrences function>
+// 6.30 <regex position expression>
+// 6.32 <regex substring function>
+// 6.32 <regex transliteration>
 // — all four share the shape
 //   <pattern> [ FLAG <flag> ] IN <subject> [ WITH <replacement> ] [ FROM <start> ]
 //   [ USING <char length units> ] [ OCCURRENCE <occurrence> ] [ GROUP <capture group> ]
@@ -488,7 +545,9 @@ and RegexArgument =
 // 6.30 <regex occurrence> ::= <numeric value expression>
 // 6.32 <regex transliteration occurrence> ::= <regex occurrence> | ALL
 and RegexOccurrence =
+    // 6.30 <regex occurrence>
     | RegexOccurrenceNumber of Expression
+    // 6.32 <regex transliteration occurrence>
     | RegexOccurrenceAll
 
 // 6.30 <regex position start or after> ::= START | AFTER
@@ -559,12 +618,15 @@ and ResultOption =
     | New
     | Old
 
-// 7.6 <table primary> / 7.10 <joined table> / 7.11 <JSON table> — table reference variants
+// 7.6 <table primary>
+// 7.10 <joined table>
+// 7.11 <JSON table>
+// — table reference variants
 and TableSourceKind =
+    // 7.6 <table primary>
     | Table of Expression * Expression option
     | Subquery of Query * Expression * Expression list option
     | ValuesTable of Expression list list * Expression * Expression list option
-    | JoinedTable of JoinSource
     | Lateral of Query * Expression * Expression list option
     | Unnest of Expression * bool * Expression * Expression list option
     | TableSample of TableSource * string * Expression * Expression option
@@ -573,16 +635,18 @@ and TableSourceKind =
     | TableFunction of Expression * Expression option * Expression list option
     | PtfTable of Expression * Expression option * Expression list option
     | DataChangeDelta of ResultOption * StatementKind * Expression option * Expression list option
-    // 7.11 <JSON table> <correlation or recognition>
-    | JsonTable of JsonTableStatement * (Expression * Expression list option) option
-    // 7.11 <JSON table primitive> <correlation name>
-    | JsonTablePrimitive of JsonTableStatement * Expression option
-    // 7.6 <table or query name> <row pattern recognition clause and name>
+    // 7.6 <table or query name>
     | MatchRecognize of
         Expression *
         (Expression * Expression list option) option *
         RowPatternRecognition *
         (Expression * Expression list option) option
+    // 7.10 <joined table>
+    | JoinedTable of JoinSource
+    // 7.11 <JSON table>
+    | JsonTable of JsonTableStatement * (Expression * Expression list option) option
+    // 7.11 <JSON table primitive>
+    | JsonTablePrimitive of JsonTableStatement * Expression option
 
 // 7.6 <table primary> — wraps TableSourceKind with source position
 and TableSource =
@@ -680,7 +744,10 @@ and JoinCondition =
     | Using of Expression list
 
 // 7.10 <joined table> ::= <cross join> | <qualified join> | <natural join>
-// 7.10 <qualified join> / <natural join> / <partitioned join table> — join of two table references
+// 7.10 <qualified join>
+// 7.10 <natural join>
+// 7.10 <partitioned join table>
+// — join of two table references
 and JoinSource =
     { JoinType: JoinType
       IsNatural: bool
@@ -1103,16 +1170,20 @@ and ColumnConstraint =
 // 11.4 <system time period start column specification> ::= GENERATED ALWAYS AS ROW START
 // 11.4 <system time period end column specification>   ::= GENERATED ALWAYS AS ROW END
 and SystemTimePeriodKind =
+    // 11.4 <system time period start column specification>
     | RowStart
+    // 11.4 <system time period end column specification>
     | RowEnd
 
 // 11.4 the single optional clause that may follow the column's data type:
 //     <default clause> | <identity column specification> | <generation clause>
 //     | <system time period start column specification> | <system time period end column specification>
 and ColumnGeneration =
+    // 11.4 <identity column specification>
     | IdentityColumn of IdentitySpec
     // 11.4 <generation clause> ::= GENERATED ALWAYS AS ( <value expression> )
     | GeneratedColumn of Expression
+    // 11.4 <system time period start column specification>
     | SystemTimePeriodColumn of SystemTimePeriodKind
 
 // 11.4 <column definition> ::= <column name> [ <data type or domain name> ]
@@ -1233,25 +1304,6 @@ and ColumnAlteration =
 and AlterIdentityColumnSpecification =
     { Generation: bool option
       Options: SequenceOption list }
-
-// 11.31 <drop table statement> / 11.33 <drop view statement> / 11.50 <drop trigger statement> etc. — unified DROP
-and DropStatement =
-    | DropTable of Expression * bool
-    | DropView of Expression * bool
-    | DropRole of Expression
-    | DropSequence of Expression * bool
-    | DropSchema of Expression * bool
-    | DropDomain of Expression * bool
-    | DropCollation of Expression * bool
-    | DropCharacterSet of Expression
-    | DropTransliteration of Expression
-    | DropAssertion of Expression * bool option
-    | DropCast of DataType * DataType * bool
-    | DropOrdering of Expression * bool
-    | DropTransform of Expression * TransformDropTarget * bool
-    | DropRoutine of Expression * bool
-    | DropTrigger of Expression
-    | DropType of Expression * bool
 
 // 11.32 <view column option> ::= <column name> WITH OPTIONS <scope clause>
 // (the <scope clause> is mandatory here, unlike in 11.3's <column option list>)
@@ -1544,7 +1596,7 @@ and RoutineBody =
     | ExternalRoutine of ExternalBodyReference
     | PolymorphicTableFunction of PolymorphicTableFunctionBody
 
-// 11.60 <SQL-invoked routine> — shared by CREATE FUNCTION / CREATE PROCEDURE
+// 11.60 <SQL-invoked routine>
 and CreateRoutine =
     { Name: Expression
       Parameters: ParameterDeclaration list
@@ -1585,7 +1637,7 @@ and AlterRoutineStatement =
 
 // 11.65 <ordering category> ::= RELATIVE WITH <relative function specification>
 //     | MAP WITH <map function specification> | STATE [ <specific name> ]
-// (<relative function specification> / <map function specification> are
+// (<relative function specification> and <map function specification> are
 //  <specific routine designator>s — see 10.6)
 and OrderingCategory =
     | Relative of SpecificRoutineDesignator
@@ -1649,7 +1701,8 @@ and PrivilegeSelectTarget =
     | PrivilegeColumns of Expression list
     | PrivilegeMethods of SpecificRoutineDesignator list
 
-// 12.3 <action> / <privileges> — SELECT | INSERT | UPDATE | DELETE | REFERENCES | USAGE | TRIGGER | UNDER | EXECUTE
+// 12.3 <action> — SELECT | INSERT | UPDATE | DELETE | REFERENCES | USAGE | TRIGGER | UNDER | EXECUTE
+// 12.3 <privileges>
 and PrivilegeAction =
     | Select of PrivilegeSelectTarget option
     | Insert of Expression list option
@@ -1772,10 +1825,13 @@ and DeleteStatement =
       PortionOf: PortionOfSpec option
       Cursor: Expression option }
 
-// 14.11 <insert statement> — <from constructor> / <from subquery> / DEFAULT VALUES
+// 14.11 <insert statement>
 and InsertSource =
+    // 14.11 <from constructor>
     | Values of Expression list list
+    // 14.11 <from subquery>
     | Query of Query
+    // 14.11 DEFAULT VALUES
     | DefaultValues
 
 // 14.11 <insert statement> ::= INSERT INTO <table name> [ <insert column list> ] [ <overriding clause> ] <insert source>
@@ -1922,7 +1978,9 @@ and UsingClause =
     | UsingArguments of Expression list
     | UsingDescriptor of Expression
 
-// 20.15 <statement name> / <extended statement name> / 20.17 <extended cursor name>
+// 20.15 <statement name>
+// 20.17 <extended statement name>
+// 20.17 <extended cursor name>
 //     ::= [ <scope option> ] <simple value specification>
 and ExtendedName =
     { Scope: ScopeOption option
@@ -1959,57 +2017,121 @@ and GetDiagnosticsStatement =
     | ConditionInfo of Expression * (Expression * string) list
     | AllInfo of Expression * AllQualifier option
 
-// 7.17 <query expression> / 14.11 <insert statement> / 14.14 <update statement: searched>
-// 14.9 <delete statement: searched> / 14.12 <merge statement> / 11.3 <table definition>
-// 11.32 <view definition> / 11.10 <alter table statement> / 12.x <grant/revoke>
-// 16.x <transaction statement> / 11.5x <sequence/domain> / 19.x <session> / 20.x <dynamic SQL>
 // <SQL statement> — top-level statement variants
 and StatementKind =
+    // 7.17 <query expression>
     | Select of Query
-    | Insert of InsertStatement
-    | Update of UpdateStatement
-    | Delete of DeleteStatement
-    | Merge of MergeStatement
-    | CreateTable of CreateTableStatement
-    | CreateView of CreateViewStatement
-    | Drop of DropStatement
-    | AlterTable of AlterTableStatement
-    // 14.10 <truncate table statement> ::= TRUNCATE TABLE <table name>
-    | Truncate of Expression * bool option
-    | Grant of GrantStatement
-    | Revoke of RevokeStatement
-    // 12.4 <role definition> ::= CREATE ROLE <role name>
-    | CreateRole of Expression
-    // 12.6 <drop role statement> ::= DROP ROLE <role name>
-    | DropRole of Expression
+    // 7.17 <with clause>
+    | WithStatement of bool * Cte list * StatementKind
     // 11.1 <schema definition> ::= CREATE SCHEMA ...
     | CreateSchema of SchemaDefinition
+    // 11.2 <drop schema statement>
+    | DropSchema of Expression * bool
+    // 11.3 <table definition>
+    | CreateTable of CreateTableStatement
+    // 11.10 <alter table statement>
+    | AlterTable of AlterTableStatement
+    // 11.31 <drop table statement>
+    | DropTable of Expression * bool
+    // 11.32 <view definition>
+    | CreateView of CreateViewStatement
+    // 11.33 <drop view statement>
+    | DropView of Expression * bool
     // 11.34 <domain definition> ::= CREATE DOMAIN ...
     | CreateDomain of DomainDefinition
     // 11.35 <alter domain statement> ::= ALTER DOMAIN ...
     | AlterDomain of Expression * DomainAlteration
-    // 11.43 <collation definition> ::= CREATE COLLATION ...
-    | CreateCollation of Expression * Expression * Expression * bool option
+    // 11.40 <drop domain statement>
+    | DropDomain of Expression * bool
     // 11.41 <character set definition> ::= CREATE CHARACTER SET ...
     | CreateCharacterSet of Expression * Expression * Expression option
+    // 11.42 <drop character set statement>
+    | DropCharacterSet of Expression
+    // 11.43 <collation definition> ::= CREATE COLLATION ...
+    | CreateCollation of Expression * Expression * Expression * bool option
+    // 11.44 <drop collation statement>
+    | DropCollation of Expression * bool
     // 11.45 <transliteration definition> ::= CREATE TRANSLITERATION ...
     | CreateTransliteration of Expression * Expression * Expression * SpecificRoutineDesignator
+    // 11.46 <drop transliteration statement>
+    | DropTransliteration of Expression
     // 11.47 <assertion definition> ::= CREATE ASSERTION ...
     | CreateAssertion of Expression * Expression * ConstraintCharacteristics
+    // 11.48 <drop assertion statement>
+    | DropAssertion of Expression * bool option
+    // 11.49 <trigger definition> ::= CREATE TRIGGER ...
+    | CreateTrigger of CreateTriggerStatement
+    // 11.50 <drop trigger statement>
+    | DropTrigger of Expression
+    // 11.51 <user-defined type definition> ::= CREATE TYPE ...
+    | CreateType of CreateTypeStatement
+    // 11.53 <alter type statement> ::= ALTER TYPE ...
+    | AlterType of AlterTypeStatement
+    // 11.59 <drop data type statement>
+    | DropType of Expression * bool
+    // 11.60 <SQL-invoked routine>
+    | CreateProcedure of CreateRoutine
+    | CreateFunction of CreateRoutine
+    // 11.60 <method specification designator>
+    | CreateMethod of CreateMethodStatement
+    // 11.61 <alter routine statement> ::= ALTER <specific routine designator> ...
+    | AlterRoutine of AlterRoutineStatement
+    // 11.62 <drop routine statement>
+    | DropRoutine of Expression * bool
     // 11.63 <user-defined cast definition> ::= CREATE CAST ...
     | CreateCast of DataType * DataType * SpecificRoutineDesignator * bool
+    // 11.64 <drop user-defined cast statement>
+    | DropCast of DataType * DataType * bool
     // 11.65 <user-defined ordering definition> ::= CREATE ORDERING ...
     | CreateOrdering of Expression * OrderingForm
+    // 11.66 <drop user-defined ordering statement>
+    | DropOrdering of Expression * bool
     // 11.67 <transform definition> ::= CREATE TRANSFORM ...
     | CreateTransform of Expression * TransformGroup list
     // 11.68 <alter transform statement> ::= ALTER TRANSFORM ...
     | AlterTransform of Expression * AlterTransformGroup list
+    // 11.71 <drop transform statement>
+    | DropTransform of Expression * TransformDropTarget * bool
     // 11.72 <sequence generator definition> ::= CREATE SEQUENCE ...
     | CreateSequence of Expression * SequenceOption list
     // 11.73 <alter sequence generator statement> ::= ALTER SEQUENCE ...
     | AlterSequence of Expression * SequenceOption list
-    // 19.3 <set role statement> ::= SET ROLE ...
-    | SetRole of Expression option
+    // 11.74 <drop sequence generator statement>
+    | DropSequence of Expression * bool
+    // 12.1 <grant statement>
+    | Grant of GrantStatement
+    // 12.4 <role definition> ::= CREATE ROLE <role name>
+    | CreateRole of Expression
+    // 12.6 <drop role statement> ::= DROP ROLE <role name>
+    | DropRole of Expression
+    // 12.7 <revoke statement>
+    | Revoke of RevokeStatement
+    // 14.1 <declare cursor>
+    | DeclareCursor of DeclareCursorStatement
+    // 14.4 <open statement>
+    | Open of Expression * UsingClause option
+    // 14.5 <fetch statement>
+    | Fetch of FetchOrientation option * Expression * UsingClause
+    // 14.6 <close statement>
+    | Close of Expression
+    // 14.7 <select statement: single row>
+    | SelectInto of SelectIntoStatement
+    // 14.9 <delete statement: searched>
+    | Delete of DeleteStatement
+    // 14.10 <truncate table statement> ::= TRUNCATE TABLE <table name>
+    | Truncate of Expression * bool option
+    // 14.11 <insert statement>
+    | Insert of InsertStatement
+    // 14.12 <merge statement>
+    | Merge of MergeStatement
+    // 14.14 <update statement: searched>
+    | Update of UpdateStatement
+    // 14.16 <temporary table declaration>
+    | DeclareTemporaryTable of TemporaryTableDeclarationStatement
+    // 14.17 <free locator statement>
+    | FreeLocator of Expression list
+    // 14.18 <hold locator statement>
+    | HoldLocator of Expression list
     // 16.1 <call statement> ::= CALL <routine invocation>
     | Call of Expression * Expression list
     // 16.2 <return statement> ::= RETURN <return value>
@@ -2028,62 +2150,52 @@ and StatementKind =
     | Commit of bool option
     // 17.8 <rollback statement> ::= ROLLBACK [ AND { CHAIN | NO CHAIN } ] [ TO SAVEPOINT <savepoint specifier> ]
     | Rollback of bool option * Expression option
-    // 7.17 <with clause> + <SQL statement>
-    | WithStatement of bool * Cte list * StatementKind
-    // 11.60 <SQL-invoked routine> — CREATE PROCEDURE / FUNCTION / METHOD
-    | CreateProcedure of CreateRoutine
-    | CreateFunction of CreateRoutine
-    // 11.60 <method specification designator> — CREATE SPECIFIC METHOD / CREATE METHOD ... FOR t
-    | CreateMethod of CreateMethodStatement
-    // 11.61 <alter routine statement> ::= ALTER <specific routine designator> ...
-    | AlterRoutine of AlterRoutineStatement
-    // 11.49 <trigger definition> ::= CREATE TRIGGER ...
-    | CreateTrigger of CreateTriggerStatement
-    // 11.51 <user-defined type definition> ::= CREATE TYPE ...
-    | CreateType of CreateTypeStatement
-    // 11.53 <alter type statement> ::= ALTER TYPE ...
-    | AlterType of AlterTypeStatement
-    // 14.1 <declare cursor> / 14.2 <cursor properties> / 14.3 <cursor specification>
-    | DeclareCursor of DeclareCursorStatement
-    // 14.4 <open statement> / 20.19 <dynamic open statement>
-    | Open of Expression * UsingClause option
-    // 14.5 <fetch statement> / 20.20 <dynamic fetch statement>
-    | Fetch of FetchOrientation option * Expression * UsingClause
-    // 14.6 <close statement> / 20.22 <dynamic close statement>
-    | Close of Expression
-    | SelectInto of SelectIntoStatement
-    // 14.16 <temporary table declaration>
-    | DeclareTemporaryTable of TemporaryTableDeclarationStatement
-    // 14.17 <free locator statement> / 14.18 <hold locator statement>
-    | FreeLocator of Expression list
-    | HoldLocator of Expression list
-    // 18.1-18.3 connection statements
+    // 18.1 <connect statement>
     | Connect of ConnectStatement
+    // 18.2 <set connection statement>
     | SetConnection of Expression option
+    // 18.3 <disconnect statement>
     | Disconnect of DisconnectObject
-    // 19.x session statements
-    | SetSessionAuthorization of Expression
-    | SetTimeZone of Expression option
+    // 19.1 <set session characteristics statement>
     | SetSessionCharacteristics of TransactionMode list
+    // 19.2 <set session authorization statement>
+    | SetSessionAuthorization of Expression
+    // 19.3 <set role statement> ::= SET ROLE ...
+    | SetRole of Expression option
+    // 19.4 <set time zone statement>
+    | SetTimeZone of Expression option
+    // 19.5 <set catalog statement>
     | SetCatalog of Expression
+    // 19.6 <set schema statement>
     | SetSchema of Expression
+    // 19.7 <set names statement>
     | SetNames of Expression
+    // 19.8 <set path statement>
     | SetPath of Expression
+    // 19.9 <set transform group statement>
     | SetTransformGroup of Expression * Expression option
+    // 19.10 <set session collation statement>
     | SetSessionCollation of Expression option * Expression list option
-    // 23.1 diagnostics
-    | GetDiagnostics of GetDiagnosticsStatement
-    // 20.x dynamic SQL
-    | Prepare of Expression * Expression option * Expression
-    | DeallocatePrepare of Expression
-    | Describe of DescribeStatement
-    | Execute of Expression * UsingClause option * UsingClause option
-    | ExecuteImmediate of Expression
+    // 20.2 <allocate descriptor statement>
     | AllocateDescriptor of Expression * Expression option
+    // 20.3 <deallocate descriptor statement>
     | DeallocateDescriptor of Expression
+    // 20.4 <get descriptor statement>
     | GetDescriptor of Expression * GetDescriptorInfo
+    // 20.5 <set descriptor statement>
     | SetDescriptor of Expression * SetDescriptorInfo
+    // 20.6 <copy descriptor statement>
     | CopyDescriptor of CopyDescriptorStatement
+    // 20.7 <prepare statement>
+    | Prepare of Expression * Expression option * Expression
+    // 20.9 <deallocate prepare statement>
+    | DeallocatePrepare of Expression
+    // 20.10 <describe statement>
+    | Describe of DescribeStatement
+    // 20.13 <execute statement>
+    | Execute of Expression * UsingClause option * UsingClause option
+    // 20.14 <execute immediate statement>
+    | ExecuteImmediate of Expression
     // 20.15 <dynamic declare cursor>
     | DynamicDeclareCursor of DynamicDeclareCursorStatement
     // 20.17 <allocate extended dynamic cursor statement>
@@ -2092,5 +2204,7 @@ and StatementKind =
     | AllocateReceivedCursor of AllocateReceivedCursorStatement
     // 20.28 <pipe row statement> ::= PIPE ROW <PTF descriptor name>
     | PipeRow of Expression
+    // 23.1 <get diagnostics statement>
+    | GetDiagnostics of GetDiagnosticsStatement
 
 type Statement = { Kind: StatementKind; Pos: Position }

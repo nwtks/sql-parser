@@ -1903,9 +1903,8 @@ module SchemaParser =
                   |>> fun ((target, forName), behavior) -> DropTransform(forName, target, behavior)
                   attempt (pKeyword "SEQUENCE" >>. pQualifiedNameExpr .>>. pDropBehavior)
                   |>> DropSequence
-                  attempt (pKeyword "ROLE" >>. pIdentifierExpr) |>> DropStatement.DropRole
+                  attempt (pKeyword "ROLE" >>. pIdentifierExpr) |>> DropRole
                   attempt (pRoutineDesignatorWithType .>>. pDropBehavior) |>> DropRoutine ]
-        |>> Drop
 
     // 11.72 <sequence generator definition> ::= CREATE SEQUENCE <sequence generator name> [ <sequence generator options> ]
     let pCreateSequenceStatement =
