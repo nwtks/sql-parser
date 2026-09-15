@@ -151,7 +151,10 @@ dialects:
   means the plain parenthesized expression). JSON paths are plain `string`s and the
   JSON argument slots use the boolean-free `pValueExpressionNoBoolean` —
   deliberately stricter than the grammar, to keep comma-separated lists
-  unambiguous. `JsonValueBehavior` and `JsonQueryBehavior` are separate DUs, and
+  unambiguous. The `<JSON input clause>` (`FORMAT <JSON representation>`) on both
+  the context item and each passing argument is preserved
+  (`JsonApiCommon.ContextFormat`, `JsonPassingArgument.InputFormat`).
+  `JsonValueBehavior` and `JsonQueryBehavior` are separate DUs, and the
   the `<JSON predicate type constraint>` cases are prefixed `JsonType*` to avoid
   clashing with `ExpressionKind`. `pJsonKeyUniqueness` / `pPadCharacteristic`
   return `bool`, not `bool option`.

@@ -180,7 +180,9 @@ type DataType =
     | DateType
     | TimeType of int option * bool
     | TimestampType of int option * bool
-    | IntervalType of string
+    // 6.1 <interval type> ::= INTERVAL <interval qualifier> — the qualifier is structured
+    // (10.1 IntervalQualifier), not a raw string.
+    | IntervalType of IntervalQualifier
     // 6.1 <row type> ::= ROW <row type body>
     | RowType of (Expression * DataType) list
     // 6.1 <collection type> ::= <array type> | <multiset type>
@@ -1031,14 +1033,22 @@ and JsonOutput =
     { Returning: DataType
       Format: JsonRepresentation option }
 
+// 10.14 <JSON passing argument> ::= <JSON value expression> [ <JSON input clause> ] AS <identifier>
+and JsonPassingArgument =
+    { Value: Expression
+      InputFormat: JsonRepresentation option
+      Name: Expression }
+
 // 10.14 <JSON API common syntax> ::= <JSON context item> , <JSON path specification>
 //     [ AS <JSON table path name> ] [ <JSON passing clause> ]
 // <JSON path specification> is a <character string literal>, so Path is a plain string.
+// <JSON context item> is a <JSON value expression>, so it carries an optional FORMAT clause.
 and JsonApiCommon =
     { Context: Expression
+      ContextFormat: JsonRepresentation option
       Path: string
       PathName: Expression option
-      Passing: (Expression * Expression) list }
+      Passing: JsonPassingArgument list }
 
 // 11.1 <schema definition> — CREATE SCHEMA may contain further <schema element>s.
 // Elements are stored as StatementKind values; the parser reuses the full DDL

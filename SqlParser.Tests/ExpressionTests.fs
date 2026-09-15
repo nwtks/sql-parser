@@ -89,6 +89,21 @@ let ``Datetime type variants are parsed`` () =
     | res -> Assert.Fail(sprintf "Expected TIMESTAMP(3) WITH TIME ZONE, got %A" res)
 
 [<Fact>]
+let ``Interval type keeps its qualifier structure`` () =
+    match parse "SELECT CAST(x AS INTERVAL YEAR TO MONTH)" with
+    | Cast(_, IntervalType(IntervalQualifier.Range(Year, Month, None))) -> ()
+    | res -> Assert.Fail(sprintf "Expected structured interval type, got %A" res)
+
+    match parse "SELECT CAST(x AS INTERVAL SECOND(2,3))" with
+    | Cast(_, IntervalType(IntervalQualifier.SingleField(Second, Some prec))) ->
+        Assert.Equal(Some 2, prec.Leading)
+        Assert.Equal(Some 3, prec.FractionalSeconds)
+    | res -> Assert.Fail(sprintf "Expected fractional precision, got %A" res)
+
+    // A malformed qualifier is now rejected (the old raw-string parser accepted it).
+    parseFails "SELECT CAST(x AS INTERVAL FOO BAR)"
+
+[<Fact>]
 let ``Literal expressions verification`` () =
     Assert.Equal(Literal(Number 123m), parse "SELECT 123")
     Assert.Equal(Literal(String "hello"), parse "SELECT 'hello'")
@@ -463,11 +478,25 @@ let ``Row pattern navigation verification`` () =
 let ``JSON API passing clause verification`` () =
     match parse "SELECT JSON_VALUE(doc, '$.x' PASSING a AS p)" with
     | JsonValue({ Context = { Kind = Identifier "DOC" }
-                  Passing = [ ({ Kind = Identifier "A" }, { Kind = Identifier "P" }) ] },
+                  Passing = [ { Value = { Kind = Identifier "A" }
+                                InputFormat = None
+                                Name = { Kind = Identifier "P" } } ] },
                 None,
                 None,
                 None) -> ()
     | res -> Assert.Fail(sprintf "Expected JsonValue PASSING, got %A" res)
+
+[<Fact>]
+let ``JSON input clause is preserved`` () =
+    // 10.14 <JSON context item> ::= <JSON value expression> — the FORMAT clause must survive.
+    match parse "SELECT JSON_VALUE(x FORMAT JSON ENCODING UTF16, '$.a')" with
+    | JsonValue({ ContextFormat = Some(JsonEncoding(Some Utf16)) }, None, None, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected context FORMAT kept, got %A" res)
+
+    // 10.14 <JSON passing argument> — per-argument FORMAT clause.
+    match parse "SELECT JSON_VALUE(x, '$.a' PASSING y FORMAT JSON AS b)" with
+    | JsonValue({ Passing = [ { InputFormat = Some(JsonEncoding None) } ] }, None, None, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected passing FORMAT kept, got %A" res)
 
 [<Fact>]
 let ``JSON_VALUE function verification`` () =

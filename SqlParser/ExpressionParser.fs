@@ -169,8 +169,7 @@ module ExpressionParser =
               |>> fun (p, tz) -> TimestampType(p, tz) ]
 
     // 6.1 <interval type> ::= INTERVAL <interval qualifier>
-    let pIntervalType =
-        pKeyword "INTERVAL" >>. many1Chars (noneOf "();,") .>> ws |>> IntervalType
+    let pIntervalType = pKeyword "INTERVAL" >>. pIntervalQualifier |>> IntervalType
 
     // 6.7 <column reference> / 5.4 <identifier> — <identifier> | <column reference>
     let pIdentifierExpr = pIdentifier |>> Identifier |> withExprPosition
@@ -861,19 +860,24 @@ module ExpressionParser =
     let pJsonArgument =
         pValueExpressionNoBoolean .>>. opt pJsonInputClause .>> pKeyword "AS"
         .>>. pIdentifierExpr
-        |>> fun ((expr, _), name) -> (expr, name)
+        |>> fun ((value, inputFormat), name) ->
+            { JsonPassingArgument.Value = value
+              InputFormat = inputFormat
+              Name = name }
 
     // 10.14 <JSON API common syntax> ::= <JSON context item> , <JSON path specification>
     //     [ AS <JSON table path name> ] [ <JSON passing clause> ]
-    // <JSON context item> ::= <JSON value expression> (value expression — no boolean ops)
+    // <JSON context item> ::= <JSON value expression> (value expression — no boolean ops,
+    // plus an optional FORMAT clause)
     // <JSON path specification> ::= <character string literal> — stored as a plain string.
     let pJsonApiCommon =
         pValueExpressionNoBoolean .>>. opt pJsonInputClause .>> token (pstring ",")
         .>>. pCharacterStringLiteral
         .>>. opt (attempt (pKeyword "AS" >>. pIdentifierExpr))
         .>>. opt (pKeyword "PASSING" >>. sepBy1 pJsonArgument (token (pstring ",")))
-        |>> fun ((((context, _), path), pathName), passing) ->
+        |>> fun ((((context, contextFormat), path), pathName), passing) ->
             { Context = context
+              ContextFormat = contextFormat
               Path = path
               PathName = pathName
               Passing = Option.defaultValue [] passing }
@@ -2028,7 +2032,7 @@ module ExpressionParser =
         let jsonCommonChildren c =
             [ yield c.Context
               yield! Option.toList c.PathName
-              yield! c.Passing |> List.collect (fun (v, n) -> [ v; n ]) ]
+              yield! c.Passing |> List.collect (fun (a: JsonPassingArgument) -> [ a.Value; a.Name ]) ]
 
         let regexArgumentChildren (a: RegexArgument) =
             let occurrenceChildren o =
