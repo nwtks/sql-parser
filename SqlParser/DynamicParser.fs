@@ -20,7 +20,7 @@ module DynamicParser =
         |>> DeallocateDescriptor
 
     // 20.4 <header item name> — closed enumeration.
-    let pHeaderItemName: Parser<string, unit> =
+    let pHeaderItemName =
         choice
             [ pKeyword "COUNT"
               pKeyword "KEY_TYPE"
@@ -29,7 +29,7 @@ module DynamicParser =
               pKeyword "TOP_LEVEL_COUNT" ]
 
     // 20.4/20.5 <descriptor item name> — closed enumeration.
-    let pDescriptorItemName: Parser<string, unit> =
+    let pDescriptorItemName =
         choice
             [ pKeyword "CARDINALITY"
               pKeyword "CHARACTER_SET_CATALOG"

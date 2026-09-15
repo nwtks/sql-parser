@@ -698,7 +698,7 @@ module QueryParser =
         )
         <|> attempt (
             getPosition
-            .>>. (pValueExpressionPrimary .>> token (pstring ".") .>> pchar '*' .>> ws)
+            .>>. (pValueExpressionPrimaryStrict .>> token (pstring ".") .>> pchar '*' .>> ws)
             .>>. pAllFieldsAsClause
             .>> ws
             |>> fun ((pos, expr), cols) ->

@@ -1019,6 +1019,12 @@ let ``All fields reference verification`` () =
         | res -> Assert.Fail(sprintf "Expected AllFieldsReference for f(x).*, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
+    // 7.16 <all fields reference> uses pValueExpressionPrimaryStrict: the primary is a
+    // grammar-shaped <value expression primary>, so predicates and the '*' wildcard are
+    // rejected before the '.*'.
+    parseFails "SELECT EXISTS (SELECT 1).* FROM t"
+    parseFails "SELECT ** FROM t"
+
 [<Fact>]
 let ``Comma-separated FROM list verification`` () =
     match parse "SELECT * FROM users, orders" with

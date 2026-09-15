@@ -52,6 +52,42 @@ let ``SET TIME ZONE interval verification`` () =
     | res -> Assert.Fail(sprintf "Expected SetTimeZone interval, got %A" res)
 
 [<Fact>]
+let ``SET TIME ZONE datetime difference interval verification`` () =
+    // 6.37 4th alternative: ( <datetime value expression> - <datetime term> ) <interval qualifier>
+    match parse "SET TIME ZONE (ts1 - ts2) DAY" with
+    | SetTimeZone(Some { Kind = DatetimeDifference(_, _, _) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected DatetimeDifference, got %A" res)
+
+[<Fact>]
+let ``SET TIME ZONE interval chain verification`` () =
+    // 6.37 2nd/3rd alternatives, left-folded
+    match parse "SET TIME ZONE INTERVAL '1' DAY + INTERVAL '2' HOUR - INTERVAL '3' MINUTE" with
+    | SetTimeZone(Some { Kind = BinaryOp(Subtract, { Kind = BinaryOp(Add, _, _) }, { Kind = Literal(Interval _) }) }) ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected a left-folded interval chain, got %A" res)
+
+[<Fact>]
+let ``SET TIME ZONE interval term with numeric factor verification`` () =
+    match parse "SET TIME ZONE INTERVAL '1' DAY * 2" with
+    | SetTimeZone(Some { Kind = BinaryOp(Multiply, { Kind = Literal(Interval _) }, { Kind = Literal(Number 2m) }) }) ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected an interval term with a numeric factor, got %A" res)
+
+[<Fact>]
+let ``SET TIME ZONE rejects comparison and boolean expressions 19.4 verification`` () =
+    // The dedicated 6.37 parser stops before comparison/boolean operators, so the
+    // remaining input cannot be consumed by the statement and the parse fails.
+    parseFails "SET TIME ZONE x = y"
+    parseFails "SET TIME ZONE a OR b"
+
+[<Fact>]
+let ``SET TIME ZONE rejects predicates and star 6.37 verification`` () =
+    // pIntervalPrimary uses pValueExpressionPrimaryStrict: §8 predicate atoms and
+    // the 7.16 '*' wildcard are not <value expression primary>s.
+    parseFails "SET TIME ZONE EXISTS (SELECT 1)"
+    parseFails "SET TIME ZONE *"
+
+[<Fact>]
 let ``SET CATALOG verification`` () =
     match parse "SET CATALOG 'c1'" with
     | SetCatalog { Kind = Literal(String "c1") } -> ()

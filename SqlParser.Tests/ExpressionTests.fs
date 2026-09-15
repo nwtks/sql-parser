@@ -1003,6 +1003,11 @@ let ``AT TIME ZONE and AT LOCAL verification`` () =
     | AtTimeZone({ Kind = Identifier "X" }, TimeZoneSpecifier.TimeZoneOffset { Kind = Literal(Interval _) }) -> ()
     | res -> Assert.Fail(sprintf "Expected AT TIME ZONE interval, got %A" res)
 
+    // 6.37 <interval primary> uses pValueExpressionPrimaryStrict: §8 predicate atoms
+    // and the 7.16 '*' wildcard are not <value expression primary>s.
+    parseFails "SELECT x AT TIME ZONE EXISTS (SELECT 1)"
+    parseFails "SELECT x AT TIME ZONE *"
+
 [<Fact>]
 let ``MULTISET set operations verification`` () =
     match parse "SELECT m1 MULTISET UNION ALL m2" with
@@ -1024,6 +1029,12 @@ let ``MULTISET set operations verification`` () =
                            { Kind = Identifier "M1" },
                            { Kind = MultisetSetOperation(MultisetIntersect, None, _, _) }) -> ()
     | res -> Assert.Fail(sprintf "Expected INTERSECT to bind tighter, got %A" res)
+
+    // 6.43 <multiset primary> uses pValueExpressionPrimaryStrict: the right operand is a
+    // grammar-shaped <value expression primary>, so predicates and the '*' wildcard are
+    // rejected there.
+    parseFails "SELECT m1 MULTISET UNION *"
+    parseFails "SELECT m1 MULTISET UNION EXISTS (SELECT 1)"
 
 [<Fact>]
 let ``Binary operations verification`` () =

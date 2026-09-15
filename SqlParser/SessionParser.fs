@@ -38,12 +38,13 @@ module SessionParser =
     // 19.4 <set local time zone statement>
     // ::= SET TIME ZONE <set time zone value>
     // <set time zone value> ::= <interval value expression> | LOCAL
-    // None = LOCAL.
+    // None = LOCAL. The dedicated 6.37 <interval value expression> parser is used so that
+    // boolean/comparison expressions are rejected here.
     let pSetTimeZoneStatement =
         pKeyword "SET"
         >>. pKeyword "TIME"
         >>. pKeyword "ZONE"
-        >>. (attempt (pKeyword "LOCAL" >>% None) <|> (pExpression |>> Some))
+        >>. (attempt (pKeyword "LOCAL" >>% None) <|> (pIntervalValueExpression |>> Some))
         |>> SetTimeZone
 
     // 19.5 <set catalog statement> ::= SET CATALOG <value specification>

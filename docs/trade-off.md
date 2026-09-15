@@ -128,7 +128,24 @@ dialects:
   the grammar's `<factor>` with `<value expression primary>`, so
   `INTERVAL '1' DAY * ? DAY` fails; interval literals are shape-validated against
   their qualifier — coarse (no per-month check) but it rejects
-  `INTERVAL 'abc' YEAR`.
+  `INTERVAL 'abc' YEAR`. The 6.37 `<interval value expression>` has a full
+  dedicated parser (`pIntervalValueExpression`, after `pIntervalTerm`) with the
+  4th alternative — `( <datetime> - <datetime> ) <interval qualifier>` — kept as a
+  separate narrow parser (`pDatetimeDifference`) that is tried first, because
+  `pIntervalPrimary` would otherwise fold the parenthesized difference into
+  `IntervalPrimary`. The narrow form remains a `<value expression primary>`
+  alternative; `SET TIME ZONE` (19.4) consumes the full parser. Interval- vs
+  datetime-valued operands are syntactically indistinguishable, so non-interval
+  arithmetic (`1 + 2`) still parses — the distinction is semantic. The 6.35/6.37
+  chain (and `<interval primary>`, `<datetime term>`) uses
+  `pValueExpressionPrimaryStrict`, which excludes the two grammar-exceeding
+  approximations of `pValueExpressionPrimary` — the §8 predicate atoms
+  (`pPredicatePrimary`) and the 7.16 `*` wildcard — so predicates/star are
+  rejected inside interval and datetime operands. The same strict primary is used
+  by the 6.43 multiset sites (`<multiset primary>` in `pMultisetSetOperatorSuffix`
+  and `pMultisetValueExpressionRef`) and the 7.16 `<all fields reference>`; only
+  `opp.TermParser` keeps the full form, since it needs the predicate atoms for the
+  quantified-comparison rewrite and the `*` wildcard for select item lists.
 - **Row value constructors and JSON.** 7.1's `<explicit row value constructor>` is
   an expression case (the parenthesized form needs ≥ 2 elements, so `(a)` still
   means the plain parenthesized expression). JSON paths are plain `string`s and the

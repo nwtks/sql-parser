@@ -1342,7 +1342,9 @@ module ExpressionParser =
     // The difference of two datetimes, qualified as an interval. Tried ahead of the plain
     // parenthesized <value expression> alternative; `attempt` backtracks when no
     // <interval qualifier> follows the closing paren.
-    let pIntervalValueExpression =
+    // This covers the 4th alternative only; the full <interval value expression> is
+    // defined as pIntervalValueExpression below (after pIntervalTerm).
+    let pDatetimeDifference =
         attempt (
             between (token (pstring "(")) (token (pstring ")")) pDatetimeValueExpression
             .>>. pIntervalQualifier
@@ -1644,9 +1646,15 @@ module ExpressionParser =
 
     // — the atomic building block of every <value expression>, used as the term parser of the operator-precedence parser below.
     // 6.3 <value expression primary> — the atomic building block of every <value expression>
-    let pValueExpressionPrimary =
+    // The full form includes two grammar-exceeding approximations: the §8 predicate atoms
+    // (pPredicatePrimary, needed so ANY/SOME/ALL (subquery) beats the pRoutineInvocation
+    // whitelist and EXISTS/UNIQUE/PERIOD/JSON_EXISTS parse) and the 7.16 <asterisk>
+    // wildcard (needed by SELECT item lists). Contexts that require the grammar's
+    // <value expression primary> shape — the 6.35/6.37 datetime & interval chain — use
+    // pValueExpressionPrimaryStrict, which excludes both (see docs/trade-off.md).
+    let pValueExpressionPrimaryImpl (withPredicates: bool) =
         // 6.3 <scalar subquery> ::= ( <subquery> )
-        // Local because pValueExpressionPrimary is its only consumer.
+        // Local because pValueExpressionPrimaryImpl is its only consumer.
         let pScalarSubquery =
             between (token (pstring "(")) (token (pstring ")")) pQuery
             |>> SubqueryExpression
@@ -1700,7 +1708,8 @@ module ExpressionParser =
               attempt pJsonArrayFunction
               attempt pJsonObjectAggFunction
               attempt pJsonArrayAggFunction
-              attempt pPredicatePrimary
+              if withPredicates then
+                  attempt pPredicatePrimary
               attempt pStaticMethodInvocation
               attempt pNewSpecification
               attempt pNestedRowNumberFunction
@@ -1712,9 +1721,10 @@ module ExpressionParser =
               attempt pScalarSubquery
               attempt pLiteralExpr
               attempt pGeneralValueSpecification
-              attempt pStarExpr
+              if withPredicates then
+                  attempt pStarExpr
               attempt pGeneralizedInvocation
-              attempt pIntervalValueExpression
+              attempt pDatetimeDifference
               attempt pExplicitRowValueConstructor
               pColumnReferenceExpr
               between (token (pstring "(")) (token (pstring ")")) pExpression ]
@@ -1723,12 +1733,18 @@ module ExpressionParser =
         .>>. many (attempt pDereferenceReference <|> attempt pMethodOrFieldReference)
         |>> fun (e, refs) -> List.fold (fun acc f -> f acc) e refs
 
+    let pValueExpressionPrimary = pValueExpressionPrimaryImpl true
+
+    let pValueExpressionPrimaryStrict = pValueExpressionPrimaryImpl false
+
     // 6.37 <interval primary> ::= <value expression primary> [ <interval qualifier> ]
     //     | <interval value function>
     // A qualifier-less <interval primary> is represented by its <value expression primary>,
     // so wrapping only happens when an <interval qualifier> is actually present.
+    // The strict primary is used: predicates and the '*' wildcard are not
+    // <value expression primary>s and are rejected in interval context.
     let pIntervalPrimary =
-        pValueExpressionPrimary .>>. opt (attempt pIntervalQualifier)
+        pValueExpressionPrimaryStrict .>>. opt (attempt pIntervalQualifier)
         |>> fun (e, qualifier) ->
             match qualifier with
             | Some qual ->
@@ -1794,18 +1810,47 @@ module ExpressionParser =
             |>> fun (sign, e) -> pIntervalSigned sign e
 
         let pNumericFactor =
-            opt (attempt pIntervalSign) .>>. pValueExpressionPrimary
+            opt (attempt pIntervalSign) .>>. pValueExpressionPrimaryStrict
             |>> fun (sign, e) -> pIntervalSigned sign e
 
         pIntervalFactor .>>. many (attempt (pMul <|> pDiv .>>. pNumericFactor))
         |>> fun (first, rest) -> rest |> List.fold (fun acc (op, operand) -> op acc operand) first
 
+    // 6.37 <interval value expression> ::= <interval term>
+    //     | <interval value expression> <plus sign> <interval term>
+    //     | <interval value expression> <minus sign> <interval term>
+    //     | ( <datetime value expression> <minus sign> <datetime term> ) <interval qualifier>
+    // The 4th alternative is tried first: pIntervalPrimary would otherwise fold
+    // `( <datetime> - <datetime> ) <interval qualifier>` into IntervalPrimary via the plain
+    // parenthesized <value expression> + qualifier path. The +/- chain is left-folded so that
+    // 'a + b - c' associates to the left; the '-' operator must not swallow the start of the
+    // '->' dereference operator. The grammar does not distinguish interval-valued from
+    // datetime-valued operands syntactically, so any <value expression primary> that
+    // pIntervalTerm accepts goes through here as well (e.g. 1 + 2) — see docs/trade-off.md.
+    let pIntervalValueExpression =
+        let pOperator =
+            attempt (pchar '+' .>> ws) >>% BinaryOperator.Add
+            <|> (pchar '-' .>> notFollowedBy (pchar '>') .>> ws >>% BinaryOperator.Subtract)
+
+        choice
+            [ attempt pDatetimeDifference
+              pIntervalTerm .>>. many (attempt (pOperator .>>. pIntervalTerm))
+              |>> fun (first, rest) ->
+                  rest
+                  |> List.fold
+                      (fun acc (op, rhs) ->
+                          { Expression.Kind = BinaryOp(op, acc, rhs)
+                            Pos = acc.Pos })
+                      first ]
+
     // 6.35 <datetime term> ::= <datetime factor>
     //   <datetime factor> ::= <datetime primary> [ <time zone> ]
     //   <datetime primary> ::= <value expression primary> | <datetime value function>
     // (<datetime value function> is one of the pValueExpressionPrimary alternatives.)
+    // The strict primary is used: predicates and the '*' wildcard are not
+    // <value expression primary>s and are rejected in datetime context.
     let pDatetimeTerm =
-        pValueExpressionPrimary .>>. opt (attempt pTimeZoneSuffix)
+        pValueExpressionPrimaryStrict .>>. opt (attempt pTimeZoneSuffix)
         |>> fun (e, timeZone) ->
             match timeZone with
             | Some applyTimeZone -> applyTimeZone e
@@ -1850,12 +1895,12 @@ module ExpressionParser =
             many (
                 attempt (
                     pKeyword "MULTISET" >>. pKeyword "INTERSECT" >>. pModifier
-                    .>>. pValueExpressionPrimary
+                    .>>. pValueExpressionPrimaryStrict
                 )
             )
 
         let pTerm =
-            pValueExpressionPrimary .>>. pIntersectChain
+            pValueExpressionPrimaryStrict .>>. pIntersectChain
             |>> fun (first, rest) ->
                 rest
                 |> List.fold
@@ -1877,8 +1922,9 @@ module ExpressionParser =
                   Pos = lhs.Pos }
 
     // 6.43/6.44 — the self-contained <multiset value expression> used by the 6.44 SET ( ... )
+    // The base is a <multiset primary>, so the strict primary is used.
     pMultisetValueExpressionRef.Value <-
-        pValueExpressionPrimary .>>. many (attempt pMultisetSetOperatorSuffix)
+        pValueExpressionPrimaryStrict .>>. many (attempt pMultisetSetOperatorSuffix)
         |>> fun (first, rest) -> rest |> List.fold (fun acc f -> f acc) first
 
     // 6.28 <value expression> / 6.29 <numeric value expression> / 6.31 <string value expression>
