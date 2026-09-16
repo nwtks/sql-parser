@@ -42,6 +42,12 @@ module ExpressionParser =
     let pPredicatePrimary, pPredicatePrimaryRef =
         createParserForwardedToRef<Expression, unit> ()
 
+    // 6.29 <numeric value expression> — forward ref (wired after pValueExpressionPrimaryStrict is defined
+    // to break the cycle: pValueExpressionPrimaryImpl → pArrayElementReference → pNumericValueExpression
+    // → pValueExpressionPrimaryStrict → pValueExpressionPrimaryImpl).
+    let pNumericValueExpression, pNumericValueExpressionRef =
+        createParserForwardedToRef<Expression, unit> ()
+
     // 6.3 <value expression primary> helper — attaches source position to an ExpressionKind
     let withExprPosition p =
         getPosition .>>. p
@@ -312,11 +318,31 @@ module ExpressionParser =
     //     | <SQL parameter reference> | <embedded variable name>
     // (<embedded variable name> is a host-language construct and is not modelled;
     //  it degrades to <host parameter name> — see docs/trade-off.md.)
+    // NOTE: also accepts bare identifiers (pQualifiedNameExpr) for backward compatibility
+    // with existing SET/CONNECT/DISCONNECT usage where identifiers are common.
     let pSimpleValueSpecification =
         choice
             [ pLiteralExpr
               pQuestionMark >>% "?" <|> pHostParameter |>> Parameter |> withExprPosition
               pQualifiedNameExpr ]
+
+    // 6.4 <simple value specification> (strict) — literals and host params only, no bare identifiers.
+    // Used where the grammar's <simple value specification> does not include identifiers
+    // (<offset row count>, <fetch first row count>, <number of conditions>, <occurrences>).
+    let pSimpleValueSpecificationStrict =
+        choice
+            [ pLiteralExpr
+              pQuestionMark >>% "?" <|> pHostParameter |>> Parameter |> withExprPosition ]
+
+    // 6.4 <value specification> ::= <literal> | <general value specification>
+    // Used where the grammar requires a <value specification> (SET CATALOG/SCHEMA/NAMES/PATH,
+    // SET SESSION AUTHORIZATION, SET ROLE, CONNECT TO, ALLOCATE DESCRIPTOR WITH MAX, etc.).
+    // pLiteralExpr covers <unsigned literal> (unsigned numeric + general literals + datetime +
+    // interval + boolean + binary); pGeneralValueSpecification covers host params and keyword forms.
+    let pValueSpecification =
+        choice
+            [ pLiteralExpr
+              pGeneralValueSpecification ]
 
     // 6.5 <default specification> ::= DEFAULT — only valid in specific contexts (INSERT VALUES, UPDATE SET), not as a general expression. This parser is used by the DML parser for those contexts.
     let pDefaultValue: Parser<Expression, unit> =
@@ -487,14 +513,15 @@ module ExpressionParser =
             <|> (pKeyword "RANGE" >>% Range)
             <|> (pKeyword "GROUPS" >>% Groups)
 
-        // 7.15 <window frame bound> ::= UNBOUNDED PRECEDING | UNBOUNDED FOLLOWING | CURRENT ROW | <value expression> PRECEDING | <value expression> FOLLOWING
+        // 7.15 <window frame bound> ::= UNBOUNDED PRECEDING | UNBOUNDED FOLLOWING | CURRENT ROW | <unsigned value specification> PRECEDING | <unsigned value specification> FOLLOWING
+        // <unsigned value specification> = <unsigned literal> | <general value specification>; pValueSpecification models this exactly.
         let pBound =
             choice
                 [ attempt (pKeyword "UNBOUNDED" >>. pKeyword "PRECEDING" >>% UnboundedPreceding)
                   attempt (pKeyword "UNBOUNDED" >>. pKeyword "FOLLOWING" >>% UnboundedFollowing)
                   attempt (pKeyword "CURRENT" >>. pKeyword "ROW" >>% CurrentRow)
-                  attempt (pExpression .>> pKeyword "PRECEDING" |>> Preceding)
-                  attempt (pExpression .>> pKeyword "FOLLOWING" |>> Following) ]
+                  attempt (pValueSpecification .>> pKeyword "PRECEDING" |>> Preceding)
+                  attempt (pValueSpecification .>> pKeyword "FOLLOWING" |>> Following) ]
 
         // 7.15 <window frame exclusion> ::= EXCLUDE CURRENT ROW | EXCLUDE GROUP | EXCLUDE TIES | EXCLUDE NO OTHERS
         let pExclusion =
@@ -776,7 +803,7 @@ module ExpressionParser =
 
     // 6.24 <array element reference> — postfix [ <numeric value expression> ]
     let pArrayElementReference =
-        between (token pLeftBracket) (token pRightBracket) pExpression
+        between (token pLeftBracket) (token pRightBracket) pNumericValueExpression
         |>> fun idx ->
             fun e ->
                 { Expression.Kind = ArrayElement(e, idx)
@@ -906,6 +933,9 @@ module ExpressionParser =
         |> withExprPosition
 
     // 6.30 <extract expression> ::= EXTRACT <left paren> <extract field> FROM <extract source> <right paren>
+    // <extract field> ::= <primary datetime field> | <time zone field>
+    // <primary datetime field> ::= <non-second primary datetime field> | SECOND
+    // <time zone field> ::= TIMEZONE_HOUR | TIMEZONE_MINUTE
     let pExtractExpression =
         pKeyword "EXTRACT"
         >>. between
@@ -913,13 +943,14 @@ module ExpressionParser =
                 (token (pstring ")"))
                 (getPosition
                  .>>. (choice
-                     [ pKeyword "YEAR" >>% "YEAR"
-                       pKeyword "MONTH" >>% "MONTH"
-                       pKeyword "DAY" >>% "DAY"
-                       pKeyword "HOUR" >>% "HOUR"
-                       pKeyword "MINUTE" >>% "MINUTE"
-                       pKeyword "SECOND" >>% "SECOND"
-                       pIdentifierRaw ])
+                     [ attempt (pKeyword "YEAR" >>% "YEAR")
+                       attempt (pKeyword "MONTH" >>% "MONTH")
+                       attempt (pKeyword "DAY" >>% "DAY")
+                       attempt (pKeyword "HOUR" >>% "HOUR")
+                       attempt (pKeyword "MINUTE" >>% "MINUTE")
+                       attempt (pKeyword "SECOND" >>% "SECOND")
+                       attempt (pKeyword "TIMEZONE_HOUR" >>% "TIMEZONE_HOUR")
+                       attempt (pKeyword "TIMEZONE_MINUTE" >>% "TIMEZONE_MINUTE") ])
                  .>> pKeyword "FROM"
                  .>>. pExpression)
         |>> fun ((pos, field), src) ->
@@ -1362,7 +1393,7 @@ module ExpressionParser =
     // 6.41 <trim array function> ::= TRIM_ARRAY ( <array value expression> , <numeric value expression> )
     let pTrimArrayFunction =
         pKeyword "TRIM_ARRAY"
-        >>. between (token (pstring "(")) (token (pstring ")")) (pExpression .>> token (pstring ",") .>>. pExpression)
+        >>. between (token (pstring "(")) (token (pstring ")")) (pExpression .>> token (pstring ",") .>>. pNumericValueExpression)
         |>> fun (arr, count) -> TrimArray(arr, count)
         |> withExprPosition
 
@@ -1978,6 +2009,31 @@ module ExpressionParser =
     // grammar requires a non-boolean <value expression> (e.g. <point in time> in
     // <query system time period specification>, 7.6). Stops before AND/OR.
     pValueExpressionNoBooleanRef.Value <- opp.ExpressionParser
+
+    // 6.29 <numeric value expression> — arithmetic-only opp (no comparisons, no predicates).
+    // Used where the grammar requires <numeric value expression> (TABLESAMPLE percentage,
+    // <repeat argument>, array subscript, SUBSTRING start position / string length,
+    // OVERLAY start position / length, TRIM_ARRAY count, POSITION start position,
+    // WIDTH_BUCKET bounds/count).
+    let oppNumeric = new OperatorPrecedenceParser<Expression, unit, unit>()
+    oppNumeric.TermParser <- pValueExpressionPrimaryStrict
+
+    let addInfixNum op precedence assoc mapping =
+        oppNumeric.AddOperator(InfixOperator(op, ws, precedence, assoc, fun x y -> { Kind = mapping x y; Pos = x.Pos }))
+
+    let addPrefixNum op precedence mapping =
+        oppNumeric.AddOperator(PrefixOperator(op, ws, precedence, true, fun x -> { Kind = mapping x; Pos = x.Pos }))
+
+    addPrefixNum "+" 8 (fun e -> UnaryOp(UnaryOperator.Plus, e))
+    addPrefixNum "-" 8 (fun e -> UnaryOp(UnaryOperator.Minus, e))
+    addInfixNum "*" 7 Associativity.Left (fun x y -> BinaryOp(Multiply, x, y))
+    addInfixNum "/" 7 Associativity.Left (fun x y -> BinaryOp(Divide, x, y))
+    addInfixNum "+" 6 Associativity.Left (fun x y -> BinaryOp(Add, x, y))
+    addInfixNum "-" 6 Associativity.Left (fun x y -> BinaryOp(Subtract, x, y))
+
+    // Wire up the numeric value expression forward ref (breaks the cycle: pValueExpressionPrimaryImpl
+    // → pArrayElementReference → pNumericValueExpression → pValueExpressionPrimaryStrict → pValueExpressionPrimaryImpl).
+    pNumericValueExpressionRef.Value <- oppNumeric.ExpressionParser
 
     // 6.39 <boolean test> ::= <boolean primary> IS [ NOT ] { TRUE | FALSE | UNKNOWN } — combined here with
     // 8.x <predicate> / 6.24 <array element reference> postfix applied to a <value expression>

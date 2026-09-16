@@ -291,27 +291,25 @@ module DataManipulationParser =
     let pMergeStatement =
         // 14.12 <merge update specification> ::= UPDATE SET <set clause list>
         // 14.12 <merge delete specification> ::= DELETE
-        // 14.12 <merge insert specification> ::= INSERT [ ( <insert column list> ) ] [ <override clause> ] VALUES <merge insert value list>
-        let pAction =
-            // <merge update specification> ::= UPDATE SET <set clause list> (14.12)
-            // <merge delete specification> ::= DELETE
-            // <merge insert specification> ::= INSERT [ ( <insert column list> ) ] [ <override clause> ] VALUES <merge insert value list>
+        let pMatchedAction =
+            // <merge update or delete specification> ::= <merge update specification> | <merge delete specification>
             choice
                 [ attempt (pKeyword "UPDATE" >>. pKeyword "SET")
                   >>. sepBy1 (pIdentifierExpr .>> token (pstring "=") .>>. pExpression) (token (pstring ","))
                   |>> MergeUpdate
-                  pKeyword "DELETE" >>% MergeDelete
-                  pKeyword "INSERT"
-                  >>. opt (
-                      between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
-                  )
-                  .>>. pOverride
-                  .>> pKeyword "VALUES"
-                  .>>. between
-                      (token (pstring "("))
-                      (token (pstring ")"))
-                      (sepBy1 (pDefaultValue <|> pExpression) (token (pstring ",")))
-                  |>> fun ((cols, ovr), values) -> MergeInsert(cols, ovr, values) ]
+                  pKeyword "DELETE" >>% MergeDelete ]
+
+        // 14.12 <merge insert specification> ::= INSERT [ ( <insert column list> ) ] [ <override clause> ] VALUES <merge insert value list>
+        let pNotMatchedAction =
+            pKeyword "INSERT"
+            >>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ","))))
+            .>>. pOverride
+            .>> pKeyword "VALUES"
+            .>>. between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (sepBy1 (pDefaultValue <|> pExpression) (token (pstring ",")))
+            |>> fun ((cols, ovr), values) -> MergeInsert(cols, ovr, values)
 
         // 14.12 <merge when matched clause>     ::= WHEN MATCHED [ AND <search condition> ] THEN <merge update or delete specification>
         // 14.12 <merge when not matched clause> ::= WHEN NOT MATCHED [ AND <search condition> ] THEN <merge insert specification>
@@ -322,11 +320,14 @@ module DataManipulationParser =
                       pKeyword "MATCHED" >>% Matched ]
             .>>. opt (pKeyword "AND" >>. pExpression)
             .>> pKeyword "THEN"
-            .>>. pAction
-            |>> fun ((cond, filter), action) ->
-                { MatchCondition = cond
-                  Condition = filter
-                  Action = action }
+            >>= fun (cond, filter) ->
+                (match cond with
+                 | Matched -> pMatchedAction
+                 | NotMatched -> pNotMatchedAction)
+                |>> fun action ->
+                    { MatchCondition = cond
+                      Condition = filter
+                      Action = action }
 
         pKeyword "MERGE" >>. pKeyword "INTO" >>. pTargetTable
         .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)

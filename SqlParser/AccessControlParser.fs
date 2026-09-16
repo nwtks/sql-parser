@@ -15,6 +15,11 @@ module AccessControlParser =
         <|> (pKeyword "CURRENT_USER" >>% Grantor.CurrentUser)
         <|> (pKeyword "CURRENT_ROLE" >>% Grantor.CurrentRole)
 
+    // 12.3 <grantee> ::= PUBLIC | <authorization identifier>
+    let pGrantee =
+        (pKeyword "PUBLIC" >>% Grantee.Public)
+        <|> (pIdentifierExpr |>> Grantee.AuthorizationId)
+
     // 12.3 <privileges> ::= ALL PRIVILEGES | <action> [ { <comma> <action> }... ]
     // The three 12.3 sub-rules below are local because <privileges> is their only consumer.
     let pPrivileges =
@@ -92,7 +97,7 @@ module AccessControlParser =
         >>. choice
                 [ attempt (
                       pPrivileges .>> pKeyword "ON" .>>. pObjectName .>> pKeyword "TO"
-                      .>>. sepBy1 pIdentifierExpr (token (pstring ","))
+                      .>>. sepBy1 pGrantee (token (pstring ","))
                       .>>. opt (attempt (pKeyword "WITH" >>. pKeyword "HIERARCHY" >>. pKeyword "OPTION"))
                       .>>. opt (attempt (pKeyword "WITH" >>. pKeyword "GRANT" >>. pKeyword "OPTION"))
                       .>>. opt (attempt (pKeyword "GRANTED" >>. pKeyword "BY" >>. pGrantor))
@@ -120,7 +125,7 @@ module AccessControlParser =
                   //     TO <grantee> [ { , <grantee> }... ] [ WITH ADMIN OPTION ] [ GRANTED BY <grantor> ]
                   attempt (
                       sepBy1 pIdentifierExpr (token (pstring ",")) .>> pKeyword "TO"
-                      .>>. sepBy1 pIdentifierExpr (token (pstring ","))
+                      .>>. sepBy1 pGrantee (token (pstring ","))
                       .>>. opt (attempt (pKeyword "WITH" >>. pKeyword "ADMIN" >>. pKeyword "OPTION"))
                       .>>. opt (attempt (pKeyword "GRANTED" >>. pKeyword "BY" >>. pGrantor))
                       |>> fun (((roles, grantees), withAdm), grantor) ->
@@ -153,7 +158,7 @@ module AccessControlParser =
                       opt (attempt pRevokeOptionExtension) .>>. pPrivileges .>> pKeyword "ON"
                       .>>. pObjectName
                       .>> pKeyword "FROM"
-                      .>>. sepBy1 pIdentifierExpr (token (pstring ","))
+                      .>>. sepBy1 pGrantee (token (pstring ","))
                       .>>. opt (attempt (pKeyword "GRANTED" >>. pKeyword "BY" >>. pGrantor))
                       .>>. pDropBehavior
                       |>> fun (((((optOpt, privs), (kind, rt, name)), grantees), grantor), cascade) ->
@@ -183,7 +188,7 @@ module AccessControlParser =
                       opt (attempt (pKeyword "ADMIN" >>. pKeyword "OPTION" >>. pKeyword "FOR" >>% true))
                       .>>. sepBy1 pIdentifierExpr (token (pstring ","))
                       .>> pKeyword "FROM"
-                      .>>. sepBy1 pIdentifierExpr (token (pstring ","))
+                      .>>. sepBy1 pGrantee (token (pstring ","))
                       .>>. opt (attempt (pKeyword "GRANTED" >>. pKeyword "BY" >>. pGrantor))
                       .>>. pDropBehavior
                       |>> fun ((((adminFor, roles), grantees), grantor), cascade) ->

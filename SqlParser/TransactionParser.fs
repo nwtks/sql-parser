@@ -22,7 +22,11 @@ module TransactionParser =
             [ attempt (pKeyword "ISOLATION" >>. pKeyword "LEVEL" >>. pIsolationLevel |>> Isolation)
               attempt (pKeyword "READ" >>. pKeyword "ONLY" >>% AccessMode ReadOnly)
               attempt (pKeyword "READ" >>. pKeyword "WRITE" >>% AccessMode ReadWrite)
-              attempt (pKeyword "DIAGNOSTICS" >>. pKeyword "SIZE" >>. pExpression |>> DiagnosticsSize) ]
+              // <number of conditions> ::= <simple value specification> (strict)
+              attempt (
+                  pKeyword "DIAGNOSTICS" >>. pKeyword "SIZE" >>. pSimpleValueSpecificationStrict
+                  |>> DiagnosticsSize
+              ) ]
 
     // 17.3 <transaction characteristics> ::= <transaction mode> [ { <comma> <transaction mode> }... ]
     let pTransactionCharacteristics = sepBy1 pTransactionMode (token (pstring ","))

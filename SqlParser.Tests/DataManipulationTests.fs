@@ -394,6 +394,12 @@ let ``MERGE INSERT OVERRIDING USER VALUE verification`` () =
     | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)
 
 [<Fact>]
+let ``MERGE with mismatched action branch is rejected`` () =
+    // WHEN MATCHED requires UPDATE/DELETE; WHEN NOT MATCHED requires INSERT
+    parseFails "MERGE INTO t USING s ON (1=1) WHEN NOT MATCHED THEN UPDATE SET a = 1"
+    parseFails "MERGE INTO t USING s ON (1=1) WHEN MATCHED THEN INSERT VALUES (1)"
+
+[<Fact>]
 let ``UPDATE verification`` () =
     match parse "UPDATE users SET name = 'bob' WHERE id = 1" with
     | Update { Target = TableTarget({ Kind = Identifier "USERS" }, false)

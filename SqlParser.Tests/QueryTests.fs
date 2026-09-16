@@ -1167,6 +1167,36 @@ let ``FOR SHARE is rejected (not in SQL-2016)`` () =
     parseFails "SELECT * FROM users FOR SHARE"
 
 [<Fact>]
+let ``OFFSET with expression is rejected`` () =
+    parseFails "SELECT * FROM t OFFSET 1 + 1 ROWS"
+    parseFails "SELECT * FROM t OFFSET x ROWS"
+    parseFails "SELECT * FROM t OFFSET (SELECT 1) ROWS"
+
+[<Fact>]
+let ``FETCH FIRST with expression is rejected`` () =
+    parseFails "SELECT * FROM t FETCH FIRST 1 + 1 ROWS ONLY"
+    parseFails "SELECT * FROM t FETCH FIRST x PERCENT WITH TIES"
+    parseFails "SELECT * FROM t FETCH NEXT (SELECT 1) ROWS ONLY"
+
+[<Fact>]
+let ``Window frame bound with signed expression is rejected`` () =
+    parseFails "SELECT SUM(x) OVER (ORDER BY y ROWS BETWEEN -1 PRECEDING AND CURRENT ROW)"
+    parseFails "SELECT SUM(x) OVER (ORDER BY y ROWS BETWEEN 1+1 PRECEDING AND CURRENT ROW)"
+    parseFails "SELECT SUM(x) OVER (ORDER BY y RANGE BETWEEN x PRECEDING AND CURRENT ROW)"
+
+[<Fact>]
+let ``TABLESAMPLE with invalid percentage is rejected`` () =
+    // Comparisons/boolean operators are not <numeric value expression>
+    parseFails "SELECT * FROM t TABLESAMPLE SYSTEM (a = b)"
+    parseFails "SELECT * FROM t TABLESAMPLE BERNOULLI (a OR b)"
+    parseFails "SELECT * FROM t TABLESAMPLE BERNOULLI (EXISTS (SELECT 1))"
+
+[<Fact>]
+let ``Window partition with non-column reference is rejected`` () =
+    parseFails "SELECT SUM(a) OVER (w) FROM t WINDOW w AS (PARTITION BY 1 + 1)"
+    parseFails "SELECT SUM(a) OVER (w) FROM t WINDOW w AS (PARTITION BY a || b)"
+
+[<Fact>]
 let ``Parenthesized query primary with ORDER BY verification`` () =
     match parse "(SELECT 1 ORDER BY 1) UNION SELECT 2" with
     | Select(SetOperation(SelectQuery { OrderBy = [ { Kind = Literal(Number 1m) }, true, None ] },

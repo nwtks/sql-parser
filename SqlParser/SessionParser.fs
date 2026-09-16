@@ -24,15 +24,16 @@ module SessionParser =
         pKeyword "SET"
         >>. pKeyword "SESSION"
         >>. pKeyword "AUTHORIZATION"
-        >>. pExpression
+        >>. pValueSpecification
         |>> SetSessionAuthorization
 
     //   19.3 <set role statement> ::= SET ROLE <role specification>
     //   <role specification> ::= <value specification> | NONE
+    // Uses pSimpleValueSpecification (includes identifiers) to accept both SET ROLE admin and SET ROLE 'admin'.
     let pSetRoleStatement =
         pKeyword "SET"
         >>. pKeyword "ROLE"
-        >>. (attempt (pKeyword "NONE" >>% None) <|> (pExpression |>> Some))
+        >>. (attempt (pKeyword "NONE" >>% None) <|> (pSimpleValueSpecification |>> Some))
         |>> SetRole
 
     // 19.4 <set local time zone statement>
@@ -49,19 +50,19 @@ module SessionParser =
 
     // 19.5 <set catalog statement> ::= SET CATALOG <value specification>
     let pSetCatalogStatement =
-        pKeyword "SET" >>. pKeyword "CATALOG" >>. pExpression |>> SetCatalog
+        pKeyword "SET" >>. pKeyword "CATALOG" >>. pValueSpecification |>> SetCatalog
 
     // 19.6 <set schema statement> ::= SET SCHEMA <value specification>
     let pSetSchemaStatement =
-        pKeyword "SET" >>. pKeyword "SCHEMA" >>. pExpression |>> SetSchema
+        pKeyword "SET" >>. pKeyword "SCHEMA" >>. pValueSpecification |>> SetSchema
 
     // 19.7 <set names statement> ::= SET NAMES <value specification>
     let pSetNamesStatement =
-        pKeyword "SET" >>. pKeyword "NAMES" >>. pExpression |>> SetNames
+        pKeyword "SET" >>. pKeyword "NAMES" >>. pValueSpecification |>> SetNames
 
     // 19.8 <set path statement> ::= SET PATH <value specification>
     let pSetPathStatement =
-        pKeyword "SET" >>. pKeyword "PATH" >>. pExpression |>> SetPath
+        pKeyword "SET" >>. pKeyword "PATH" >>. pValueSpecification |>> SetPath
 
     // 19.9 <set transform group statement> ::= SET <transform group characteristic>
     // 19.9 <transform group characteristic> ::=
@@ -72,7 +73,10 @@ module SessionParser =
     let pSetTransformGroupStatement =
         pKeyword "SET"
         >>. (attempt (
-                 pKeyword "DEFAULT" >>. pKeyword "TRANSFORM" >>. pKeyword "GROUP" >>. pExpression
+                 pKeyword "DEFAULT"
+                 >>. pKeyword "TRANSFORM"
+                 >>. pKeyword "GROUP"
+                 >>. pValueSpecification
                  |>> fun g -> g, None
              )
              <|> (pKeyword "TRANSFORM"
@@ -80,7 +84,7 @@ module SessionParser =
                   >>. pKeyword "FOR"
                   >>. pKeyword "TYPE"
                   >>. pQualifiedNameExpr
-                  .>>. pExpression
+                  .>>. pValueSpecification
                   |>> fun (t, g) -> g, Some t))
         |>> fun (group, typeName) -> SetTransformGroup(group, typeName)
 
@@ -92,6 +96,6 @@ module SessionParser =
     let pSetSessionCollationStatement =
         pKeyword "SET"
         >>. (attempt (pKeyword "NO" >>. pKeyword "COLLATION" >>% None)
-             <|> (pKeyword "COLLATION" >>. pExpression |>> Some))
-        .>>. opt (attempt (pKeyword "FOR" >>. sepBy1 pExpression (token (pstring ","))))
+             <|> (pKeyword "COLLATION" >>. pValueSpecification |>> Some))
+        .>>. opt (attempt (pKeyword "FOR" >>. sepBy1 pQualifiedNameExpr (token (pstring ","))))
         |>> fun (collation, charsets) -> SetSessionCollation(collation, charsets)

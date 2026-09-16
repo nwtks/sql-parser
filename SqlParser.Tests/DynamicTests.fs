@@ -149,6 +149,12 @@ let ``DESCRIBE statement name verification`` () =
     | res -> Assert.Fail(sprintf "Expected Describe statement name, got %A" res)
 
 [<Fact>]
+let ``DESCRIBE INPUT rejects CURSOR`` () =
+    // <describe input statement> ::= DESCRIBE INPUT <SQL statement name> <using descriptor> [ <nesting option> ]
+    // INPUT commits to <describe input statement>; CURSOR is a reserved word and cannot be an <SQL statement name>.
+    parseStatementFails "DESCRIBE INPUT CURSOR cur STRUCTURE USING DESCRIPTOR d1"
+
+[<Fact>]
 let ``EXECUTE verification`` () =
     match parseStatement "EXECUTE stmt INTO a USING 1, 2" with
     | Execute({ Kind = Identifier "STMT" },
@@ -277,6 +283,12 @@ let ``ALLOCATE RECEIVED CURSOR with specific routine designator verification`` (
 
 [<Fact>]
 let ``ALLOCATE without cursor name is rejected`` () = parseStatementFails "ALLOCATE c"
+
+[<Fact>]
+let ``ALLOCATE DESCRIPTOR WITH MAX rejects expression`` () =
+    parseStatementFails "ALLOCATE DESCRIPTOR d1 WITH MAX 1 + 1"
+    parseStatementFails "ALLOCATE DESCRIPTOR d1 WITH MAX a || b"
+    parseStatementFails "ALLOCATE DESCRIPTOR d1 WITH MAX x = y"
 
 [<Fact>]
 let ``PIPE ROW verification`` () =

@@ -95,8 +95,10 @@ let ``GRANTED BY grantor verification`` () =
 
     // 12.5 <grant role statement> — GRANTED BY <grantor>
     match parse "GRANT role_a TO alice GRANTED BY CURRENT_USER" with
-    | GrantRoles([ { Kind = Identifier "ROLE_A" } ], [ { Kind = Identifier "ALICE" } ], false, Some Grantor.CurrentUser) ->
-        ()
+    | GrantRoles([ { Kind = Identifier "ROLE_A" } ],
+                 [ Grantee.AuthorizationId { Kind = Identifier "ALICE" } ],
+                 false,
+                 Some Grantor.CurrentUser) -> ()
     | res -> Assert.Fail(sprintf "Expected GrantRoles GRANTED BY, got %A" res)
 
 [<Fact>]
@@ -114,7 +116,8 @@ let ``GRANT verification`` () =
         | res -> Assert.Fail(sprintf "Expected object users, got %A" res)
 
         match stmt.Grantees with
-        | [ { Kind = Identifier "ALICE" }; { Kind = Identifier "BOB" } ] -> ()
+        | [ Grantee.AuthorizationId { Kind = Identifier "ALICE" }; Grantee.AuthorizationId { Kind = Identifier "BOB" } ] ->
+            ()
         | res -> Assert.Fail(sprintf "Expected grantees alice and bob, got %A" res)
 
         Assert.False(stmt.WithHierarchyOption)
@@ -137,7 +140,7 @@ let ``GRANT verification`` () =
         | res -> Assert.Fail(sprintf "Expected object users, got %A" res)
 
         match stmt.Grantees with
-        | [ { Kind = Identifier "PUBLIC" } ] -> ()
+        | [ Grantee.Public ] -> ()
         | res -> Assert.Fail(sprintf "Expected grantee PUBLIC, got %A" res)
 
         Assert.False(stmt.WithHierarchyOption)
@@ -165,7 +168,7 @@ let ``GRANT verification`` () =
     // 12.5 <grant role statement>
     match parse "GRANT role_a, role_b TO alice WITH ADMIN OPTION" with
     | GrantRoles([ { Kind = Identifier "ROLE_A" }; { Kind = Identifier "ROLE_B" } ],
-                 [ { Kind = Identifier "ALICE" } ],
+                 [ Grantee.AuthorizationId { Kind = Identifier "ALICE" } ],
                  true,
                  None) -> ()
     | res -> Assert.Fail(sprintf "Expected GrantRoles, got %A" res)
@@ -202,7 +205,7 @@ let ``GRANT UNDER privilege verification`` () =
         | res -> Assert.Fail(sprintf "Expected object users, got %A" res)
 
         match stmt.Grantees with
-        | [ { Kind = Identifier "ALICE" } ] -> ()
+        | [ Grantee.AuthorizationId { Kind = Identifier "ALICE" } ] -> ()
         | res -> Assert.Fail(sprintf "Expected grantee alice, got %A" res)
     | res -> Assert.Fail(sprintf "Expected GrantTable, got %A" res)
 
@@ -217,7 +220,7 @@ let ``GRANT EXECUTE ON routine verification`` () =
         | res -> Assert.Fail(sprintf "Expected object add, got %A" res)
 
         match stmt.Grantees with
-        | [ { Kind = Identifier "ALICE" } ] -> ()
+        | [ Grantee.AuthorizationId { Kind = Identifier "ALICE" } ] -> ()
         | res -> Assert.Fail(sprintf "Expected grantee alice, got %A" res)
     | res -> Assert.Fail(sprintf "Expected GrantRoutine FUNCTION, got %A" res)
 
@@ -267,7 +270,7 @@ let ``REVOKE verification`` () =
         | res -> Assert.Fail(sprintf "Expected object users, got %A" res)
 
         match stmt.Grantees with
-        | [ { Kind = Identifier "ALICE" } ] -> ()
+        | [ Grantee.AuthorizationId { Kind = Identifier "ALICE" } ] -> ()
         | res -> Assert.Fail(sprintf "Expected grantee alice, got %A" res)
 
         match stmt.Option with
@@ -311,16 +314,24 @@ let ``REVOKE verification`` () =
 
     // 12.7 <revoke role statement>
     match parse "REVOKE role_a FROM alice CASCADE" with
-    | RevokeRoles([ { Kind = Identifier "ROLE_A" } ], [ { Kind = Identifier "ALICE" } ], false, None, true) -> ()
+    | RevokeRoles([ { Kind = Identifier "ROLE_A" } ],
+                  [ Grantee.AuthorizationId { Kind = Identifier "ALICE" } ],
+                  false,
+                  None,
+                  true) -> ()
     | res -> Assert.Fail(sprintf "Expected RevokeRoles, got %A" res)
 
     match parse "REVOKE ADMIN OPTION FOR role_a FROM alice CASCADE" with
-    | RevokeRoles([ { Kind = Identifier "ROLE_A" } ], [ { Kind = Identifier "ALICE" } ], true, None, true) -> ()
+    | RevokeRoles([ { Kind = Identifier "ROLE_A" } ],
+                  [ Grantee.AuthorizationId { Kind = Identifier "ALICE" } ],
+                  true,
+                  None,
+                  true) -> ()
     | res -> Assert.Fail(sprintf "Expected RevokeRoles ADMIN OPTION FOR, got %A" res)
 
     match parse "REVOKE role_a FROM alice GRANTED BY CURRENT_ROLE CASCADE" with
     | RevokeRoles([ { Kind = Identifier "ROLE_A" } ],
-                  [ { Kind = Identifier "ALICE" } ],
+                  [ Grantee.AuthorizationId { Kind = Identifier "ALICE" } ],
                   false,
                   Some Grantor.CurrentRole,
                   true) -> ()
@@ -349,3 +360,28 @@ let ``REVOKE object kind verification`` sql expectedKind expectedName =
 let ``REVOKE requires drop behavior`` () =
     parseFails "REVOKE SELECT ON users FROM alice"
     parseFails "REVOKE role_a FROM alice"
+
+[<Fact>]
+let ``GRANT to PUBLIC verification`` () =
+    match parse "GRANT SELECT ON users TO PUBLIC" with
+    | GrantObject stmt ->
+        match stmt.Grantees with
+        | [ Grantee.Public ] -> ()
+        | res -> Assert.Fail(sprintf "Expected grantee PUBLIC, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected GrantObject, got %A" res)
+
+[<Fact>]
+let ``REVOKE from PUBLIC verification`` () =
+    match parse "REVOKE SELECT ON users FROM PUBLIC CASCADE" with
+    | RevokeObject stmt ->
+        match stmt.Grantees with
+        | [ Grantee.Public ] -> ()
+        | res -> Assert.Fail(sprintf "Expected grantee PUBLIC, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected RevokeObject, got %A" res)
+
+[<Fact>]
+let ``GRANT with invalid grantee is rejected`` () =
+    // String literals are not valid grantees
+    parseFails "GRANT SELECT ON users TO 'alice'"
+    // Arithmetic expressions are not valid grantees
+    parseFails "GRANT SELECT ON users TO a + b"

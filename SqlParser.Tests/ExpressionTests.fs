@@ -1090,3 +1090,23 @@ let ``Expression precedence verification`` () =
                { Kind = Literal(Number 1m) },
                { Kind = BinaryOp(Multiply, { Kind = Literal(Number 2m) }, { Kind = Literal(Number 3m) }) }) -> ()
     | res -> Assert.Fail(sprintf "Precedence fail: %A" res)
+
+[<Fact>]
+let ``Array subscript with invalid expression is rejected`` () =
+    // Comparisons/boolean operators are not <numeric value expression>
+    parseFails "SELECT a[b = c]"
+    parseFails "SELECT a[x OR y]"
+    parseFails "SELECT a[EXISTS (SELECT 1)]"
+
+[<Fact>]
+let ``EXTRACT with invalid field is rejected`` () =
+    parseFails "EXTRACT(FOO FROM ts)"
+    parseFails "EXTRACT(a + b FROM ts)"
+    parseFails "EXTRACT('YEAR' FROM ts)"
+
+[<Fact>]
+let ``TRIM_ARRAY with invalid count is rejected`` () =
+    // Comparisons/boolean operators are not <numeric value expression>
+    parseFails "SELECT TRIM_ARRAY(arr, a = b)"
+    parseFails "SELECT TRIM_ARRAY(arr, x OR y)"
+    parseFails "SELECT TRIM_ARRAY(arr, EXISTS (SELECT 1))"

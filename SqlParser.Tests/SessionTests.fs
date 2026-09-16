@@ -88,6 +88,24 @@ let ``SET TIME ZONE rejects predicates and star 6.37 verification`` () =
     parseFails "SET TIME ZONE *"
 
 [<Fact>]
+let ``SET CATALOG/SCHEMA/NAMES/PATH reject expressions`` () =
+    parseFails "SET CATALOG 1 + 2"
+    parseFails "SET SCHEMA a || b"
+    parseFails "SET NAMES x = y"
+    parseFails "SET PATH a AND b"
+    parseFails "SET CATALOG EXISTS (SELECT 1)"
+
+[<Fact>]
+let ``SET TRANSFORM GROUP rejects expression for group value`` () =
+    parseFails "SET DEFAULT TRANSFORM GROUP 1 + 2"
+    parseFails "SET TRANSFORM GROUP FOR TYPE t a || b"
+
+[<Fact>]
+let ``SET COLLATION rejects expression for collation`` () =
+    parseFails "SET COLLATION a + b"
+    parseFails "SET COLLATION x = y"
+
+[<Fact>]
 let ``SET CATALOG verification`` () =
     match parse "SET CATALOG 'c1'" with
     | SetCatalog { Kind = Literal(String "c1") } -> ()
@@ -137,6 +155,6 @@ let ``SET NO COLLATION verification`` () =
 
 [<Fact>]
 let ``SET COLLATION FOR verification`` () =
-    match parse "SET COLLATION 'c1' FOR 'cs1'" with
-    | SetSessionCollation(Some { Kind = Literal(String "c1") }, Some [ { Kind = Literal(String "cs1") } ]) -> ()
+    match parse "SET COLLATION 'c1' FOR cs1" with
+    | SetSessionCollation(Some { Kind = Literal(String "c1") }, Some [ { Kind = Identifier "CS1" } ]) -> ()
     | res -> Assert.Fail(sprintf "Expected SetSessionCollation FOR, got %A" res)

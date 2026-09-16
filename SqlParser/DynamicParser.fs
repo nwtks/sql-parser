@@ -10,7 +10,8 @@ module DynamicParser =
     let pAllocateDescriptorStatement =
         pKeyword "ALLOCATE" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
         >>. pQualifiedNameExpr
-        .>>. opt (attempt (pKeyword "WITH" >>. pKeyword "MAX" >>. pExpression))
+        // <occurrences> ::= <simple value specification> (strict)
+        .>>. opt (attempt (pKeyword "WITH" >>. pKeyword "MAX" >>. pSimpleValueSpecificationStrict))
         |>> fun (name, max) -> AllocateDescriptor(name, max)
 
     // 20.3 <deallocate descriptor statement> ::= DEALLOCATE [ SQL ] DESCRIPTOR <descriptor name>
@@ -192,24 +193,25 @@ module DynamicParser =
         pKeyword "USING" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
         >>. pQualifiedNameExpr
 
-    // 20.10 <describe statement> ::= DESCRIBE [ INPUT | OUTPUT ] <name> <using descriptor> [ <nesting option> ]
-    //                            | DESCRIBE CURSOR <cursor> STRUCTURE <using descriptor> [ <nesting option> ]
+    // 20.10 <describe statement> ::= <describe input statement> | <describe output statement>
+    // <describe input statement>  ::= DESCRIBE INPUT <SQL statement name> <using descriptor> [ <nesting option> ]
+    // <describe output statement> ::= DESCRIBE [ OUTPUT ] <described object> <using descriptor> [ <nesting option> ]
+    // <described object>           ::= <SQL statement name> | CURSOR <cursor name> STRUCTURE
+    // INPUT commits to <describe input statement> (no backtracking) so DESCRIBE INPUT CURSOR ... is rejected.
     let pDescribeStatement =
         pKeyword "DESCRIBE"
         >>= fun _ ->
-            attempt (
-                pKeyword "INPUT" >>. pQualifiedNameExpr
-                >>= fun name ->
-                    pUsingDescriptor
-                    >>= fun desc ->
-                        opt (attempt pNestingOption)
-                        |>> fun nesting ->
-                            { IsInput = true
-                              IsCursor = false
-                              Name = name
-                              Descriptor = desc
-                              Nesting = nesting }
-            )
+            (pKeyword "INPUT" >>. pQualifiedNameExpr
+             >>= fun name ->
+                 pUsingDescriptor
+                 >>= fun desc ->
+                     opt (attempt pNestingOption)
+                     |>> fun nesting ->
+                         { IsInput = true
+                           IsCursor = false
+                           Name = name
+                           Descriptor = desc
+                           Nesting = nesting })
             <|> (opt (pKeyword "OUTPUT" >>% ())
                  >>= fun _ ->
                      attempt (

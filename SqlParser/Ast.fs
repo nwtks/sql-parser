@@ -1745,6 +1745,12 @@ and Grantor =
     | CurrentUser
     | CurrentRole
 
+// 12.3 <grantee> ::= PUBLIC | <authorization identifier>
+// DU so consumers can distinguish the PUBLIC keyword from a regular authorization identifier.
+and Grantee =
+    | Public
+    | AuthorizationId of Expression
+
 // 12.3 <object name> — the kind keyword of each qualified-name alternative. TABLE is
 // optional in the grammar ([ TABLE ] <table name>); the other six are mandatory. The
 // <specific routine designator> alternative is not a kind keyword — it is modelled by
@@ -1763,7 +1769,7 @@ and ObjectKind =
 and GrantPrivilegeStatement =
     { Privileges: Privileges
       Object: Expression
-      Grantees: Expression list
+      Grantees: Grantee list
       WithHierarchyOption: bool
       WithGrantOption: bool
       // 12.3 <grantor> — None when the GRANTED BY clause is absent
@@ -1774,7 +1780,7 @@ and GrantPrivilegeStatement =
 and RevokePrivilegeStatement =
     { Privileges: Privileges
       Object: Expression
-      Grantees: Expression list
+      Grantees: Grantee list
       Option: RevokeOptionExtension
       // 12.7 <revoke privilege statement> — GRANTED BY <grantor>
       Grantor: Grantor option
@@ -2157,7 +2163,7 @@ and StatementKind =
     // 12.4 <role definition> ::= CREATE ROLE <role name> [ WITH ADMIN <grantor> ]
     | CreateRole of Expression * Grantor option
     // 12.5 <grant role statement>
-    | GrantRoles of Expression list * Expression list * bool * Grantor option
+    | GrantRoles of Expression list * Grantee list * bool * Grantor option
     // 12.6 <drop role statement> ::= DROP ROLE <role name>
     | DropRole of Expression
     // 12.7 <revoke privilege statement> — flat cases mirroring the GRANT side; the payload
@@ -2172,7 +2178,7 @@ and StatementKind =
     | RevokeSequence of RevokePrivilegeStatement
     | RevokeRoutine of RoutineType * RevokePrivilegeStatement
     // 12.7 <revoke role statement>
-    | RevokeRoles of Expression list * Expression list * bool * Grantor option * bool
+    | RevokeRoles of Expression list * Grantee list * bool * Grantor option * bool
     // 14.1 <declare cursor>
     | DeclareCursor of DeclareCursorStatement
     // 14.4 <open statement>

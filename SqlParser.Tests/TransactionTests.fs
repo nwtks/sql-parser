@@ -9,6 +9,11 @@ let parse (sql: string) =
     | Ok { Kind = res } -> res
     | Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
 
+let parseFails (sql: string) =
+    match SqlParser.parse (sql.TrimEnd() + ";") with
+    | Ok _ -> failwithf "Expected parse failure for %s" sql
+    | Error _ -> ()
+
 [<Fact>]
 let ``START TRANSACTION verification`` () =
     match parse "START TRANSACTION" with
@@ -52,6 +57,12 @@ let ``SET CONSTRAINTS verification`` () =
     match parse "SET CONSTRAINTS ALL DEFERRED" with
     | SetConstraints(None, true) -> ()
     | res -> Assert.Fail(sprintf "Expected SetConstraints ALL DEFERRED, got %A" res)
+
+[<Fact>]
+let ``DIAGNOSTICS SIZE rejects expression`` () =
+    parseFails "START TRANSACTION DIAGNOSTICS SIZE 1 + 1"
+    parseFails "SET TRANSACTION DIAGNOSTICS SIZE a || b"
+    parseFails "START TRANSACTION DIAGNOSTICS SIZE x = y"
 
     match parse "SET CONSTRAINTS fk1, fk2 IMMEDIATE" with
     | SetConstraints(Some([ { Kind = Identifier "FK1" }; { Kind = Identifier "FK2" } ]), false) -> ()

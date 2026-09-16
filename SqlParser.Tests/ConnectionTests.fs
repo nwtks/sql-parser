@@ -79,3 +79,19 @@ let ``DISCONNECT DEFAULT verification`` () =
 
 [<Fact>]
 let ``DISCONNECT without object is rejected`` () = parseFails "DISCONNECT"
+
+[<Fact>]
+let ``CONNECT TO rejects expressions for server/name/user`` () =
+    parseFails "CONNECT TO 'a' || 'b'"
+    parseFails "CONNECT TO server AS a + b"
+    parseFails "CONNECT TO server USER a = b"
+
+[<Fact>]
+let ``SET CONNECTION rejects expression`` () =
+    parseFails "SET CONNECTION a + b"
+    parseFails "SET CONNECTION x = y"
+
+[<Fact>]
+let ``DISCONNECT rejects expression`` () =
+    parseFails "DISCONNECT a + b"
+    parseFails "DISCONNECT x = y"

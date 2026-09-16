@@ -41,15 +41,17 @@ module QueryParser =
         pKeyword "BERNOULLI" >>% "BERNOULLI" <|> (pKeyword "SYSTEM" >>% "SYSTEM")
 
     // 7.6 <repeatable clause> ::= REPEATABLE ( <repeat argument> )
+    // <repeat argument> ::= <numeric value expression>
     let pRepeatableClause =
         pKeyword "REPEATABLE"
-        >>. between (token (pstring "(")) (token (pstring ")")) pExpression
+        >>. between (token (pstring "(")) (token (pstring ")")) pNumericValueExpression
 
     // 7.6 <sample clause> ::= TABLESAMPLE <sample method>
     //     ( <sample percentage> ) [ <repeatable clause> ]
+    // <sample percentage> ::= <numeric value expression>
     let pSampleClause =
         pKeyword "TABLESAMPLE" >>. pSampleMethod
-        .>>. between (token (pstring "(")) (token (pstring ")")) pExpression
+        .>>. between (token (pstring "(")) (token (pstring ")")) pNumericValueExpression
         .>>. opt pRepeatableClause
         |>> fun ((method, percent), repeat) -> method, percent, repeat
 
@@ -622,9 +624,11 @@ module QueryParser =
             (token (pstring ")"))
             (opt pIdentifierExpr
              .>>. opt (
+                 // <window partition clause> ::= PARTITION BY <window partition column reference list>
+                 // <window partition column reference> ::= <column reference> [ <collate clause> ]
                  pKeyword "PARTITION"
                  >>. pKeyword "BY"
-                 >>. sepBy1 pExpression (token (pstring ","))
+                 >>. sepBy1 pColumnReferenceExpr (token (pstring ","))
              )
              .>>. opt (pKeyword "ORDER" >>. pKeyword "BY" >>. sepBy1 pOrderByItem (token (pstring ",")))
              .>>. opt pWindowFrame
@@ -781,8 +785,9 @@ module QueryParser =
         pKeyword "ORDER" >>. pKeyword "BY" >>. sepBy1 pOrderByItem (token (pstring ","))
 
     // 7.17 <result offset clause> ::= OFFSET <offset row count> { ROW | ROWS }
+    // <offset row count> ::= <simple value specification> (strict: literals + host params only)
     let pResultOffsetClause =
-        pKeyword "OFFSET" >>. pExpression
+        pKeyword "OFFSET" >>. pSimpleValueSpecificationStrict
         .>> (attempt (pKeyword "ROWS") <|> pKeyword "ROW")
 
     // 7.17 <fetch first clause> ::= FETCH { FIRST | NEXT } [ <fetch first quantity> ]
@@ -795,7 +800,10 @@ module QueryParser =
                 { Kind = Literal(Number 1m)
                   Pos = { Line = pos.Line; Column = pos.Column } }
 
-            pKeyword "FETCH" >>. (pKeyword "FIRST" <|> pKeyword "NEXT") >>. opt pExpression
+            // <fetch first row count> ::= <simple value specification> (strict); <fetch first percentage> ::= <simple value specification> (strict) PERCENT
+            pKeyword "FETCH"
+            >>. (pKeyword "FIRST" <|> pKeyword "NEXT")
+            >>. opt pSimpleValueSpecificationStrict
             .>>. opt (pKeyword "PERCENT" >>% true)
             .>> (attempt (pKeyword "ROWS") <|> pKeyword "ROW")
             .>>. (pKeyword "ONLY" >>% false <|> (pKeyword "WITH" >>. pKeyword "TIES" >>% true))
