@@ -12,9 +12,9 @@ module ConnectionParser =
         pKeyword "CONNECT"
         >>. pKeyword "TO"
         >>. (attempt (pKeyword "DEFAULT" >>% None)
-             <|> (pSimpleValueSpecification
-                  .>>. opt (attempt (pKeyword "AS" >>. pSimpleValueSpecification))
-                  .>>. opt (attempt (pKeyword "USER" >>. pSimpleValueSpecification))
+             <|> (pSimpleValueSpecificationCompatibility
+                  .>>. opt (attempt (pKeyword "AS" >>. pSimpleValueSpecificationCompatibility))
+                  .>>. opt (attempt (pKeyword "USER" >>. pSimpleValueSpecificationCompatibility))
                   |>> fun ((server, name), user) -> Some(server, name, user)))
         |>> fun conn ->
             match conn with
@@ -35,7 +35,8 @@ module ConnectionParser =
     let pSetConnectionStatement =
         pKeyword "SET"
         >>. pKeyword "CONNECTION"
-        >>. (attempt (pKeyword "DEFAULT" >>% None) <|> (pSimpleValueSpecification |>> Some))
+        >>. (attempt (pKeyword "DEFAULT" >>% None)
+             <|> (pSimpleValueSpecificationCompatibility |>> Some))
         |>> SetConnection
 
     // 18.3 <disconnect statement> ::= DISCONNECT <disconnect object>
@@ -46,5 +47,5 @@ module ConnectionParser =
         >>. (attempt (pKeyword "ALL" >>% DisconnectAll)
              <|> attempt (pKeyword "CURRENT" >>% DisconnectCurrent)
              <|> attempt (pKeyword "DEFAULT" >>% DisconnectDefault)
-             <|> (pSimpleValueSpecification |>> DisconnectName))
+             <|> (pSimpleValueSpecificationCompatibility |>> DisconnectName))
         |>> Disconnect

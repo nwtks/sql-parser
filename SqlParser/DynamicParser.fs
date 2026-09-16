@@ -9,15 +9,15 @@ module DynamicParser =
     // 20.2 <allocate descriptor statement> ::= ALLOCATE [ SQL ] DESCRIPTOR <descriptor name> [ WITH MAX <occurrences> ]
     let pAllocateDescriptorStatement =
         pKeyword "ALLOCATE" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. pQualifiedNameExpr
+        >>. pSchemaQualifiedNameExpression
         // <occurrences> ::= <simple value specification> (strict)
-        .>>. opt (attempt (pKeyword "WITH" >>. pKeyword "MAX" >>. pSimpleValueSpecificationStrict))
+        .>>. opt (attempt (pKeyword "WITH" >>. pKeyword "MAX" >>. pSimpleValueSpecification))
         |>> fun (name, max) -> AllocateDescriptor(name, max)
 
     // 20.3 <deallocate descriptor statement> ::= DEALLOCATE [ SQL ] DESCRIPTOR <descriptor name>
     let pDeallocateDescriptorStatement =
         pKeyword "DEALLOCATE" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. pQualifiedNameExpr
+        >>. pSchemaQualifiedNameExpression
         |>> DeallocateDescriptor
 
     // 20.4 <header item name> — closed enumeration.
@@ -73,47 +73,47 @@ module DynamicParser =
               pKeyword "USER_DEFINED_TYPE_CODE" ]
 
     // 20.4 <get header information> ::= <target> <equals operator> <header item name>
-    let pHeaderInfoItem =
-        pQualifiedNameExpr .>> token (pstring "=") .>>. pHeaderItemName
+    let pGetHeaderInformation =
+        pSchemaQualifiedNameExpression .>> token (pstring "=") .>>. pHeaderItemName
         |>> fun (target, name) -> target, name
 
     // 20.4 <get item information> ::= <target> <equals operator> <descriptor item name> (item form)
-    let pDescriptorInfoItem =
-        pQualifiedNameExpr .>> token (pstring "=") .>>. pDescriptorItemName
+    let pGetItemInformation =
+        pSchemaQualifiedNameExpression .>> token (pstring "=") .>>. pDescriptorItemName
         |>> fun (target, name) -> target, name
 
     // 20.4 <get descriptor statement> ::= GET [ SQL ] DESCRIPTOR <descriptor name> <get descriptor information>
     let pGetDescriptorStatement =
         pKeyword "GET" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. pQualifiedNameExpr
+        >>. pSchemaQualifiedNameExpression
         .>>. (attempt (
                   pKeyword "VALUE" >>. pExpression
-                  .>>. sepBy1 pDescriptorInfoItem (token (pstring ","))
+                  .>>. sepBy1 pGetItemInformation (token (pstring ","))
                   |>> fun (num, items) -> GetItem(num, items)
               )
-              <|> (sepBy1 pHeaderInfoItem (token (pstring ",")) |>> GetHeader))
+              <|> (sepBy1 pGetHeaderInformation (token (pstring ",")) |>> GetHeader))
         |>> fun (name, info) -> GetDescriptor(name, info)
 
     // 20.5 <set header information> ::= <header item name> <equals operator> <value>
-    let pSetHeaderInfoItem =
+    let pSetHeaderInformation =
         pHeaderItemName .>> token (pstring "=") .>>. pExpression
         |>> fun (name, value) -> name, value
 
     // 20.5 <set item information> ::= <descriptor item name> <equals operator> <value> (item form)
-    let pSetDescriptorInfoItem =
+    let pSetItemInformation =
         pDescriptorItemName .>> token (pstring "=") .>>. pExpression
         |>> fun (name, value) -> name, value
 
     // 20.5 <set descriptor statement> ::= SET [ SQL ] DESCRIPTOR <descriptor name> <set descriptor information>
     let pSetDescriptorStatement =
         pKeyword "SET" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. pQualifiedNameExpr
+        >>. pSchemaQualifiedNameExpression
         .>>. (attempt (
                   pKeyword "VALUE" >>. pExpression
-                  .>>. sepBy1 pSetDescriptorInfoItem (token (pstring ","))
+                  .>>. sepBy1 pSetItemInformation (token (pstring ","))
                   |>> fun (num, items) -> SetItem(num, items)
               )
-              <|> (sepBy1 pSetHeaderInfoItem (token (pstring ",")) |>> SetHeader))
+              <|> (sepBy1 pSetHeaderInformation (token (pstring ",")) |>> SetHeader))
         |>> fun (name, info) -> SetDescriptor(name, info)
 
     // 20.6 <copy descriptor options> ::= NAME | TYPE | NAME , TYPE | DATA
@@ -129,14 +129,14 @@ module DynamicParser =
 
     // 20.6 <copy descriptor statement> ::= COPY <source> TO <target> | COPY <source> VALUE <n> ( <options> ) TO <target> VALUE <n>
     let pCopyDescriptorStatement =
-        pKeyword "COPY" >>. pQualifiedNameExpr
+        pKeyword "COPY" >>. pSchemaQualifiedNameExpression
         >>= fun source ->
             attempt (
                 pKeyword "VALUE" >>. pExpression
                 >>= fun srcItem ->
                     between (token (pstring "(")) (token (pstring ")")) pCopyDescriptorOptions
                     >>= fun opts ->
-                        pKeyword "TO" >>. pQualifiedNameExpr
+                        pKeyword "TO" >>. pSchemaQualifiedNameExpression
                         >>= fun target ->
                             pKeyword "VALUE" >>. pExpression
                             |>> fun tgtItem ->
@@ -147,7 +147,7 @@ module DynamicParser =
                                       Target = target
                                       TargetItem = Some tgtItem }
             )
-            <|> (pKeyword "TO" >>. pQualifiedNameExpr
+            <|> (pKeyword "TO" >>. pSchemaQualifiedNameExpression
                  |>> fun target ->
                      CopyDescriptor
                          { Source = source
@@ -158,7 +158,7 @@ module DynamicParser =
 
     // 20.7 <prepare statement> ::= PREPARE <SQL statement name> [ <attributes specification> ] FROM <SQL statement variable>
     let pPrepareStatement =
-        pKeyword "PREPARE" >>. pQualifiedNameExpr
+        pKeyword "PREPARE" >>. pSchemaQualifiedNameExpression
         .>>. opt (attempt (pKeyword "ATTRIBUTES" >>. pExpression))
         .>> pKeyword "FROM"
         .>>. pExpression
@@ -179,8 +179,8 @@ module DynamicParser =
     let pCursorAttributes = many1 pCursorAttribute
 
     // 20.9 <deallocate prepared statement> ::= DEALLOCATE PREPARE <SQL statement name>
-    let pDeallocatePrepareStatement =
-        pKeyword "DEALLOCATE" >>. pKeyword "PREPARE" >>. pQualifiedNameExpr
+    let pDeallocatePreparedStatement =
+        pKeyword "DEALLOCATE" >>. pKeyword "PREPARE" >>. pSchemaQualifiedNameExpression
         |>> DeallocatePrepare
 
     // 20.10 <nesting option> ::= WITH NESTING | WITHOUT NESTING
@@ -191,7 +191,7 @@ module DynamicParser =
     // 20.10 <using descriptor> ::= USING [ SQL ] DESCRIPTOR <descriptor name> (DESCRIBE <using descriptor>)
     let pUsingDescriptor =
         pKeyword "USING" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. pQualifiedNameExpr
+        >>. pSchemaQualifiedNameExpression
 
     // 20.10 <describe statement> ::= <describe input statement> | <describe output statement>
     // <describe input statement>  ::= DESCRIBE INPUT <SQL statement name> <using descriptor> [ <nesting option> ]
@@ -201,7 +201,7 @@ module DynamicParser =
     let pDescribeStatement =
         pKeyword "DESCRIBE"
         >>= fun _ ->
-            (pKeyword "INPUT" >>. pQualifiedNameExpr
+            (pKeyword "INPUT" >>. pSchemaQualifiedNameExpression
              >>= fun name ->
                  pUsingDescriptor
                  >>= fun desc ->
@@ -215,10 +215,10 @@ module DynamicParser =
             <|> (opt (pKeyword "OUTPUT" >>% ())
                  >>= fun _ ->
                      attempt (
-                         pKeyword "CURSOR" >>. pQualifiedNameExpr .>> pKeyword "STRUCTURE"
+                         pKeyword "CURSOR" >>. pSchemaQualifiedNameExpression .>> pKeyword "STRUCTURE"
                          |>> fun c -> true, c
                      )
-                     <|> (pQualifiedNameExpr |>> fun n -> false, n)
+                     <|> (pSchemaQualifiedNameExpression |>> fun n -> false, n)
                      >>= fun (isCursor, name) ->
                          pUsingDescriptor
                          >>= fun desc ->
@@ -237,9 +237,9 @@ module DynamicParser =
 
     // 20.13 <execute statement> ::= EXECUTE <SQL statement name> [ <output using clause> ] [ <input using clause> ]
     let pExecuteStatement =
-        pKeyword "EXECUTE" >>. pQualifiedNameExpr
-        .>>. opt (attempt pIntoClause)
-        .>>. opt (attempt pUsingClause)
+        pKeyword "EXECUTE" >>. pSchemaQualifiedNameExpression
+        .>>. opt (attempt pOutputUsingClause)
+        .>>. opt (attempt pInputUsingClause)
         |>> fun ((name, result), param) -> Execute(name, result, param)
 
     // 20.14 <execute immediate statement> ::= EXECUTE IMMEDIATE <SQL statement variable>
@@ -253,14 +253,14 @@ module DynamicParser =
     // 20.17 <extended cursor name>
     //     ::= [ <scope option> ] <simple value specification>
     let pExtendedName =
-        opt (attempt pScopeOption) .>>. pSimpleValueSpecification
+        opt (attempt pScopeOption) .>>. pSimpleValueSpecificationCompatibility
         |>> fun (scope, simpleValue) ->
             { Scope = scope
               SimpleValue = simpleValue }
 
     // 20.15 <dynamic declare cursor> ::= DECLARE <cursor name> <cursor properties> FOR <statement name>
     let pDynamicDeclareCursorStatement =
-        pKeyword "DECLARE" >>. pQualifiedNameExpr .>>. pCursorProperties
+        pKeyword "DECLARE" >>. pSchemaQualifiedNameExpression .>>. pCursorProperties
         .>> pKeyword "FOR"
         .>>. pExtendedName
         |>> fun ((name, properties), statement) ->
@@ -283,7 +283,8 @@ module DynamicParser =
     // 20.18 <allocate received cursor statement> ::= ALLOCATE <cursor name> [ CURSOR ]
     //     FOR PROCEDURE <specific routine designator>
     let pAllocateReceivedCursorStatement =
-        pKeyword "ALLOCATE" >>. pQualifiedNameExpr .>>. opt (pKeyword "CURSOR" >>% ())
+        pKeyword "ALLOCATE" >>. pSchemaQualifiedNameExpression
+        .>>. opt (pKeyword "CURSOR" >>% ())
         .>> pKeyword "FOR"
         .>> pKeyword "PROCEDURE"
         .>>. SchemaParser.pSpecificRoutineDesignator
@@ -291,4 +292,5 @@ module DynamicParser =
 
     // 20.28 <pipe row statement> ::= PIPE ROW (<row value expression>)
     let pPipeRowStatement =
-        pKeyword "PIPE" >>. pKeyword "ROW" >>. pQualifiedNameExpr |>> PipeRow
+        pKeyword "PIPE" >>. pKeyword "ROW" >>. pSchemaQualifiedNameExpression
+        |>> PipeRow

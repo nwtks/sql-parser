@@ -97,13 +97,13 @@ is fixed in `SqlParser/SqlParser.fsproj`.
 | `SqlParser.fs` | §22 | Top-level dispatchers, forward-reference wiring, public `parse`/`parseStatement`. |
 
 Examples of the ordering constraint: `PredicateParser.fs` (§8) needs
-`ExpressionParser.pExpression`/`pJsonApiCommon` and the `pQuery` forward ref, so
+`ExpressionParser.pExpression`/`pJsonApiCommonSyntax` and the `pQuery` forward ref, so
 it compiles after `QueryParser.fs` (§7); it sits before `SchemaParser.fs` (§11)
 to keep the file order clause-ascending (§6 → §7 → §8 → §11).
 `AccessControlParser.fs` needs `SchemaParser.pSpecificRoutineDesignator` /
-`pRoutineDesignatorWithType` / `pDropBehavior`, so it compiles after
+`pRoutineDesignator` / `pDropBehavior`, so it compiles after
 `SchemaParser.fs`, again keeping the order clause-ascending (§11 → §12 → §14).
-`DataManipulationParser.fs` owns `pUsingClause`/`pIntoClause` because
+`DataManipulationParser.fs` owns `pInputUsingClause`/`pOutputUsingClause` because
 `pOpenStatement` needs them and compiles before `DynamicParser.fs`.
 
 ## 5. Forward references and wiring
@@ -123,11 +123,11 @@ crosses a module boundary is wired by whichever module first defines its target
 | `pPredicateRef`, `pPredicatePrimaryRef` | `ExpressionParser.fs` | `PredicateParser` (§8) (`SqlParser.fs`) | §6.3 `<value expression primary>` and §6.39 `<boolean test>` consume §8 before `PredicateParser.fs` is compiled; `pPredicatePrimary` bundles the 8.9/8.10/8.11/8.20/8.23 atoms into one ref. |
 | `pQueryRef` | `ExpressionParser.fs` | `pQueryExpression` (`QueryParser.fs`) | Scalar and quantified subqueries (6.29) need the §7 query parser. |
 | `pExpression` | `ExpressionParser.fs` | `opp.ExpressionParser` | Central expression parser, used before `opp` is complete. |
-| `pValueExpressionNoBoolean` | `ExpressionParser.fs` | `opp.ExpressionParser` | Boolean-free `<value expression>` for JSON slots and `<point in time>` (6.35). |
+| `pNonBooleanValueExpression` | `ExpressionParser.fs` | `opp.ExpressionParser` | Boolean-free `<value expression>` for JSON slots and `<point in time>` (6.35). |
 | `pDataType` | `ExpressionParser.fs` | the 6.1 `<data type>` family | `CAST`, JSON `RETURNING`, collection element types. |
 | `pDatetimeValueExpression` | `ExpressionParser.fs` | the 6.35 `<datetime value expression>` | Needed by the 6.37 `<interval value expression>` alternative before it is defined. |
 | `pMultisetValueExpression` | `ExpressionParser.fs` | post-`pValueExpressionPrimary` | 6.44 `SET (...)` is itself a `<value expression primary>`. |
-| `pNotExpr` | `ExpressionParser.fs` | the 6.39 `<boolean factor>` | `[ NOT ] <boolean test>` is left-recursive. |
+| `pBooleanFactor` | `ExpressionParser.fs` | the 6.39 `<boolean factor>` | `[ NOT ] <boolean test>` is left-recursive. |
 | `pRowPattern` | `ExpressionParser.fs` | 7.9 `<row pattern>` | `<row pattern>` is recursive through `<row pattern primary>`. |
 | `pTableReference` | `QueryParser.fs` | 7.6 `<table reference>` | A `<table primary>` may nest a parenthesised `<joined table>`. |
 | `pQueryExpressionBody` | `QueryParser.fs` | 7.17 `<query expression body>` | `UNION`/`EXCEPT` are left-recursive, and a parenthesised `<query primary>` contains a body. |

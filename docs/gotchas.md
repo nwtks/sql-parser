@@ -31,7 +31,7 @@ declarations in `Ast.fs`, re-check for newly ambiguous cases.
 
 `Expression`, `TableSource` and `Statement` all have `Kind` + `Pos`, so an
 unannotated literal like `{ Kind = Literal(Number 1m); Pos = … }` can be inferred
-as `Statement`; `CreateViewStatement` and `Cte` similarly collide in `pCte`.
+as `Statement`; `CreateViewStatement` and `Cte` similarly collide in `pWithListElement`.
 
 **Fix:** qualify the first field (`{ Expression.Kind = …; … }`,
 `{ TableSource.Kind = …; … }`, `{ Cte.Name = name; … }`) or annotate the binding
@@ -86,7 +86,7 @@ fail, so validation must use `>>=` + `fail`, and the `StatementKind` wrapper goe
 
 Wrap optional multi-keyword clauses in `attempt`
 (`opt (attempt (pKeyword "WITH" >>. pKeyword "HIERARCHY" >>. pKeyword "OPTION"))`)
-— required for `pIdentitySpec`, `pCheckOption`, `pLockingClause`,
+— required for `pIdentityColumnSpecification`, `pWithCheckOption`, `pUpdatabilityClause`,
 `pCursorHoldability`, `pCursorReturnability`, the `FOR UPDATE OF` group and the
 `WITH`-prefixed clauses.
 
@@ -99,7 +99,7 @@ name is consumed and the missing `.` aborts the whole unqualified form, so
 ### `notFollowedBy` makes the failure fatal — wrap in `attempt`
 
 `opt` cannot catch it, so wrap in `attempt` to let `opt` return `None` (see
-`pExistingWindowName` / `pWindowFrame`).
+`pExistingWindowName` / `pWindowFrameClause`).
 
 ### `attempt` is required inside postfix loops
 
@@ -132,7 +132,7 @@ is a type error — coerce with `|>> ignore` or `>>% ()`.
 ### Define before use, or use a forward reference
 
 F# requires definitions before use. Move the dependency above its user
-(`pSequenceOption`/`pIdentitySpec` before `pColumnDefinition`), nest it when there
+(`pSequenceGeneratorOption`/`pIdentityColumnSpecification` before `pColumnDefinition`), nest it when there
 is exactly one consumer (`pTransformsToBeDropped` in `pDropStatement`), or use
 `createParserForwardedToRef` across modules.
 
@@ -141,7 +141,7 @@ is exactly one consumer (`pTransformsToBeDropped` in `pDropStatement`), or use
 Top-level definitions follow the ascending ISO/IEC 9075-2:2016 clause number cited
 above them (sort key: the *first* citation; uncited helpers stay with what they
 serve), but `define-before-use` wins — a helper cited under a later clause stays
-above its user (`pReferentialTriggeredAction` 11.8 before `pColumnConstraint`
+above its user (`pReferentialTriggeredAction` 11.8 before `pColumnConstraintDefinition`
 11.4). Where order is compiler-irrelevant it is kept strictly ascending (`Ast.fs`'s
 `and` group 6.1 → 6.43, `ExpressionKind`/`Expression` at 6.28; the
 `createParserForwardedToRef` declarations in `ExpressionParser.fs`, 6.1 → 7.17).
@@ -180,16 +180,16 @@ apart. The pairs that must be ordered:
 - `SELECT ( <privilege method list> )` **before** `SELECT [ <column list> ]`.
 - The `FINAL|NEW|OLD TABLE` alternative **before** the plain table alternative.
 - The 6.26 navigation parser **before** `pRoutineInvocation` and
-  `pColumnReferenceExpr`, tried Compound → Logical → Physical.
+  `pColumnReferenceExpression`, tried Compound → Logical → Physical.
 - 6.37's interval alternative **before**, and inside the same `attempt` as, the
   plain parenthesized `pExpression` branch.
-- The NESTED branch before the regular-column branch in `pJsonTableColumn`.
+- The NESTED branch before the regular-column branch in `pJsonTableColumnDefinition`.
 
 ### Do not reuse a parser whose grammar does not cover the slot
 
-`INSERT` must keep `pQualifiedNameExpr` for its target: 14.11 `<insertion target>`
+`INSERT` must keep `pSchemaQualifiedNameExpression` for its target: 14.11 `<insertion target>`
 is a plain `<table name>` with no `ONLY` form, so `pTargetTable` would wrongly
-accept `INSERT INTO ONLY (t) …`. Likewise `pPartitionBy` is column references only.
+accept `INSERT INTO ONLY (t) …`. Likewise `pPartitionedJoinColumnReferenceList` is column references only.
 
 The omitted DML target relies on `SET` and `WHERE` being reserved words —
 `pTargetTable` fails cleanly on them. Do not "fix" a missing table name with
@@ -249,7 +249,7 @@ so `<scope option>` must cite 5.4 (not 20.15/20.17) and `<semicolon>` must cite 
 
 Where `AND` must not be consumed as a boolean operator, use a boolean-free parser:
 `<point in time>` / `FOR PORTION OF` use the 6.35 datetime parser, and the JSON
-argument slots use `pValueExpressionNoBoolean` (`opp.ExpressionParser` without
+argument slots use `pNonBooleanValueExpression` (`opp.ExpressionParser` without
 boolean operators). That parser is a forward ref because the JSON parsers are
 defined before `opp` is built.
 
@@ -295,9 +295,9 @@ so test patterns must wrap them: `Condition = { Kind = … }`.
 local parser of the same name returning `(cursor, search condition)` for
 `WHERE CURRENT OF` / search. The local binding shadows the imported one for every
 unqualified use **after** its definition, so it must stay below
-`pSelectIntoStatement` (14.7), which needs `QueryParser.pWhereClause`;
+`pSelectStatementSingleRow` (14.7), which needs `QueryParser.pWhereClause`;
 `pDeleteStatement`/`pUpdateStatement` sit below it and bind the local parser.
-Hoisting the local `pWhereClause` above `pSelectIntoStatement` is a type error, not
+Hoisting the local `pWhereClause` above `pSelectStatementSingleRow` is a type error, not
 a silent rebind.
 
 ### `LockingClause` must live inside the recursive type group

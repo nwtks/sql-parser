@@ -39,8 +39,10 @@ module SchemaParser =
     // 10.6 <routine designator> ::= [ <routine type> ] <qualified identifier>
     // (<object name> in 12.2 / 12.3 — kept separate from <specific routine designator>
     //  because <object name> carries a plain name, not a designator)
-    let pRoutineDesignatorWithType =
-        choice [ attempt (pRoutineType >>. pQualifiedNameExpr); pQualifiedNameExpr ]
+    let pRoutineDesignator =
+        choice
+            [ attempt (pRoutineType >>. pSchemaQualifiedNameExpression)
+              pSchemaQualifiedNameExpression ]
 
     // 10.6 <specific routine designator> ::=
     //       SPECIFIC <routine type> <specific name>
@@ -62,20 +64,20 @@ module SchemaParser =
 
         choice
             [ attempt (
-                  pKeyword "SPECIFIC" >>. pRoutineType .>>. pQualifiedNameExpr
+                  pKeyword "SPECIFIC" >>. pRoutineType .>>. pSchemaQualifiedNameExpression
                   |>> fun (routineType, name) -> mk true (Some routineType) name None None
               )
               attempt (
                   opt pRoutineType
-                  .>>. pQualifiedNameExpr
+                  .>>. pSchemaQualifiedNameExpression
                   .>>. opt (attempt pDataTypeList)
-                  .>>. opt (attempt (pKeyword "FOR" >>. pQualifiedNameExpr))
+                  .>>. opt (attempt (pKeyword "FOR" >>. pSchemaQualifiedNameExpression))
                   |>> fun (((routineType, name), dataTypeList), forType) ->
                       mk false routineType name dataTypeList forType
               ) ]
 
     // 10.7 <collate clause> ::= COLLATE <collation name>
-    let pCollateClause = pKeyword "COLLATE" >>. pQualifiedNameExpr
+    let pCollateClause = pKeyword "COLLATE" >>. pSchemaQualifiedNameExpression
 
     // 10.8 <constraint enforcement> ::= [ NOT ] ENFORCED   (true = ENFORCED, false = NOT ENFORCED)
     // Also used by 11.25 <alter table constraint definition>, and by the
@@ -138,10 +140,12 @@ module SchemaParser =
         let pNameClause =
             choice
                 [ attempt (
-                      pQualifiedNameExpr .>>. opt (pKeyword "AUTHORIZATION" >>. pIdentifierExpr)
+                      pSchemaQualifiedNameExpression
+                      .>>. opt (pKeyword "AUTHORIZATION" >>. pIdentifierExpression)
                       |>> fun (name, auth) -> Some name, auth
                   )
-                  pKeyword "AUTHORIZATION" >>. pIdentifierExpr |>> fun auth -> None, Some auth ]
+                  pKeyword "AUTHORIZATION" >>. pIdentifierExpression
+                  |>> fun auth -> None, Some auth ]
 
         // 11.1 <schema character set or path> ::=
         //     <schema character set specification>
@@ -153,10 +157,11 @@ module SchemaParser =
                 pKeyword "DEFAULT"
                 >>. pKeyword "CHARACTER"
                 >>. pKeyword "SET"
-                >>. pQualifiedNameExpr
+                >>. pSchemaQualifiedNameExpression
 
             // 10.3 <path specification> ::= PATH <path-resolved user-defined type name> [ { <comma> ... }... ]
-            let pPath = pKeyword "PATH" >>. sepBy1 pQualifiedNameExpr (token (pstring ","))
+            let pPath =
+                pKeyword "PATH" >>. sepBy1 pSchemaQualifiedNameExpression (token (pstring ","))
 
             choice
                 [ attempt (pCharset .>>. opt (attempt pPath) |>> fun (c, p) -> Some c, p)
@@ -206,8 +211,8 @@ module SchemaParser =
     // 11.4 <column constraint> ::= NOT NULL | <unique specification>
     //     | <references specification> | <check constraint definition>
     // (the <default clause> is NOT a column constraint — see pDefaultClause below)
-    let pColumnConstraint =
-        let pName = opt (pKeyword "CONSTRAINT" >>. pIdentifierExpr)
+    let pColumnConstraintDefinition =
+        let pName = opt (pKeyword "CONSTRAINT" >>. pIdentifierExpression)
 
         let pKind =
             choice
@@ -215,12 +220,12 @@ module SchemaParser =
                   attempt (pKeyword "PRIMARY" >>. pKeyword "KEY" >>% ColumnConstraintKind.PrimaryKey)
                   attempt (pKeyword "UNIQUE" >>% ColumnConstraintKind.Unique)
                   attempt (
-                      pKeyword "REFERENCES" >>. pIdentifierExpr
+                      pKeyword "REFERENCES" >>. pIdentifierExpression
                       .>>. opt (
                           between
                               (token (pstring "("))
                               (token (pstring ")"))
-                              (sepBy1 pIdentifierExpr (token (pstring ",")))
+                              (sepBy1 pIdentifierExpression (token (pstring ",")))
                       )
                       .>>. pReferentialTriggeredAction
                       |>> fun ((table, refCols), (onUpd, onDel)) ->
@@ -251,7 +256,7 @@ module SchemaParser =
     // `?` / `:name` and `COLLATION FOR (...)`, none of which are <default option>s.
     let pDefaultOption =
         // 11.5 <implicitly typed value specification> ::= <null specification> | <empty specification>
-        // (<null specification> is covered by pLiteralExpr; <empty specification> is
+        // (<null specification> is covered by pLiteralExpression; <empty specification> is
         //  ARRAY[] / MULTISET[] — see 6.42 / 6.45)
         let pEmptySpecification =
             attempt (
@@ -263,8 +268,8 @@ module SchemaParser =
             |> withExprPosition
 
         choice
-            [ attempt pLiteralExpr
-              // 5.3 <signed numeric literal> — pLiteralExpr only accepts the unsigned form
+            [ attempt pLiteralExpression
+              // 5.3 <signed numeric literal> — pLiteralExpression only accepts the unsigned form
               attempt (pSignedNumericLiteral |>> Number |>> Literal |> withExprPosition)
               attempt pDateTimeValueFunction
               attempt (pKeyword "USER" >>% User |> withExprPosition)
@@ -304,7 +309,7 @@ module SchemaParser =
 
     // 11.72 <sequence generator option> — shared by CREATE/ALTER SEQUENCE and
     // the <identity column specification> (11.4).
-    let pSequenceOption =
+    let pSequenceGeneratorOption =
         choice
             [ attempt (pKeyword "AS" >>. pDataType |>> DataTypeOption)
               attempt pSequenceGeneratorStartWithOption
@@ -313,12 +318,12 @@ module SchemaParser =
 
     // 11.4 <identity column specification> ::= GENERATED { ALWAYS | BY DEFAULT }
     //     AS IDENTITY [ ( <common sequence generator options> ) ]
-    let pIdentitySpec =
+    let pIdentityColumnSpecification =
         pKeyword "GENERATED"
         >>. (pKeyword "ALWAYS" >>% true <|> (pKeyword "BY" >>. pKeyword "DEFAULT" >>% false))
         .>> pKeyword "AS"
         .>> pKeyword "IDENTITY"
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (many pSequenceOption))
+        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (many pSequenceGeneratorOption))
         |>> fun (isAlways, opts) ->
             { IsAlways = isAlways
               Options = Option.defaultValue [] opts }
@@ -333,7 +338,7 @@ module SchemaParser =
 
     // 11.4 <system time period start column specification> ::= GENERATED ALWAYS AS ROW START
     // 11.4 <system time period end column specification>   ::= GENERATED ALWAYS AS ROW END
-    let pSystemTimePeriodColumn =
+    let pSystemTimePeriodColumnSpecification =
         pKeyword "GENERATED"
         >>. pKeyword "ALWAYS"
         >>. pKeyword "AS"
@@ -348,22 +353,22 @@ module SchemaParser =
     // All three GENERATED alternatives start with `GENERATED ALWAYS AS`, so each is `attempt`ed.
     let pColumnGeneration =
         choice
-            [ attempt (pIdentitySpec |>> IdentityColumn)
+            [ attempt (pIdentityColumnSpecification |>> IdentityColumn)
               attempt pGenerationClause
-              attempt pSystemTimePeriodColumn ]
+              attempt pSystemTimePeriodColumnSpecification ]
 
     // 11.4 <column definition> ::= <column name> [ <data type or domain name> ]
     //       [ <default clause> | <identity column specification> | <generation clause>
     //       | <system time period start column specification> | <system time period end column specification> ]
     //       [ <column constraint definition>... ] [ <collate clause> ]
     let pColumnDefinition =
-        pIdentifierExpr
+        pIdentifierExpression
         .>>. pDataType
         .>>. opt (
             attempt (pDefaultClause |>> Choice1Of2)
             <|> attempt (pColumnGeneration |>> Choice2Of2)
         )
-        .>>. many (attempt pColumnConstraint)
+        .>>. many (attempt pColumnConstraintDefinition)
         .>>. opt (attempt pCollateClause)
         |>> fun ((((name, typ), valueClause), constraints), collation) ->
             let defaultValue, identity, generation, systemTimePeriod =
@@ -413,16 +418,16 @@ module SchemaParser =
     // 11.6 <table constraint definition> ::=
     //     [ <constraint name definition> ] <table constraint> [ <constraint characteristics> ]
     // 11.6 <table constraint> ::= PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK
-    let pTableConstraint =
+    let pTableConstraintDefinition =
         // 11.8 <referential constraint definition> ::= FOREIGN KEY ( <column list> ) REFERENCES <table> [ ( <column list> ) ] [ <referential triggered action> ]
         let pForeignKeyConstraint =
             pKeyword "FOREIGN"
             >>. pKeyword "KEY"
-            >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
+            >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
             .>> pKeyword "REFERENCES"
-            .>>. pIdentifierExpr
+            .>>. pIdentifierExpression
             .>>. opt (
-                between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
+                between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
             )
             .>>. pReferentialTriggeredAction
             |>> fun (((cols, table), refCols), (onUpd, onDel)) ->
@@ -434,10 +439,10 @@ module SchemaParser =
                   OnDelete = onDel }
                 : ForeignKeyConstraint
 
-        let pName = opt (pKeyword "CONSTRAINT" >>. pIdentifierExpr)
+        let pName = opt (pKeyword "CONSTRAINT" >>. pIdentifierExpression)
 
         let pColumnList =
-            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
+            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
 
         let pConstraint =
             choice
@@ -471,7 +476,7 @@ module SchemaParser =
             pKeyword "PERIOD" >>. pKeyword "FOR" >>. pKeyword "SYSTEM_TIME"
             >>% TimePeriodSpecification.SystemTimePeriod
         )
-        <|> (pKeyword "PERIOD" >>. pKeyword "FOR" >>. pIdentifierExpr
+        <|> (pKeyword "PERIOD" >>. pKeyword "FOR" >>. pIdentifierExpression
              |>> TimePeriodSpecification.ApplicationTimePeriod)
 
     // 11.3 <table period definition> ::= <system or application time period specification>
@@ -481,7 +486,7 @@ module SchemaParser =
         .>>. between
             (token (pstring "("))
             (token (pstring ")"))
-            (pIdentifierExpr .>>. (token (pstring ",") >>. pIdentifierExpr))
+            (pIdentifierExpression .>>. (token (pstring ",") >>. pIdentifierExpression))
         |>> fun (specification, (beginColumn, endColumn)) ->
             { TablePeriodDefinition.Specification = specification
               BeginColumn = beginColumn
@@ -501,14 +506,14 @@ module SchemaParser =
     //     REF IS <self-referencing column name> [ <reference generation> ]
     // Shared by the <typed table element list> (11.3) and the <view element list> (11.32).
     let pSelfReferencingColumn =
-        pKeyword "REF" >>. pKeyword "IS" >>. pIdentifierExpr
+        pKeyword "REF" >>. pKeyword "IS" >>. pIdentifierExpression
         .>>. opt pReferenceGeneration
         |>> fun (name, generation) -> { Name = name; Generation = generation }
 
     // 11.3 <table definition> ::= CREATE [ <table scope> ] TABLE <table name> <table contents source>
     //       [ WITH <system versioning clause> ] [ ON COMMIT <table commit action> ROWS ]
     // 11.3 <table contents source> ::= <table element list> | <typed table clause> | <as subquery clause>
-    let pCreateTableStatement =
+    let pTableDefinition =
         // 11.3 <like clause> ::= LIKE <table name> [ <like option>... ]
         // 11.3 <like option> ::= <identity option> | <column default option> | <generation option>
         let pLikeClause =
@@ -521,7 +526,7 @@ module SchemaParser =
                       attempt (pKeyword "INCLUDING" >>. pKeyword "GENERATED" >>% LikeOption.IncludingGenerated)
                       attempt (pKeyword "EXCLUDING" >>. pKeyword "GENERATED" >>% LikeOption.ExcludingGenerated) ]
 
-            pKeyword "LIKE" >>. pQualifiedNameExpr .>>. many pLikeOption
+            pKeyword "LIKE" >>. pSchemaQualifiedNameExpression .>>. many pLikeOption
 
         // 11.3 <table element> ::= <column definition> | <table period definition>
         //     | <table constraint definition> | <like clause>
@@ -529,13 +534,13 @@ module SchemaParser =
             choice
                 [ attempt (pColumnDefinition |>> Choice1Of4)
                   attempt (pTablePeriodDefinition |>> Choice2Of4)
-                  attempt (pTableConstraint |>> Choice3Of4)
+                  attempt (pTableConstraintDefinition |>> Choice3Of4)
                   attempt (pLikeClause |>> Choice4Of4) ]
 
         // 11.3 <as subquery clause> ::= [ ( <column name list> ) ] AS <table subquery> <with or without data>
         // 11.3 <with or without data> ::= WITH NO DATA | WITH DATA
         // The <with or without data> clause is mandatory (true = WITH DATA) — see docs/trade-off.md.
-        let pAsSubquery =
+        let pAsSubqueryClause =
             pKeyword "AS" >>. pQuery
             .>>. (pKeyword "WITH" >>. opt (pKeyword "NO") .>> pKeyword "DATA" |>> Option.isNone)
 
@@ -547,13 +552,15 @@ module SchemaParser =
         // 11.3 <column option list> ::=
         //     [ <scope clause> ] [ <default clause> ] [ <column constraint definition>... ]
         let pColumnOptionList =
-            opt pScopeClause .>>. opt pDefaultClause .>>. many (attempt pColumnConstraint)
+            opt pScopeClause
+            .>>. opt pDefaultClause
+            .>>. many (attempt pColumnConstraintDefinition)
 
         // 11.3 <column options> ::= <column name> WITH OPTIONS <column option list>
         // NOTE: `OPTIONS` is not a reserved word, so the mandatory `WITH OPTIONS` is
         // what tells a <column options> element from a <table constraint definition>.
         let pColumnOptions =
-            pIdentifierExpr .>> pKeyword "WITH" .>> pKeyword "OPTIONS"
+            pIdentifierExpression .>> pKeyword "WITH" .>> pKeyword "OPTIONS"
             .>>. pColumnOptionList
             |>> fun (name, ((scope, defaultValue), constraints)) ->
                 { Name = name
@@ -567,7 +574,7 @@ module SchemaParser =
             choice
                 [ attempt (pColumnOptions |>> TypedTableElement.TypedColumnOptions)
                   attempt (pSelfReferencingColumn |>> TypedTableElement.TypedSelfReference)
-                  attempt (pTableConstraint |>> TypedTableElement.TypedTableConstraint) ]
+                  attempt (pTableConstraintDefinition |>> TypedTableElement.TypedTableConstraint) ]
 
         // 11.3 <typed table element list> ::=
         //     <left paren> <typed table element> [ { <comma> <typed table element> }... ] <right paren>
@@ -577,12 +584,12 @@ module SchemaParser =
         // 11.3 <typed table clause> ::= OF <path-resolved user-defined type name>
         //     [ <subtable clause> ] [ <typed table element list> ]
         let pTypedTableClause =
-            pKeyword "OF" >>. pQualifiedNameExpr
-            .>>. opt (pKeyword "UNDER" >>. pQualifiedNameExpr)
+            pKeyword "OF" >>. pSchemaQualifiedNameExpression
+            .>>. opt (pKeyword "UNDER" >>. pSchemaQualifiedNameExpression)
             .>>. opt pTypedTableElementList
 
         // 11.3 <system versioning clause> ::= SYSTEM VERSIONING
-        let pWithSystemVersioning =
+        let pSystemVersioningClause =
             attempt (pKeyword "WITH" >>. pKeyword "SYSTEM" >>. pKeyword "VERSIONING" >>% true)
 
         // 11.3 <table commit action> ::= PRESERVE | DELETE
@@ -594,21 +601,25 @@ module SchemaParser =
             attempt (pKeyword "ON" >>. pKeyword "COMMIT" >>. pTableCommitAction .>> pKeyword "ROWS")
 
         pKeyword "CREATE" >>. opt pTableScope .>> pKeyword "TABLE"
-        .>>. pQualifiedNameExpr
+        .>>. pSchemaQualifiedNameExpression
         .>>. (attempt (
                   between (token (pstring "(")) (token (pstring ")")) (sepBy1 pTableElement (token (pstring ",")))
                   |>> fun elems -> elems, None, None, None, None, []
               )
               <|> attempt (
-                  between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
-                  .>>. pAsSubquery
+                  between
+                      (token (pstring "("))
+                      (token (pstring ")"))
+                      (sepBy1 pIdentifierExpression (token (pstring ",")))
+                  .>>. pAsSubqueryClause
                   |>> fun (cols, (q, withData)) -> [], Some cols, Some(q, withData), None, None, []
               )
-              <|> (pAsSubquery |>> fun (q, withData) -> [], None, Some(q, withData), None, None, [])
+              <|> (pAsSubqueryClause
+                   |>> fun (q, withData) -> [], None, Some(q, withData), None, None, [])
               <|> (pTypedTableClause
                    |>> fun ((typ, supertable), typedElements) ->
                        [], None, None, Some typ, supertable, Option.defaultValue [] typedElements))
-        .>>. opt (attempt pWithSystemVersioning)
+        .>>. opt (attempt pSystemVersioningClause)
         .>>. opt (attempt pOnCommit)
         |>> fun
                 ((((scope, name), (elems, asCols, asQuery, ofType, under, typedElements)), withSystemVersioning),
@@ -733,7 +744,7 @@ module SchemaParser =
         let pAction =
             choice
                 [ attempt (pKeyword "ADD" >>. opt (pKeyword "COLUMN") >>. pColumnDefinition |>> AddColumn)
-                  attempt (pKeyword "ADD" >>. pTableConstraint |>> AlterTableAction.AddConstraint)
+                  attempt (pKeyword "ADD" >>. pTableConstraintDefinition |>> AlterTableAction.AddConstraint)
                   // 11.27 <add table period definition> ::= ADD <table period definition>
                   //     [ <add system time period column list> ]
                   attempt (
@@ -749,12 +760,13 @@ module SchemaParser =
                   // 11.26 <drop table constraint definition>
                   //     ::= DROP CONSTRAINT <constraint name> <drop behavior>
                   attempt (
-                      pKeyword "DROP" >>. pKeyword "CONSTRAINT" >>. pIdentifierExpr .>>. pDropBehavior
+                      pKeyword "DROP" >>. pKeyword "CONSTRAINT" >>. pIdentifierExpression
+                      .>>. pDropBehavior
                       |>> AlterTableAction.DropConstraint
                   )
                   // 11.23 <drop column definition> ::= DROP [ COLUMN ] <column name> <drop behavior>
                   attempt (
-                      pKeyword "DROP" >>. opt (pKeyword "COLUMN") >>. pIdentifierExpr
+                      pKeyword "DROP" >>. opt (pKeyword "COLUMN") >>. pIdentifierExpression
                       .>>. pDropBehavior
                       |>> DropColumn
                   )
@@ -775,21 +787,22 @@ module SchemaParser =
                   // 11.25 <alter table constraint definition>
                   //     ::= ALTER CONSTRAINT <constraint name> <constraint enforcement>
                   attempt (
-                      pKeyword "ALTER" >>. pKeyword "CONSTRAINT" >>. pIdentifierExpr
+                      pKeyword "ALTER" >>. pKeyword "CONSTRAINT" >>. pIdentifierExpression
                       .>>. pConstraintEnforcement
                       |>> AlterTableAction.AlterConstraint
                   )
                   attempt (
-                      pKeyword "ALTER" >>. opt (pKeyword "COLUMN") >>. pIdentifierExpr
+                      pKeyword "ALTER" >>. opt (pKeyword "COLUMN") >>. pIdentifierExpression
                       .>>. pColumnAction
                       |>> AlterColumn
                   ) ]
 
-        pKeyword "ALTER" >>. pKeyword "TABLE" >>. pQualifiedNameExpr .>>. pAction
+        pKeyword "ALTER" >>. pKeyword "TABLE" >>. pSchemaQualifiedNameExpression
+        .>>. pAction
         |>> fun (name, action) -> { Table = name; Action = action } |> AlterTable
 
     // 11.32 <levels clause> ::= CASCADED | LOCAL   (default is CASCADED)
-    let pCheckOption =
+    let pWithCheckOption =
         pKeyword "WITH"
         >>. opt (pKeyword "CASCADED" >>% true <|> (pKeyword "LOCAL" >>% false))
         .>> pKeyword "CHECK"
@@ -798,11 +811,12 @@ module SchemaParser =
 
     // 11.32 <view definition> ::= CREATE [ RECURSIVE ] VIEW <table name> <view specification>
     //       AS <query expression> [ WITH [ <levels clause> ] CHECK OPTION ]
-    let pCreateViewStatement =
+    let pViewDefinition =
         // 11.32 <view column option> ::= <column name> WITH OPTIONS <scope clause>
         // (the <scope clause> is mandatory here, unlike in 11.3's <column option list>)
         let pViewColumnOption =
-            pIdentifierExpr .>> pKeyword "WITH" .>> pKeyword "OPTIONS" .>>. pScopeClause
+            pIdentifierExpression .>> pKeyword "WITH" .>> pKeyword "OPTIONS"
+            .>>. pScopeClause
             |>> fun (name, scope) -> { Name = name; Scope = scope }
 
         // 11.32 <view element> ::= <self-referencing column specification> | <view column option>
@@ -823,22 +837,25 @@ module SchemaParser =
         let pViewSpecification =
             choice
                 [ attempt (
-                      between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
+                      between
+                          (token (pstring "("))
+                          (token (pstring ")"))
+                          (sepBy1 pIdentifierExpression (token (pstring ",")))
                       |>> Choice1Of2
                   )
                   attempt (
-                      pKeyword "OF" >>. pQualifiedNameExpr
-                      .>>. opt (pKeyword "UNDER" >>. pQualifiedNameExpr)
+                      pKeyword "OF" >>. pSchemaQualifiedNameExpression
+                      .>>. opt (pKeyword "UNDER" >>. pSchemaQualifiedNameExpression)
                       .>>. opt pViewElementList
                       |>> Choice2Of2
                   ) ]
 
         pKeyword "CREATE" >>. opt (pKeyword "RECURSIVE" >>% true) .>> pKeyword "VIEW"
-        .>>. pQualifiedNameExpr
+        .>>. pSchemaQualifiedNameExpression
         .>>. opt pViewSpecification
         .>> pKeyword "AS"
         .>>. pQuery
-        .>>. opt (attempt pCheckOption)
+        .>>. opt (attempt pWithCheckOption)
         |>> fun ((((isRecursive, name), spec), query), checkOpt) ->
             let cols, ofType, under, viewElements =
                 match spec with
@@ -859,7 +876,7 @@ module SchemaParser =
 
     // 11.34 <domain constraint> ::= [ <constraint name definition> ] CHECK ( <search condition> ) [ <constraint characteristics> ]
     let pDomainConstraint =
-        opt (pKeyword "CONSTRAINT" >>. pQualifiedNameExpr)
+        opt (pKeyword "CONSTRAINT" >>. pSchemaQualifiedNameExpression)
         .>>. (pKeyword "CHECK"
               >>. between (token (pstring "(")) (token (pstring ")")) pExpression)
         .>>. pConstraintCharacteristics
@@ -869,13 +886,13 @@ module SchemaParser =
               Characteristics = chars }
 
     // 11.34 <domain definition> ::= CREATE DOMAIN <domain name> [ AS ] <data type> [ <default clause> ] [ <domain constraint>... ] [ <collate clause> ]
-    let pCreateDomainStatement =
-        pKeyword "CREATE" >>. pKeyword "DOMAIN" >>. pQualifiedNameExpr
+    let pDomainDefinition =
+        pKeyword "CREATE" >>. pKeyword "DOMAIN" >>. pSchemaQualifiedNameExpression
         .>>. opt (pKeyword "AS")
         .>>. pDataType
         .>>. opt pDefaultClause
         .>>. many pDomainConstraint
-        .>>. opt (pKeyword "COLLATE" >>. pQualifiedNameExpr)
+        .>>. opt (pKeyword "COLLATE" >>. pSchemaQualifiedNameExpression)
         |>> fun (((((name, _), dataType), def), constraints), collation) ->
             CreateDomain
                 { Name = name
@@ -892,50 +909,51 @@ module SchemaParser =
                   attempt (pKeyword "DROP" >>. pKeyword "DEFAULT" >>% DomainAlteration.DropDefault)
                   attempt (pKeyword "ADD" >>. pDomainConstraint |>> DomainAlteration.AddConstraint)
                   attempt (
-                      pKeyword "DROP" >>. pKeyword "CONSTRAINT" >>. pQualifiedNameExpr
+                      pKeyword "DROP" >>. pKeyword "CONSTRAINT" >>. pSchemaQualifiedNameExpression
                       |>> DomainAlteration.DropConstraint
                   ) ]
 
-        pKeyword "ALTER" >>. pKeyword "DOMAIN" >>. pQualifiedNameExpr .>>. pAction
+        pKeyword "ALTER" >>. pKeyword "DOMAIN" >>. pSchemaQualifiedNameExpression
+        .>>. pAction
         |>> fun (name, action) -> AlterDomain(name, action)
 
     // 11.41 <character set definition> ::= CREATE CHARACTER SET <character set name> [ AS GET <character set name> ] [ <collate clause> ]
-    let pCreateCharacterSetStatement =
+    let pCharacterSetDefinition =
         pKeyword "CREATE"
         >>. pKeyword "CHARACTER"
         >>. pKeyword "SET"
-        >>. pQualifiedNameExpr
+        >>. pSchemaQualifiedNameExpression
         .>>. opt (pKeyword "AS")
-        .>>. (pKeyword "GET" >>. pQualifiedNameExpr)
-        .>>. opt (pKeyword "COLLATE" >>. pQualifiedNameExpr)
+        .>>. (pKeyword "GET" >>. pSchemaQualifiedNameExpression)
+        .>>. opt (pKeyword "COLLATE" >>. pSchemaQualifiedNameExpression)
         |>> fun (((name, _), source), collate) -> CreateCharacterSet(name, source, collate)
 
     // 11.43 <collation definition> ::= CREATE COLLATION <collation name> FOR <character set name> FROM <collation name> [ <pad characteristic> ]
-    let pCreateCollationStatement =
+    let pCollationDefinition =
         // 11.43 <pad characteristic> ::= NO PAD | PAD SPACE
         let pPadCharacteristic =
             pKeyword "NO" >>. pKeyword "PAD" >>% true
             <|> (pKeyword "PAD" >>. pKeyword "SPACE" >>% false)
 
-        pKeyword "CREATE" >>. pKeyword "COLLATION" >>. pQualifiedNameExpr
-        .>>. (pKeyword "FOR" >>. pQualifiedNameExpr)
-        .>>. (pKeyword "FROM" >>. pQualifiedNameExpr)
+        pKeyword "CREATE" >>. pKeyword "COLLATION" >>. pSchemaQualifiedNameExpression
+        .>>. (pKeyword "FOR" >>. pSchemaQualifiedNameExpression)
+        .>>. (pKeyword "FROM" >>. pSchemaQualifiedNameExpression)
         .>>. opt pPadCharacteristic
         |>> fun (((name, cs), existing), pad) -> CreateCollation(name, cs, existing, pad)
 
     // 11.45 <transliteration definition> ::= CREATE TRANSLATION <transliteration name> FOR <source character set> TO <target character set> FROM <transliteration source>
     // 11.45 <transliteration source> ::= <existing transliteration name> | <transliteration routine>
     // 11.45 <transliteration routine> ::= <specific routine designator>
-    let pCreateTransliterationStatement =
-        pKeyword "CREATE" >>. pKeyword "TRANSLATION" >>. pQualifiedNameExpr
-        .>>. (pKeyword "FOR" >>. pQualifiedNameExpr)
-        .>>. (pKeyword "TO" >>. pQualifiedNameExpr)
+    let pTransliterationDefinition =
+        pKeyword "CREATE" >>. pKeyword "TRANSLATION" >>. pSchemaQualifiedNameExpression
+        .>>. (pKeyword "FOR" >>. pSchemaQualifiedNameExpression)
+        .>>. (pKeyword "TO" >>. pSchemaQualifiedNameExpression)
         .>>. (pKeyword "FROM" >>. pSpecificRoutineDesignator)
         |>> fun (((name, source), target), trSource) -> CreateTransliteration(name, source, target, trSource)
 
     // 11.47 <assertion definition> ::= CREATE ASSERTION <constraint name> CHECK ( <search condition> ) [ <constraint characteristics> ]
-    let pCreateAssertionStatement =
-        pKeyword "CREATE" >>. pKeyword "ASSERTION" >>. pQualifiedNameExpr
+    let pAssertionDefinition =
+        pKeyword "CREATE" >>. pKeyword "ASSERTION" >>. pSchemaQualifiedNameExpression
         .>>. (pKeyword "CHECK"
               >>. between (token (pstring "(")) (token (pstring ")")) pExpression)
         .>>. pConstraintCharacteristics
@@ -961,7 +979,7 @@ module SchemaParser =
               attempt (pKeyword "DELETE" >>% TriggerEvent.Delete)
               attempt (
                   pKeyword "UPDATE"
-                  >>. opt (pKeyword "OF" >>. sepBy1 pIdentifierExpr (token (pstring ",")))
+                  >>. opt (pKeyword "OF" >>. sepBy1 pIdentifierExpression (token (pstring ",")))
                   |>> TriggerEvent.Update
               ) ]
 
@@ -969,25 +987,31 @@ module SchemaParser =
     let pTransitionTableOrVariable =
         choice
             [ attempt (
-                  pKeyword "OLD" >>. pKeyword "TABLE" >>. opt (pKeyword "AS") >>. pIdentifierExpr
+                  pKeyword "OLD"
+                  >>. pKeyword "TABLE"
+                  >>. opt (pKeyword "AS")
+                  >>. pIdentifierExpression
                   |>> TransitionTableOrVariable.OldTable
               )
               attempt (
-                  pKeyword "NEW" >>. pKeyword "TABLE" >>. opt (pKeyword "AS") >>. pIdentifierExpr
+                  pKeyword "NEW"
+                  >>. pKeyword "TABLE"
+                  >>. opt (pKeyword "AS")
+                  >>. pIdentifierExpression
                   |>> TransitionTableOrVariable.NewTable
               )
               attempt (
                   pKeyword "OLD"
                   >>. opt (pKeyword "ROW")
                   >>. opt (pKeyword "AS")
-                  >>. pIdentifierExpr
+                  >>. pIdentifierExpression
                   |>> TransitionTableOrVariable.OldRow
               )
               attempt (
                   pKeyword "NEW"
                   >>. opt (pKeyword "ROW")
                   >>. opt (pKeyword "AS")
-                  >>. pIdentifierExpr
+                  >>. pIdentifierExpression
                   |>> TransitionTableOrVariable.NewRow
               ) ]
 
@@ -1021,11 +1045,11 @@ module SchemaParser =
               Statement = statement }
 
     // 11.49 <trigger definition> ::= CREATE TRIGGER <trigger name> <trigger action time> <trigger event> ON <table name> [ REFERENCING <transition table or variable list> ] <triggered action>
-    let pCreateTriggerStatement =
-        pKeyword "CREATE" >>. pKeyword "TRIGGER" >>. pQualifiedNameExpr
+    let pTriggerDefinition =
+        pKeyword "CREATE" >>. pKeyword "TRIGGER" >>. pSchemaQualifiedNameExpression
         .>>. pTriggerActionTime
         .>>. pTriggerEvent
-        .>>. (pKeyword "ON" >>. pQualifiedNameExpr)
+        .>>. (pKeyword "ON" >>. pSchemaQualifiedNameExpression)
         .>>. opt (pKeyword "REFERENCING" >>. many pTransitionTableOrVariable)
         .>>. pTriggeredAction
         |>> fun (((((name, actionTime), event), table), transitions), action) ->
@@ -1106,12 +1130,12 @@ module SchemaParser =
             >>. between
                     (token (pstring "("))
                     (token (pstring ")"))
-                    (sepBy1 (pIdentifierExpr .>>. opt pDataType) (token (pstring ",")))
+                    (sepBy1 (pIdentifierExpression .>>. opt pDataType) (token (pstring ",")))
             |>> DescriptorValueConstructor
             |> withExprPosition
 
         let pWithName =
-            opt pParameterMode .>>. pIdentifierExpr .>>. pParameterType
+            opt pParameterMode .>>. pIdentifierExpression .>>. pParameterType
             |>> fun ((mode, name), paramType) -> mode, Some name, paramType
 
         let pWithoutName =
@@ -1144,10 +1168,10 @@ module SchemaParser =
     // 11.52 <attribute definition> ::= <attribute name> <data type>
     //     [ <attribute default> ] [ <collate clause> ]
     let pAttributeDefinition =
-        pIdentifierExpr
+        pIdentifierExpression
         .>>. pDataType
         .>>. opt (pKeyword "DEFAULT" >>. pExpression)
-        .>>. opt (pKeyword "COLLATE" >>. pQualifiedNameExpr)
+        .>>. opt (pKeyword "COLLATE" >>. pSchemaQualifiedNameExpression)
         |>> fun (((name, dataType), def), collate) ->
             { Name = name
               DataType = dataType
@@ -1181,7 +1205,10 @@ module SchemaParser =
               attempt (
                   pKeyword "REF"
                   >>. pKeyword "FROM"
-                  >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
+                  >>. between
+                          (token (pstring "("))
+                          (token (pstring ")"))
+                          (sepBy1 pIdentifierExpression (token (pstring ",")))
                   |>> TypeOption.RefFrom
               )
               // 11.51 <system-generated representation> ::= REF IS SYSTEM GENERATED
@@ -1197,7 +1224,7 @@ module SchemaParser =
                           (token (pstring ")"))
                           (pKeyword "SOURCE" >>. pKeyword "AS" >>. pKeyword "REF" >>% ())
                   .>> pKeyword "WITH"
-                  >>. pIdentifierExpr
+                  >>. pIdentifierExpression
                   |>> TypeOption.CastToRef
               )
               // 11.51 <cast to type> ::= CAST ( REF AS SOURCE ) WITH <cast to type identifier>
@@ -1208,7 +1235,7 @@ module SchemaParser =
                           (token (pstring ")"))
                           (pKeyword "REF" >>. pKeyword "AS" >>. pKeyword "SOURCE" >>% ())
                   .>> pKeyword "WITH"
-                  >>. pIdentifierExpr
+                  >>. pIdentifierExpression
                   |>> TypeOption.CastToType
               )
               // 11.51 <cast to distinct> ::= CAST ( SOURCE AS DISTINCT ) WITH <cast to distinct identifier>
@@ -1219,7 +1246,7 @@ module SchemaParser =
                           (token (pstring ")"))
                           (pKeyword "SOURCE" >>. pKeyword "AS" >>. pKeyword "DISTINCT" >>% ())
                   .>> pKeyword "WITH"
-                  >>. pIdentifierExpr
+                  >>. pIdentifierExpression
                   |>> TypeOption.CastToDistinct
               )
               // 11.51 <cast to source> ::= CAST ( DISTINCT AS SOURCE ) WITH <cast to source identifier>
@@ -1230,7 +1257,7 @@ module SchemaParser =
                           (token (pstring ")"))
                           (pKeyword "DISTINCT" >>. pKeyword "AS" >>. pKeyword "SOURCE" >>% ())
                   .>> pKeyword "WITH"
-                  >>. pIdentifierExpr
+                  >>. pIdentifierExpression
                   |>> TypeOption.CastToSource
               ) ]
 
@@ -1241,10 +1268,10 @@ module SchemaParser =
     // before this module, so the routine and type parsers here can share it.
     let pPartialMethodSpecification =
         opt pMethodKind
-        .>>. (pKeyword "METHOD" >>. pIdentifierExpr)
+        .>>. (pKeyword "METHOD" >>. pIdentifierExpression)
         .>>. pParameterDeclarationList
         .>>. opt (pKeyword "RETURNS" >>. pDataType)
-        .>>. opt (pKeyword "SPECIFIC" >>. pQualifiedNameExpr)
+        .>>. opt (pKeyword "SPECIFIC" >>. pSchemaQualifiedNameExpression)
         |>> fun ((((kind, name), parameters), returns), specific) ->
             { Kind = kind
               Name = name
@@ -1335,9 +1362,9 @@ module SchemaParser =
     // 11.51 <user-defined type definition> ::= CREATE TYPE <user-defined type body>
     // 11.51 <user-defined type body> ::= <schema-resolved user-defined type name> [ <subtype clause> ] [ AS <representation> ] [ <user-defined type option list> ] [ <method specification list> ]
     // 11.51 <subtype clause> ::= UNDER <supertype name>
-    let pCreateTypeStatement =
-        pKeyword "CREATE" >>. pKeyword "TYPE" >>. pQualifiedNameExpr
-        .>>. opt (pKeyword "UNDER" >>. pQualifiedNameExpr)
+    let pUserDefinedTypeDefinition =
+        pKeyword "CREATE" >>. pKeyword "TYPE" >>. pSchemaQualifiedNameExpression
+        .>>. opt (pKeyword "UNDER" >>. pSchemaQualifiedNameExpression)
         .>>. opt (pKeyword "AS" >>. pRepresentation)
         .>>. many pTypeOption
         .>>. opt pMethodSpecificationList
@@ -1359,7 +1386,7 @@ module SchemaParser =
               )
               // 11.55 <drop attribute definition> ::= DROP ATTRIBUTE <attribute name> RESTRICT
               attempt (
-                  pKeyword "DROP" >>. pKeyword "ATTRIBUTE" >>. pIdentifierExpr
+                  pKeyword "DROP" >>. pKeyword "ATTRIBUTE" >>. pIdentifierExpression
                   .>> pKeyword "RESTRICT"
                   |>> AlterTypeAction.DropAttribute
               )
@@ -1376,7 +1403,7 @@ module SchemaParser =
               //     <data type list> RESTRICT
               attempt (
                   pKeyword "DROP" >>. opt pMethodKind .>> pKeyword "METHOD"
-                  .>>. pIdentifierExpr
+                  .>>. pIdentifierExpression
                   .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pDataType (token (pstring ",")))
                   .>> pKeyword "RESTRICT"
                   |>> fun ((kind, name), types) -> AlterTypeAction.DropMethod(kind, name, types)
@@ -1384,7 +1411,7 @@ module SchemaParser =
 
     // 11.53 <alter type statement> ::= ALTER TYPE <schema-resolved user-defined type name> <alter type action>
     let pAlterTypeStatement =
-        pKeyword "ALTER" >>. pKeyword "TYPE" >>. pQualifiedNameExpr
+        pKeyword "ALTER" >>. pKeyword "TYPE" >>. pSchemaQualifiedNameExpression
         .>>. pAlterTypeAction
         |>> fun (name, action) -> AlterType { Name = name; Action = action }
 
@@ -1419,8 +1446,8 @@ module SchemaParser =
         pKeyword "TRANSFORM"
         >>. pKeyword "GROUP"
         >>. sepBy1
-                (pIdentifierExpr
-                 .>>. opt (attempt (pKeyword "FOR" >>. pKeyword "TYPE" >>. pQualifiedNameExpr)))
+                (pIdentifierExpression
+                 .>>. opt (attempt (pKeyword "FOR" >>. pKeyword "TYPE" >>. pSchemaQualifiedNameExpression)))
                 (token (pstring ","))
         |>> fun groups ->
             match groups with
@@ -1430,7 +1457,7 @@ module SchemaParser =
     // 11.60 <external body reference> ::= EXTERNAL [ NAME <external routine name> ]
     //     [ <parameter style clause> ] [ <transform group specification> ] [ <external security clause> ]
     let pExternalBodyReference =
-        pKeyword "EXTERNAL" >>. opt (pKeyword "NAME" >>. pQualifiedNameExpr)
+        pKeyword "EXTERNAL" >>. opt (pKeyword "NAME" >>. pSchemaQualifiedNameExpression)
         .>>. opt (attempt pParameterStyleClause)
         .>>. opt (attempt pTransformGroupSpecification)
         .>>. opt (attempt pExternalSecurityClause)
@@ -1473,7 +1500,7 @@ module SchemaParser =
         choice
             [ attempt (pLanguageClause |>> Language)
               attempt (pParameterStyleClause |>> ParameterStyle)
-              attempt (pKeyword "SPECIFIC" >>. pQualifiedNameExpr |>> SpecificName)
+              attempt (pKeyword "SPECIFIC" >>. pSchemaQualifiedNameExpression |>> SpecificName)
               attempt (pKeyword "NOT" >>. pKeyword "DETERMINISTIC" >>% Deterministic false)
               attempt (pKeyword "DETERMINISTIC" >>% Deterministic true)
               attempt (pKeyword "NO" >>. pKeyword "SQL" >>% SqlDataAccess NoSql)
@@ -1583,8 +1610,8 @@ module SchemaParser =
             preturn routine
 
     // 11.60 <schema procedure> ::= CREATE <SQL-invoked procedure> — <SQL-invoked procedure> ::= PROCEDURE <schema qualified routine name> <SQL parameter declaration list> <routine characteristics> <routine body>
-    let pCreateProcedureStatement =
-        pKeyword "CREATE" >>. pKeyword "PROCEDURE" >>. pQualifiedNameExpr
+    let pSchemaProcedure =
+        pKeyword "CREATE" >>. pKeyword "PROCEDURE" >>. pSchemaQualifiedNameExpression
         .>>. pParameterDeclarationList
         .>>. pRoutineCharacteristics
         .>>. pRoutineBody
@@ -1624,7 +1651,7 @@ module SchemaParser =
                 (token (pstring "("))
                 (token (pstring ")"))
                 (sepBy1
-                    (pIdentifierExpr .>>. pDataType
+                    (pIdentifierExpression .>>. pDataType
                      |>> fun (name, dataType) ->
                          { TableFunctionColumn.Name = name
                            DataType = dataType })
@@ -1642,8 +1669,8 @@ module SchemaParser =
     // 11.60 <SQL-invoked function> ::= { <function specification> | <method specification designator> } <routine body>
     // 11.60 <function specification> ::= FUNCTION <schema qualified routine name> <SQL parameter declaration list>
     //     <returns clause> <routine characteristics> [ <dispatch clause> ]
-    let pCreateFunctionStatement =
-        pKeyword "CREATE" >>. pKeyword "FUNCTION" >>. pQualifiedNameExpr
+    let pSchemaFunction =
+        pKeyword "CREATE" >>. pKeyword "FUNCTION" >>. pSchemaQualifiedNameExpression
         .>>. pParameterDeclarationList
         .>>. (pKeyword "RETURNS" >>. pReturnsType)
         .>>. pRoutineCharacteristics
@@ -1666,15 +1693,15 @@ module SchemaParser =
     let pMethodSpecificationDesignator =
         choice
             [ attempt (
-                  pKeyword "SPECIFIC" >>. pKeyword "METHOD" >>. pQualifiedNameExpr
+                  pKeyword "SPECIFIC" >>. pKeyword "METHOD" >>. pSchemaQualifiedNameExpression
                   |>> MethodSpecificationDesignator.SpecificMethod
               )
               attempt (
                   opt pMethodKind
-                  .>>. (pKeyword "METHOD" >>. pIdentifierExpr)
+                  .>>. (pKeyword "METHOD" >>. pIdentifierExpression)
                   .>>. pParameterDeclarationList
                   .>>. opt (pKeyword "RETURNS" >>. pReturnsType)
-                  .>>. (pKeyword "FOR" >>. pQualifiedNameExpr)
+                  .>>. (pKeyword "FOR" >>. pSchemaQualifiedNameExpression)
                   |>> fun ((((kind, name), parameters), returns), forType) ->
                       MethodSpecificationDesignator.MethodDeclaration
                           { Kind = kind
@@ -1685,7 +1712,7 @@ module SchemaParser =
               ) ]
 
     // 11.60 <schema function> ::= CREATE <SQL-invoked function>, <method specification designator> form
-    let pCreateMethodStatement =
+    let pSchemaMethod =
         pKeyword "CREATE" >>. pMethodSpecificationDesignator .>>. pRoutineBody
         |>> fun (designator, body) -> CreateMethod { Designator = designator; Body = body }
 
@@ -1728,7 +1755,7 @@ module SchemaParser =
                   >>. (pUnsignedInteger .>> ws)
                   |>> DynamicResultSets
               )
-              attempt (pKeyword "NAME" >>. pQualifiedNameExpr |>> ExternalName) ]
+              attempt (pKeyword "NAME" >>. pSchemaQualifiedNameExpression |>> ExternalName) ]
 
     let pAlterRoutineCharacteristics =
         many pAlterRoutineCharacteristic >>= rejectDuplicateCharacteristics
@@ -1744,7 +1771,7 @@ module SchemaParser =
                   Characteristics = characteristics }
 
     // 11.63 <user-defined cast definition> ::= CREATE CAST ( <source data type> AS <target data type> ) WITH <cast function> [ AS ASSIGNMENT ]
-    let pCreateCastStatement =
+    let pUserDefinedCastDefinition =
         pKeyword "CREATE"
         >>. pKeyword "CAST"
         >>. between (token (pstring "(")) (token (pstring ")")) (pDataType .>>. (pKeyword "AS" >>. pDataType))
@@ -1764,7 +1791,10 @@ module SchemaParser =
                   pKeyword "MAP" >>. pKeyword "WITH" >>. pSpecificRoutineDesignator
                   |>> OrderingCategory.Map
               )
-              attempt (pKeyword "STATE" >>. opt pQualifiedNameExpr |>> OrderingCategory.State) ]
+              attempt (
+                  pKeyword "STATE" >>. opt pSchemaQualifiedNameExpression
+                  |>> OrderingCategory.State
+              ) ]
 
     // 11.65 <ordering form> ::= EQUALS ONLY BY <ordering category> | ORDER FULL BY <ordering category>
     let pOrderingForm =
@@ -1774,11 +1804,11 @@ module SchemaParser =
              |>> OrderingForm.OrderFullBy)
 
     // 11.65 <user-defined ordering definition> ::= CREATE ORDERING FOR <schema-resolved user-defined type name> <ordering form>
-    let pCreateOrderingStatement =
+    let pUserDefinedOrderingDefinition =
         pKeyword "CREATE"
         >>. pKeyword "ORDERING"
         >>. pKeyword "FOR"
-        >>. pQualifiedNameExpr
+        >>. pSchemaQualifiedNameExpression
         .>>. pOrderingForm
         |>> fun (name, form) -> CreateOrdering(name, form)
 
@@ -1797,16 +1827,16 @@ module SchemaParser =
 
     // 11.67 <transform group> ::= <group name> ( <transform element> [ { <comma> <transform element> }... ] )
     let pTransformGroup =
-        pQualifiedNameExpr
+        pSchemaQualifiedNameExpression
         .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pTransformElement (token (pstring ",")))
         |>> fun (name, elements) -> { Name = name; Elements = elements }
 
     // 11.67 <transform definition> ::= CREATE { TRANSFORM | TRANSFORMS } FOR <schema-resolved user-defined type name> <transform group> [ { <comma> <transform group> }... ]
-    let pCreateTransformStatement =
+    let pTransformDefinition =
         pKeyword "CREATE"
         >>. (pKeyword "TRANSFORM" <|> pKeyword "TRANSFORMS")
         >>. pKeyword "FOR"
-        >>. pQualifiedNameExpr
+        >>. pSchemaQualifiedNameExpression
         .>>. many1 pTransformGroup
         |>> fun (name, groups) -> CreateTransform(name, groups)
 
@@ -1830,7 +1860,7 @@ module SchemaParser =
 
     // 11.68 <alter transform group> ::= <group name> ( <alter transform action> [ { <comma> <alter transform action> }... ] )
     let pAlterTransformGroup =
-        pQualifiedNameExpr
+        pSchemaQualifiedNameExpression
         .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pAlterTransformAction (token (pstring ",")))
         |>> fun (name, actions) -> { Name = name; Actions = actions }
 
@@ -1839,7 +1869,7 @@ module SchemaParser =
         pKeyword "ALTER"
         >>. (pKeyword "TRANSFORM" <|> pKeyword "TRANSFORMS")
         >>. pKeyword "FOR"
-        >>. pQualifiedNameExpr
+        >>. pSchemaQualifiedNameExpression
         .>>. many1 pAlterTransformGroup
         |>> fun (name, groups) -> AlterTransform(name, groups)
 
@@ -1864,26 +1894,29 @@ module SchemaParser =
         // Local because pDropStatement is its only consumer.
         let pTransformsToBeDropped =
             pKeyword "ALL" >>% TransformDropTarget.AllTransforms
-            <|> (pQualifiedNameExpr |>> TransformDropTarget.TransformGroup)
+            <|> (pSchemaQualifiedNameExpression |>> TransformDropTarget.TransformGroup)
 
         pKeyword "DROP"
         >>. choice
-                [ attempt (pKeyword "SCHEMA" >>. pQualifiedNameExpr .>>. pDropBehavior)
+                [ attempt (pKeyword "SCHEMA" >>. pSchemaQualifiedNameExpression .>>. pDropBehavior)
                   |>> DropSchema
-                  attempt (pKeyword "TABLE" >>. pQualifiedNameExpr .>>. pDropBehavior)
+                  attempt (pKeyword "TABLE" >>. pSchemaQualifiedNameExpression .>>. pDropBehavior)
                   |>> DropTable
-                  attempt (pKeyword "VIEW" >>. pQualifiedNameExpr .>>. pDropBehavior) |>> DropView
-                  attempt (pKeyword "DOMAIN" >>. pQualifiedNameExpr .>>. pDropBehavior)
+                  attempt (pKeyword "VIEW" >>. pSchemaQualifiedNameExpression .>>. pDropBehavior)
+                  |>> DropView
+                  attempt (pKeyword "DOMAIN" >>. pSchemaQualifiedNameExpression .>>. pDropBehavior)
                   |>> DropDomain
-                  attempt (pKeyword "CHARACTER" >>. pKeyword "SET" >>. pQualifiedNameExpr)
+                  attempt (pKeyword "CHARACTER" >>. pKeyword "SET" >>. pSchemaQualifiedNameExpression)
                   |>> DropCharacterSet
-                  attempt (pKeyword "COLLATION" >>. pQualifiedNameExpr .>>. pDropBehavior)
+                  attempt (pKeyword "COLLATION" >>. pSchemaQualifiedNameExpression .>>. pDropBehavior)
                   |>> DropCollation
-                  attempt (pKeyword "TRANSLATION" >>. pQualifiedNameExpr) |>> DropTransliteration
-                  attempt (pKeyword "ASSERTION" >>. pQualifiedNameExpr .>>. opt pDropBehavior)
+                  attempt (pKeyword "TRANSLATION" >>. pSchemaQualifiedNameExpression)
+                  |>> DropTransliteration
+                  attempt (pKeyword "ASSERTION" >>. pSchemaQualifiedNameExpression .>>. opt pDropBehavior)
                   |>> DropAssertion
-                  attempt (pKeyword "TRIGGER" >>. pQualifiedNameExpr) |>> DropTrigger
-                  attempt (pKeyword "TYPE" >>. pQualifiedNameExpr .>>. pDropBehavior) |>> DropType
+                  attempt (pKeyword "TRIGGER" >>. pSchemaQualifiedNameExpression) |>> DropTrigger
+                  attempt (pKeyword "TYPE" >>. pSchemaQualifiedNameExpression .>>. pDropBehavior)
+                  |>> DropType
                   attempt (
                       pKeyword "CAST"
                       >>. between
@@ -1893,27 +1926,30 @@ module SchemaParser =
                       .>>. pDropBehavior
                   )
                   |>> fun ((source, target), behavior) -> DropCast(source, target, behavior)
-                  attempt (pKeyword "ORDERING" >>. pKeyword "FOR" >>. pQualifiedNameExpr .>>. pDropBehavior)
+                  attempt (
+                      pKeyword "ORDERING" >>. pKeyword "FOR" >>. pSchemaQualifiedNameExpression
+                      .>>. pDropBehavior
+                  )
                   |>> DropOrdering
                   attempt (
                       pKeyword "TRANSFORM" <|> pKeyword "TRANSFORMS" >>. pTransformsToBeDropped
-                      .>>. (pKeyword "FOR" >>. pQualifiedNameExpr)
+                      .>>. (pKeyword "FOR" >>. pSchemaQualifiedNameExpression)
                       .>>. pDropBehavior
                   )
                   |>> fun ((target, forName), behavior) -> DropTransform(forName, target, behavior)
-                  attempt (pKeyword "SEQUENCE" >>. pQualifiedNameExpr .>>. pDropBehavior)
+                  attempt (pKeyword "SEQUENCE" >>. pSchemaQualifiedNameExpression .>>. pDropBehavior)
                   |>> DropSequence
-                  attempt (pKeyword "ROLE" >>. pIdentifierExpr) |>> DropRole
-                  attempt (pRoutineDesignatorWithType .>>. pDropBehavior) |>> DropRoutine ]
+                  attempt (pKeyword "ROLE" >>. pIdentifierExpression) |>> DropRole
+                  attempt (pRoutineDesignator .>>. pDropBehavior) |>> DropRoutine ]
 
     // 11.72 <sequence generator definition> ::= CREATE SEQUENCE <sequence generator name> [ <sequence generator options> ]
-    let pCreateSequenceStatement =
-        pKeyword "CREATE" >>. pKeyword "SEQUENCE" >>. pQualifiedNameExpr
-        .>>. many pSequenceOption
+    let pSequenceGeneratorDefinition =
+        pKeyword "CREATE" >>. pKeyword "SEQUENCE" >>. pSchemaQualifiedNameExpression
+        .>>. many pSequenceGeneratorOption
         |>> fun (name, opts) -> CreateSequence(name, opts)
 
     // 11.73 <alter sequence generator statement> ::= ALTER SEQUENCE <name> <options>
     let pAlterSequenceStatement =
-        pKeyword "ALTER" >>. pKeyword "SEQUENCE" >>. pQualifiedNameExpr
-        .>>. many1 pSequenceOption
+        pKeyword "ALTER" >>. pKeyword "SEQUENCE" >>. pSchemaQualifiedNameExpression
+        .>>. many1 pSequenceGeneratorOption
         |>> fun (name, opts) -> AlterSequence(name, opts)

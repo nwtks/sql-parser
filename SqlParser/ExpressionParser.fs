@@ -10,7 +10,7 @@ module ExpressionParser =
     // opp.ExpressionParser after the operator-precedence parser is built below).
     // Used where the grammar requires a non-boolean <value expression> (JSON slots,
     // <point in time>, etc.).
-    let pValueExpressionNoBoolean, pValueExpressionNoBooleanRef =
+    let pNonBooleanValueExpression, pValueExpressionNoBooleanRef =
         createParserForwardedToRef<Expression, unit> ()
 
     // 6.35 <datetime value expression> — forward ref. Defined after pTimeZoneSuffix,
@@ -56,7 +56,7 @@ module ExpressionParser =
               Pos = { Line = pos.Line; Column = pos.Column } }
 
     // 6.1 <character string type> ::= CHARACTER [ ( <character length> ) ] | CHAR [ ( <length> ) ] | CHARACTER VARYING ( <length> ) | VARCHAR ( <length> ) | <character large object type>
-    let pCharacterType =
+    let pCharacterStringType =
         choice
             [ attempt (pKeyword "CHARACTER" .>> pKeyword "VARYING") >>% Varchar
               attempt (pKeyword "CHAR" .>> pKeyword "VARYING") >>% Varchar
@@ -72,7 +72,7 @@ module ExpressionParser =
         |>> fun (typ, len) -> typ len
 
     // 6.1 <national character string type> ::= NATIONAL CHARACTER [ ( <character length> ) ] | NCHAR [ ... ] | NATIONAL CHARACTER VARYING ... | <national character large object type>
-    let pNationalCharacterType =
+    let pNationalCharacterStringType =
         choice
             [ attempt (pKeyword "NATIONAL" .>> pKeyword "CHARACTER" .>> pKeyword "VARYING")
               >>% NationalVarchar
@@ -96,7 +96,7 @@ module ExpressionParser =
         |>> fun (typ, len) -> typ len
 
     // 6.1 <binary string type> ::= BINARY [ ( <length> ) ] | BINARY VARYING ( <length> ) | VARBINARY ( <length> ) | <binary large object string type>
-    let pBinaryType =
+    let pBinaryStringType =
         choice
             [ attempt (pKeyword "BINARY" .>> pKeyword "VARYING") >>% VarBinary
               pKeyword "VARBINARY" >>% VarBinary
@@ -178,7 +178,7 @@ module ExpressionParser =
     let pIntervalType = pKeyword "INTERVAL" >>. pIntervalQualifier |>> IntervalType
 
     // 6.7 <column reference> / 5.4 <identifier> — <identifier> | <column reference>
-    let pIdentifierExpr = pIdentifier |>> Identifier |> withExprPosition
+    let pIdentifierExpression = pIdentifier |>> Identifier |> withExprPosition
 
     // 6.1 <row type> ::= ROW <row type body> — <row type body> ::= ( <field definition> [ { , <field definition> }... ] )
     let pRowType =
@@ -186,11 +186,11 @@ module ExpressionParser =
         >>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (sepBy1 (pIdentifierExpr .>>. pDataType) (token (pstring ",")))
+                (sepBy1 (pIdentifierExpression .>>. pDataType) (token (pstring ",")))
         |>> RowType
 
     // 5.4 <schema qualified name>
-    let pQualifiedNameExpr =
+    let pSchemaQualifiedNameExpression =
         pSchemaQualifiedName
         |>> function
             | [ s ] -> Identifier s
@@ -201,16 +201,17 @@ module ExpressionParser =
     // Shared by <reference type> (6.1), <column option list> (11.3) and
     // <add column scope clause> (11.17); it lives here because ExpressionParser.fs is
     // compiled before SchemaParser.fs.
-    let pScopeClause: Parser<Expression, unit> = pKeyword "SCOPE" >>. pQualifiedNameExpr
+    let pScopeClause: Parser<Expression, unit> =
+        pKeyword "SCOPE" >>. pSchemaQualifiedNameExpression
 
     // 6.1 <data type> — element type parser: all types EXCEPT collection types (to avoid
     // left recursion). The recursive REF / row-field positions use the `pDataType`
     // forward ref, so this parser can be defined before `pCollectionType`.
     let pDataTypeElement: Parser<DataType, unit> =
         choice
-            [ attempt pCharacterType
-              attempt pNationalCharacterType
-              attempt pBinaryType
+            [ attempt pCharacterStringType
+              attempt pNationalCharacterStringType
+              attempt pBinaryStringType
               attempt pNumericType
               attempt pApproximateNumericType
               pKeyword "BOOLEAN" >>% Boolean
@@ -270,7 +271,7 @@ module ExpressionParser =
 
     // 5.3 <literal> ::= NULL | <character string literal> | <numeric literal>
     //     | <boolean literal> | <datetime literal> | <interval literal> | <hex string literal>
-    let pLiteralExpr =
+    let pLiteralExpression =
         choice
             [ attempt (pKeyword "NULL" >>% Null |>> Literal)
               attempt (pCharacterStringLiteral |>> String |>> Literal)
@@ -288,7 +289,7 @@ module ExpressionParser =
     // 6.4 <dynamic parameter specification> ::= <question mark>
     let pQuestionMark: Parser<char, unit> = pchar '?' .>> ws
 
-    // Literals are handled separately by pLiteralExpr above.
+    // Literals are handled separately by pLiteralExpression above.
     // 6.4 <general value specification> — parameter forms (`?` dynamic parameter, `:name` host parameter) plus the keyword forms (CURRENT_USER, SESSION_USER, ...).
     let pGeneralValueSpecification =
         choice
@@ -304,7 +305,7 @@ module ExpressionParser =
               pKeyword "SYSTEM_USER" >>% SystemUser |> withExprPosition
               pKeyword "USER" >>% User |> withExprPosition
               pKeyword "VALUE" >>% Value |> withExprPosition
-              pKeyword "CURRENT_TRANSFORM_GROUP_FOR_TYPE" >>. pQualifiedNameExpr
+              pKeyword "CURRENT_TRANSFORM_GROUP_FOR_TYPE" >>. pSchemaQualifiedNameExpression
               |>> CurrentTransformGroupForType
               |> withExprPosition
               // <current collation specification> ::= COLLATION FOR ( <string value expression> )
@@ -318,34 +319,29 @@ module ExpressionParser =
     //     | <SQL parameter reference> | <embedded variable name>
     // (<embedded variable name> is a host-language construct and is not modelled;
     //  it degrades to <host parameter name> — see docs/trade-off.md.)
-    // NOTE: also accepts bare identifiers (pQualifiedNameExpr) for backward compatibility
-    // with existing SET/CONNECT/DISCONNECT usage where identifiers are common.
     let pSimpleValueSpecification =
         choice
-            [ pLiteralExpr
-              pQuestionMark >>% "?" <|> pHostParameter |>> Parameter |> withExprPosition
-              pQualifiedNameExpr ]
-
-    // 6.4 <simple value specification> (strict) — literals and host params only, no bare identifiers.
-    // Used where the grammar's <simple value specification> does not include identifiers
-    // (<offset row count>, <fetch first row count>, <number of conditions>, <occurrences>).
-    let pSimpleValueSpecificationStrict =
-        choice
-            [ pLiteralExpr
+            [ pLiteralExpression
               pQuestionMark >>% "?" <|> pHostParameter |>> Parameter |> withExprPosition ]
+
+    // 6.4 <simple value specification> (compatibility) — extends the grammar production
+    // with bare identifiers (pSchemaQualifiedNameExpression) for backward compatibility with existing
+    // SET/CONNECT/DISCONNECT usage where identifiers are common.
+    let pSimpleValueSpecificationCompatibility =
+        choice
+            [ pLiteralExpression
+              pQuestionMark >>% "?" <|> pHostParameter |>> Parameter |> withExprPosition
+              pSchemaQualifiedNameExpression ]
 
     // 6.4 <value specification> ::= <literal> | <general value specification>
     // Used where the grammar requires a <value specification> (SET CATALOG/SCHEMA/NAMES/PATH,
     // SET SESSION AUTHORIZATION, SET ROLE, CONNECT TO, ALLOCATE DESCRIPTOR WITH MAX, etc.).
-    // pLiteralExpr covers <unsigned literal> (unsigned numeric + general literals + datetime +
+    // pLiteralExpression covers <unsigned literal> (unsigned numeric + general literals + datetime +
     // interval + boolean + binary); pGeneralValueSpecification covers host params and keyword forms.
-    let pValueSpecification =
-        choice
-            [ pLiteralExpr
-              pGeneralValueSpecification ]
+    let pValueSpecification = choice [ pLiteralExpression; pGeneralValueSpecification ]
 
     // 6.5 <default specification> ::= DEFAULT — only valid in specific contexts (INSERT VALUES, UPDATE SET), not as a general expression. This parser is used by the DML parser for those contexts.
-    let pDefaultValue: Parser<Expression, unit> =
+    let pDefaultSpecification: Parser<Expression, unit> =
         pKeyword "DEFAULT" >>% Default |> withExprPosition
 
     // A dotted identifier chain stops before '. <identifier> ( ... )' so that a
@@ -353,7 +349,7 @@ module ExpressionParser =
     // followed by a method-invocation postfix, while a.b.c (no parens) still
     // parses as a single ColumnReference.
     // 6.7 <column reference> ::= [ <table name> <period> ] <column name>
-    let pColumnReferenceExpr =
+    let pColumnReferenceExpression =
         pIdentifier
         .>>. many (attempt (token (pstring ".") >>. pIdentifier .>>? notFollowedBy (token (pstring "("))))
         |>> function
@@ -388,7 +384,7 @@ module ExpressionParser =
 
     // 7.8 <row pattern measure definition> ::= <row pattern measure expression> AS <measure name>
     let pRowPatternMeasure =
-        pExpression .>> pKeyword "AS" .>>. pIdentifierExpr
+        pExpression .>> pKeyword "AS" .>>. pIdentifierExpression
         |>> fun (expr, name) ->
             { RowPatternMeasure.Expression = expr
               Name = name }
@@ -446,7 +442,7 @@ module ExpressionParser =
                   between (token (pstring "(")) (token (pstring ")")) (opt pRowPattern)
                   |>> RowPatternGroup
               )
-              pIdentifierExpr |>> RowPatternVariable ]
+              pIdentifierExpression |>> RowPatternVariable ]
 
     // 7.9 <row pattern factor> ::= <row pattern primary> [ <row pattern quantifier> ]
     let pRowPatternFactor =
@@ -469,19 +465,19 @@ module ExpressionParser =
         >>. choice
                 [ attempt (pKeyword "NEXT" >>. pKeyword "ROW" >>% SkipToNextRow)
                   attempt (pKeyword "PAST" >>. pKeyword "LAST" >>. pKeyword "ROW" >>% SkipPastLastRow)
-                  attempt (pKeyword "FIRST" >>. pIdentifierExpr |>> SkipToFirst)
-                  attempt (pKeyword "LAST" >>. pIdentifierExpr |>> SkipToLast)
-                  pIdentifierExpr |>> SkipTo ]
+                  attempt (pKeyword "FIRST" >>. pIdentifierExpression |>> SkipToFirst)
+                  attempt (pKeyword "LAST" >>. pIdentifierExpression |>> SkipToLast)
+                  pIdentifierExpression |>> SkipTo ]
 
     // 7.9 <row pattern subset item> ::= <var> = ( <var> [ , <var> ]... )
     let pRowPatternSubset =
-        pIdentifierExpr .>> token (pstring "=")
-        .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
+        pIdentifierExpression .>> token (pstring "=")
+        .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
         |>> fun (name, vars) -> { Name = name; Variables = vars }
 
     // 7.9 <row pattern definition> ::= <var> AS <search condition>
     let pRowPatternDefinition =
-        pIdentifierExpr .>> pKeyword "AS" .>>. pExpression
+        pIdentifierExpression .>> pKeyword "AS" .>>. pExpression
         |>> fun (name, cond) -> { Name = name; Condition = cond }
 
     // 7.9 <row pattern common syntax> ::= [ AFTER MATCH <skip to> ] [ INITIAL | SEEK ]
@@ -506,7 +502,7 @@ module ExpressionParser =
     // references this binding directly. Its optional leading <row pattern measures> and
     // trailing <row pattern common syntax> (7.8/7.9) are defined immediately above.
     // 7.15 <window frame clause> ::= [ <row pattern measures> ] <window frame units> <window frame extent> [ <window frame exclusion> ] [ <row pattern common syntax> ]
-    let pWindowFrame =
+    let pWindowFrameClause =
         // 7.15 <window frame units> ::= ROWS | RANGE | GROUPS
         let pUnit =
             pKeyword "ROWS" >>% Rows
@@ -557,7 +553,7 @@ module ExpressionParser =
     // defined before them.
     // 10.10 <sort specification> ::= <sort key> [ <ordering specification> ] [ <null ordering> ]
     // 10.4 <ordering specification> ::= ASC | DESC — 10.10 <null ordering> ::= NULLS FIRST | NULLS LAST
-    let pOrderByItem =
+    let pSortSpecification =
         let pNullsOrder =
             pKeyword "NULLS"
             >>. (pKeyword "FIRST" >>% NullsFirst <|> (pKeyword "LAST" >>% NullsLast))
@@ -576,7 +572,9 @@ module ExpressionParser =
             >>. sepBy1 pExpression (token (pstring ","))
 
         let pOrderBy =
-            pKeyword "ORDER" >>. pKeyword "BY" >>. sepBy1 pOrderByItem (token (pstring ","))
+            pKeyword "ORDER"
+            >>. pKeyword "BY"
+            >>. sepBy1 pSortSpecification (token (pstring ","))
 
         // 7.15 — an <existing window name> cannot be MEASURES when MEASURES starts a
         // <row pattern measures> clause (the optional leading clause of the
@@ -586,7 +584,7 @@ module ExpressionParser =
         // would otherwise escape the surrounding opt.
         let pExistingWindowName =
             attempt (
-                pIdentifierExpr
+                pIdentifierExpression
                 >>= fun name ->
                     match name.Kind with
                     | Identifier "MEASURES" -> notFollowedBy (pExpression .>> pKeyword "AS") >>% name
@@ -600,13 +598,13 @@ module ExpressionParser =
                  (opt pExistingWindowName
                   .>>. opt pPartitionBy
                   .>>. opt pOrderBy
-                  .>>. opt pWindowFrame
+                  .>>. opt pWindowFrameClause
                   |>> fun (((name, pb), ob), frame) ->
                       { ExistingWindowName = name
                         PartitionBy = Option.defaultValue [] pb
                         OrderBy = Option.defaultValue [] ob
                         Frame = frame })
-             <|> (pIdentifierExpr
+             <|> (pIdentifierExpression
                   |>> fun name ->
                       { ExistingWindowName = Some name
                         PartitionBy = []
@@ -643,7 +641,7 @@ module ExpressionParser =
 
     // 6.11 <value_of expression at row> ::= VALUE_OF ( <value expression> AT <row marker expression>
     //     [ , <value_of default value> ] )
-    let pValueOfFunction =
+    let pValueOfExpressionAtRow =
         pKeyword "VALUE_OF"
         >>. between
                 (token (pstring "("))
@@ -719,12 +717,15 @@ module ExpressionParser =
 
     // 6.14 <next value expression> ::= NEXT VALUE FOR <sequence generator name>
     let pNextValueExpression =
-        pKeyword "NEXT" >>. pKeyword "VALUE" >>. pKeyword "FOR" >>. pQualifiedNameExpr
+        pKeyword "NEXT"
+        >>. pKeyword "VALUE"
+        >>. pKeyword "FOR"
+        >>. pSchemaQualifiedNameExpression
         |>> NextValueFor
         |> withExprPosition
 
     // 6.16 <subtype treatment> ::= TREAT ( <subtype operand> AS <target subtype> )
-    let pTreatExpression =
+    let pSubtypeTreatment =
         pKeyword "TREAT"
         >>. between (token (pstring "(")) (token (pstring ")")) (pExpression .>> pKeyword "AS" .>>. pDataType)
         |>> (fun (e, t) -> Treat(e, t))
@@ -732,12 +733,12 @@ module ExpressionParser =
 
     // 10.4 <SQL argument list> (plain — no DISTINCT/ALL; used by <method invocation>,
     // <static method invocation> and <new specification>)
-    let pValueExpressionList =
+    let pSqlArgumentList =
         between (token (pstring "(")) (token (pstring ")")) (sepBy pExpression (token (pstring ",")))
 
     let pMethodOrFieldReference =
         // 6.32 <specific type method> ::= <user-defined type value expression> <period> SPECIFICTYPE [ ( ) ]
-        // SPECIFICTYPE is a reserved word, so it cannot be reached through pIdentifierExpr below.
+        // SPECIFICTYPE is a reserved word, so it cannot be reached through pIdentifierExpression below.
         // Local because pMethodOrFieldReference is its only consumer.
         let pSpecificTypeMethod =
             token (pstring ".")
@@ -749,7 +750,7 @@ module ExpressionParser =
                       Pos = r.Pos }
 
         attempt pSpecificTypeMethod
-        <|> (token (pstring ".") >>. pIdentifierExpr .>>. opt pValueExpressionList
+        <|> (token (pstring ".") >>. pIdentifierExpression .>>. opt pSqlArgumentList
              |>> fun (name, args) ->
                  match args with
                  | Some a ->
@@ -765,21 +766,21 @@ module ExpressionParser =
     //     <period> <method name> [ <SQL argument list> ]
     let pGeneralizedInvocation =
         between (token (pstring "(")) (token (pstring ")")) (pExpression .>> pKeyword "AS" .>>. pDataType)
-        .>>. (token (pstring ".") >>. pIdentifierExpr .>>. opt pValueExpressionList)
+        .>>. (token (pstring ".") >>. pIdentifierExpression .>>. opt pSqlArgumentList)
         |>> fun ((operand, typ), (name, args)) -> GeneralizedInvocation(operand, typ, name, args)
         |> withExprPosition
 
     // 6.18 <static method invocation> ::= <path-resolved UDT name> :: <method name>
     //     [ <SQL argument list> ]
     let pStaticMethodInvocation =
-        pQualifiedNameExpr
-        .>>. (token (pstring "::") >>. pIdentifierExpr .>>. pValueExpressionList)
+        pSchemaQualifiedNameExpression
+        .>>. (token (pstring "::") >>. pIdentifierExpression .>>. pSqlArgumentList)
         |>> fun (typ, (name, args)) -> StaticMethodInvocation(typ, name, args)
         |> withExprPosition
 
     // 6.19 <new specification> ::= NEW <path-resolved UDT name> <SQL argument list>
     let pNewSpecification =
-        pKeyword "NEW" >>. pQualifiedNameExpr .>>. pValueExpressionList
+        pKeyword "NEW" >>. pSchemaQualifiedNameExpression .>>. pSqlArgumentList
         |>> fun (typ, args) -> NewSpecification(typ, args)
         |> withExprPosition
 
@@ -788,14 +789,15 @@ module ExpressionParser =
     // The dereference operator is the right arrow. It is matched here (inside the term parser) so
     // that the '-' operator of the precedence parser never sees it.
     let pDereferenceReference =
-        token (pstring "->") >>. pQualifiedNameExpr .>>. opt pValueExpressionList
+        token (pstring "->") >>. pSchemaQualifiedNameExpression
+        .>>. opt pSqlArgumentList
         |>> fun (name, args) ->
             fun r ->
                 { Expression.Kind = Dereference(r, name, args)
                   Pos = r.Pos }
 
     // 6.23 <reference resolution> ::= DEREF ( <reference value expression> )
-    let pDerefExpression =
+    let pReferenceResolution =
         pKeyword "DEREF"
         >>. between (token (pstring "(")) (token (pstring ")")) pExpression
         |>> Deref
@@ -810,7 +812,7 @@ module ExpressionParser =
                   Pos = e.Pos }
 
     // 6.25 <multiset element reference> ::= ELEMENT ( <multiset value expression> )
-    let pElementExpression =
+    let pMultisetElementReference =
         pKeyword "ELEMENT"
         >>. between (token (pstring "(")) (token (pstring ")")) pExpression
         |>> Element
@@ -885,8 +887,8 @@ module ExpressionParser =
     // 10.14 <JSON passing argument> ::= <JSON value expression> [ <JSON input clause> ] AS <identifier>
     // <JSON value expression> is a value expression — boolean expressions are not allowed.
     let pJsonArgument =
-        pValueExpressionNoBoolean .>>. opt pJsonInputClause .>> pKeyword "AS"
-        .>>. pIdentifierExpr
+        pNonBooleanValueExpression .>>. opt pJsonInputClause .>> pKeyword "AS"
+        .>>. pIdentifierExpression
         |>> fun ((value, inputFormat), name) ->
             { JsonPassingArgument.Value = value
               InputFormat = inputFormat
@@ -897,10 +899,10 @@ module ExpressionParser =
     // <JSON context item> ::= <JSON value expression> (value expression — no boolean ops,
     // plus an optional FORMAT clause)
     // <JSON path specification> ::= <character string literal> — stored as a plain string.
-    let pJsonApiCommon =
-        pValueExpressionNoBoolean .>>. opt pJsonInputClause .>> token (pstring ",")
+    let pJsonApiCommonSyntax =
+        pNonBooleanValueExpression .>>. opt pJsonInputClause .>> token (pstring ",")
         .>>. pCharacterStringLiteral
-        .>>. opt (attempt (pKeyword "AS" >>. pIdentifierExpr))
+        .>>. opt (attempt (pKeyword "AS" >>. pIdentifierExpression))
         .>>. opt (pKeyword "PASSING" >>. sepBy1 pJsonArgument (token (pstring ",")))
         |>> fun ((((context, contextFormat), path), pathName), passing) ->
             { Context = context
@@ -919,13 +921,13 @@ module ExpressionParser =
             choice
                 [ pKeyword "ERROR" >>% JsonError
                   pKeyword "NULL" >>% JsonNull
-                  pKeyword "DEFAULT" >>. pValueExpressionNoBoolean |>> JsonDefault ]
+                  pKeyword "DEFAULT" >>. pNonBooleanValueExpression |>> JsonDefault ]
 
         pKeyword "JSON_VALUE"
         >>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (pJsonApiCommon
+                (pJsonApiCommonSyntax
                  .>>. opt (pKeyword "RETURNING" >>. pDataType)
                  .>>. opt (pJsonValueBehavior .>> pKeyword "ON" .>> pKeyword "EMPTY")
                  .>>. opt (pJsonValueBehavior .>> pKeyword "ON" .>> pKeyword "ERROR"))
@@ -970,7 +972,7 @@ module ExpressionParser =
                 (token (pstring ")"))
                 (pExpression .>> pKeyword "IN"
                  .>>. pExpression
-                 .>>. opt (pKeyword "USING" >>. pIdentifierExpr))
+                 .>>. opt (pKeyword "USING" >>. pIdentifierExpression))
         |>> (fun ((target, source), unit) -> ExpressionKind.Position(target, source, unit))
         |> withExprPosition
 
@@ -1061,7 +1063,7 @@ module ExpressionParser =
     // The operands are <character value expression>s, so the non-boolean expression parser is
     // used — that also keeps `IN` from being read as an 8.4 <in predicate>.
     let pRegexArgument =
-        let pOperand = pValueExpressionNoBoolean
+        let pOperand = pNonBooleanValueExpression
 
         let pOccurrence =
             choice
@@ -1155,12 +1157,13 @@ module ExpressionParser =
 
     // 6.32 <regular expression substring function> ::= SUBSTRING ( <character value expression>
     //     SIMILAR <character value expression> ESCAPE <escape character> )
-    let pSubstringSimilarFunction =
+    let pRegularExpressionSubstringFunction =
         pKeyword "SUBSTRING"
         >>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (pValueExpressionNoBoolean .>> pKeyword "SIMILAR" .>>. pValueExpressionNoBoolean
+                (pNonBooleanValueExpression .>> pKeyword "SIMILAR"
+                 .>>. pNonBooleanValueExpression
                  .>> pKeyword "ESCAPE"
                  .>>. pExpression)
         |>> fun ((src, pattern), escape) -> SubstringSimilar(src, pattern, escape)
@@ -1178,7 +1181,10 @@ module ExpressionParser =
     // 6.32 <transcoding> ::= CONVERT ( <character value expression> USING <transcoding name> )
     let pTranscodingFunction =
         pKeyword "CONVERT"
-        >>. between (token (pstring "(")) (token (pstring ")")) (pExpression .>> pKeyword "USING" .>>. pIdentifierExpr)
+        >>. between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (pExpression .>> pKeyword "USING" .>>. pIdentifierExpression)
         |>> fun (e, name) -> Transcoding(e, name)
         |> withExprPosition
 
@@ -1186,7 +1192,10 @@ module ExpressionParser =
     //     USING <transliteration name> )
     let pCharacterTransliterationFunction =
         pKeyword "TRANSLATE"
-        >>. between (token (pstring "(")) (token (pstring ")")) (pExpression .>> pKeyword "USING" .>>. pIdentifierExpr)
+        >>. between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (pExpression .>> pKeyword "USING" .>>. pIdentifierExpression)
         |>> fun (e, name) -> CharacterTransliteration(e, name)
         |> withExprPosition
 
@@ -1244,14 +1253,15 @@ module ExpressionParser =
     let pJsonNameAndValue =
         choice
             [ attempt (
-                  opt (pKeyword "KEY") .>>. pValueExpressionNoBoolean .>> pKeyword "VALUE"
-                  .>>. pValueExpressionNoBoolean
+                  opt (pKeyword "KEY") .>>. pNonBooleanValueExpression .>> pKeyword "VALUE"
+                  .>>. pNonBooleanValueExpression
                   |>> fun ((key, name), value) ->
                       { Name = name
                         Value = value
                         Key = Option.isSome key }
               )
-              pValueExpressionNoBoolean .>> token (pstring ":") .>>. pValueExpressionNoBoolean
+              pNonBooleanValueExpression .>> token (pstring ":")
+              .>>. pNonBooleanValueExpression
               |>> fun (name, value) ->
                   { Name = name
                     Value = value
@@ -1345,7 +1355,7 @@ module ExpressionParser =
         >>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (pJsonApiCommon
+                (pJsonApiCommonSyntax
                  .>>. opt pJsonOutputClause
                  .>>. opt (pJsonQueryWrapper .>> pKeyword "WRAPPER")
                  .>>. opt (
@@ -1393,7 +1403,10 @@ module ExpressionParser =
     // 6.41 <trim array function> ::= TRIM_ARRAY ( <array value expression> , <numeric value expression> )
     let pTrimArrayFunction =
         pKeyword "TRIM_ARRAY"
-        >>. between (token (pstring "(")) (token (pstring ")")) (pExpression .>> token (pstring ",") .>>. pNumericValueExpression)
+        >>. between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (pExpression .>> token (pstring ",") .>>. pNumericValueExpression)
         |>> fun (arr, count) -> TrimArray(arr, count)
         |> withExprPosition
 
@@ -1514,7 +1527,9 @@ module ExpressionParser =
             >>. between
                     (token (pstring "("))
                     (token (pstring ")"))
-                    (pKeyword "ORDER" >>. pKeyword "BY" >>. sepBy1 pOrderByItem (token (pstring ",")))
+                    (pKeyword "ORDER"
+                     >>. pKeyword "BY"
+                     >>. sepBy1 pSortSpecification (token (pstring ",")))
 
         // 10.4 <routine name> ::= [ <schema name> <period> ] <qualified identifier>
         // — <qualified identifier> is a <nonreserved qualifier>, so a reserved word
@@ -1607,7 +1622,11 @@ module ExpressionParser =
                 (token (pstring "("))
                 (token (pstring ")"))
                 (pExpression
-                 .>>. opt (pKeyword "ORDER" >>. pKeyword "BY" >>. sepBy1 pOrderByItem (token (pstring ",")))
+                 .>>. opt (
+                     pKeyword "ORDER"
+                     >>. pKeyword "BY"
+                     >>. sepBy1 pSortSpecification (token (pstring ","))
+                 )
                  .>>. opt pJsonConstructorNullClause
                  .>>. opt pJsonOutputClause)
         |>> fun (((expr, orderBy), nullClause), output) -> JsonArrayAgg(expr, orderBy, nullClause, output)
@@ -1627,17 +1646,17 @@ module ExpressionParser =
             | _ -> fail "RUNNING/FINAL requires an <aggregate function>"
 
     // 7.17 <with list element> ::= <query name> [ ( <with column list> ) ] AS <table subquery> [ <search or cycle clause> ]
-    let pCte =
+    let pWithListElement =
         // 7.18 <search clause> ::= SEARCH { DEPTH FIRST | BREADTH FIRST } BY <cols> SET <col>
-        // Local because pCte is the only consumer of the 7.18 clauses.
+        // Local because pWithListElement is the only consumer of the 7.18 clauses.
         let pSearchClause =
             pKeyword "SEARCH"
             >>. (attempt (pKeyword "DEPTH" >>. pKeyword "FIRST" >>% true)
                  <|> (pKeyword "BREADTH" >>. pKeyword "FIRST" >>% false))
             .>> pKeyword "BY"
-            .>>. sepBy1 pIdentifierExpr (token (pstring ","))
+            .>>. sepBy1 pIdentifierExpression (token (pstring ","))
             .>> pKeyword "SET"
-            .>>. pIdentifierExpr
+            .>>. pIdentifierExpression
             |>> fun ((isDepthFirst, orderBy), setCol) ->
                 { IsDepthFirst = isDepthFirst
                   OrderBy = orderBy
@@ -1645,15 +1664,15 @@ module ExpressionParser =
 
         // 7.18 <cycle clause> ::= CYCLE <cols> SET <col> TO <mark> DEFAULT <default> USING <path>
         let pCycleClause =
-            pKeyword "CYCLE" >>. sepBy1 pIdentifierExpr (token (pstring ","))
+            pKeyword "CYCLE" >>. sepBy1 pIdentifierExpression (token (pstring ","))
             .>> pKeyword "SET"
-            .>>. pIdentifierExpr
+            .>>. pIdentifierExpression
             .>> pKeyword "TO"
             .>>. pExpression
             .>> pKeyword "DEFAULT"
             .>>. pExpression
             .>> pKeyword "USING"
-            .>>. pIdentifierExpr
+            .>>. pIdentifierExpression
             |>> fun ((((cols, setCol), mark), defaultVal), path) ->
                 { CycleColumns = cols
                   SetColumn = setCol
@@ -1661,8 +1680,10 @@ module ExpressionParser =
                   DefaultValue = defaultVal
                   PathColumn = path }
 
-        pIdentifierExpr
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ","))))
+        pIdentifierExpression
+        .>>. opt (
+            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
+        )
         .>> pKeyword "AS"
         .>>. between (token (pstring "(")) (token (pstring ")")) pQuery
         .>>. (opt (attempt pSearchClause) .>>. opt (attempt pCycleClause))
@@ -1676,7 +1697,7 @@ module ExpressionParser =
     // 7.17 <with clause> ::= WITH [ RECURSIVE ] <with list>
     let pWithClause =
         pKeyword "WITH" >>. opt (pKeyword "RECURSIVE" >>% true)
-        .>>. sepBy1 pCte (token (pstring ","))
+        .>>. sepBy1 pWithListElement (token (pstring ","))
         |>> fun (recu, ctes) -> Option.defaultValue false recu, ctes
 
     // — the atomic building block of every <value expression>, used as the term parser of the operator-precedence parser below.
@@ -1717,7 +1738,7 @@ module ExpressionParser =
               attempt pRegexOccurrencesFunction
               attempt pRegexPositionFunction
               attempt pTrimFunction
-              attempt pSubstringSimilarFunction
+              attempt pRegularExpressionSubstringFunction
               attempt pCharacterSubstringFunction
               attempt pOverlayFunction
               attempt pFoldFunction
@@ -1729,9 +1750,9 @@ module ExpressionParser =
               attempt pClassifierFunction
               attempt pDateTimeValueFunction
               attempt pNextValueExpression
-              attempt pTreatExpression
-              attempt pDerefExpression
-              attempt pElementExpression
+              attempt pSubtypeTreatment
+              attempt pReferenceResolution
+              attempt pMultisetElementReference
               attempt pArrayValueConstructor
               attempt pMultisetValueConstructor
               attempt pTableValueConstructorByQuery
@@ -1748,20 +1769,20 @@ module ExpressionParser =
               attempt pStaticMethodInvocation
               attempt pNewSpecification
               attempt pNestedRowNumberFunction
-              attempt pValueOfFunction
+              attempt pValueOfExpressionAtRow
               attempt pRowPatternNavigationOperation
               attempt pGroupingOperation
               attempt pSetFunctionSpecification
               attempt pRoutineInvocation
               attempt pScalarSubquery
-              attempt pLiteralExpr
+              attempt pLiteralExpression
               attempt pGeneralValueSpecification
               if withPredicates then
                   attempt pStarExpr
               attempt pGeneralizedInvocation
               attempt pDatetimeDifference
               attempt pExplicitRowValueConstructor
-              pColumnReferenceExpr
+              pColumnReferenceExpression
               between (token (pstring "(")) (token (pstring ")")) pExpression ]
         // The postfix loop must be able to leave a '.' behind (e.g. the `.*` of
         // <all fields reference>, 7.16), so both alternatives are backtracking.
@@ -2048,28 +2069,28 @@ module ExpressionParser =
         |>> fun (e, suffixes) -> List.fold (fun acc f -> f acc) e suffixes
 
     // 6.39 <boolean factor> ::= [ NOT ] <boolean test>
-    let pNotExpr, pNotExprRef = createParserForwardedToRef<Expression, unit> ()
+    let pBooleanFactor, pNotExprRef = createParserForwardedToRef<Expression, unit> ()
 
     pNotExprRef.Value <-
-        (attempt (pKeyword "NOT" >>. pNotExpr)
+        (attempt (pKeyword "NOT" >>. pBooleanFactor)
          |>> fun e ->
              { Expression.Kind = UnaryOp(Not, e)
                Pos = e.Pos })
         <|> pBooleanTest
 
     // 6.39 <boolean term> ::= <boolean factor> | <boolean term> AND <boolean factor>
-    let pAndExpr =
+    let pBooleanTerm =
         chainl1
-            pNotExpr
+            pBooleanFactor
             (pKeyword "AND"
              >>% fun l r ->
                  { Expression.Kind = BinaryOp(And, l, r)
                    Pos = l.Pos })
 
     // 6.39 <boolean value expression> ::= <boolean term> | <boolean value expression> OR <boolean term>
-    let pOrExpr =
+    let pBooleanValueExpression =
         chainl1
-            pAndExpr
+            pBooleanTerm
             (pKeyword "OR"
              >>% fun l r ->
                  { Expression.Kind = BinaryOp(Or, l, r)
@@ -2220,7 +2241,7 @@ module ExpressionParser =
         containsStandaloneQuantifiedSubqueryIn [ root ]
 
     pExpressionRef.Value <-
-        pOrExpr
+        pBooleanValueExpression
         >>= fun e ->
             if containsStandaloneQuantifiedSubquery e then
                 fail "quantified subquery requires a comparison operator"

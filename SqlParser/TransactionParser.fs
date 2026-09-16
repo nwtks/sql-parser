@@ -6,7 +6,7 @@ open SqlParser.ExpressionParser
 
 module TransactionParser =
     // 17.3 <level of isolation> ::= READ UNCOMMITTED | READ COMMITTED | REPEATABLE READ | SERIALIZABLE
-    let pIsolationLevel =
+    let pLevelOfIsolation =
         choice
             [ attempt (pKeyword "READ" >>. pKeyword "UNCOMMITTED" >>% ReadUncommitted)
               attempt (pKeyword "READ" >>. pKeyword "COMMITTED" >>% ReadCommitted)
@@ -19,12 +19,12 @@ module TransactionParser =
     // <diagnostics size> ::= DIAGNOSTICS SIZE <number of conditions>
     let pTransactionMode =
         choice
-            [ attempt (pKeyword "ISOLATION" >>. pKeyword "LEVEL" >>. pIsolationLevel |>> Isolation)
+            [ attempt (pKeyword "ISOLATION" >>. pKeyword "LEVEL" >>. pLevelOfIsolation |>> Isolation)
               attempt (pKeyword "READ" >>. pKeyword "ONLY" >>% AccessMode ReadOnly)
               attempt (pKeyword "READ" >>. pKeyword "WRITE" >>% AccessMode ReadWrite)
               // <number of conditions> ::= <simple value specification> (strict)
               attempt (
-                  pKeyword "DIAGNOSTICS" >>. pKeyword "SIZE" >>. pSimpleValueSpecificationStrict
+                  pKeyword "DIAGNOSTICS" >>. pKeyword "SIZE" >>. pSimpleValueSpecification
                   |>> DiagnosticsSize
               ) ]
 
@@ -47,16 +47,17 @@ module TransactionParser =
     let pSetConstraintsStatement =
         pKeyword "SET" >>. pKeyword "CONSTRAINTS"
         .>>. (attempt (pKeyword "ALL" >>% None)
-              <|> (sepBy1 pIdentifierExpr (token (pstring ",")) |>> Some))
+              <|> (sepBy1 pIdentifierExpression (token (pstring ",")) |>> Some))
         .>>. (attempt (pKeyword "DEFERRED" >>% true) <|> (pKeyword "IMMEDIATE" >>% false))
         |>> fun ((_, names), deferred) -> SetConstraints(names, deferred)
 
     // 17.5 <savepoint statement> ::= SAVEPOINT <savepoint specifier>
-    let pSavepointStatement = pKeyword "SAVEPOINT" >>. pIdentifierExpr |>> Savepoint
+    let pSavepointStatement =
+        pKeyword "SAVEPOINT" >>. pIdentifierExpression |>> Savepoint
 
     // 17.6 <release savepoint statement> ::= RELEASE SAVEPOINT <savepoint specifier>
     let pReleaseSavepointStatement =
-        pKeyword "RELEASE" >>. pKeyword "SAVEPOINT" >>. pIdentifierExpr
+        pKeyword "RELEASE" >>. pKeyword "SAVEPOINT" >>. pIdentifierExpression
         |>> ReleaseSavepoint
 
     // 17.7/17.8 <commit/rollback> chain option ::= AND [ NO ] CHAIN
@@ -73,5 +74,5 @@ module TransactionParser =
     // <savepoint clause> ::= TO SAVEPOINT <savepoint specifier>
     let pRollbackStatement =
         pKeyword "ROLLBACK" >>. opt (pKeyword "WORK") >>. pChain
-        .>>. opt (pKeyword "TO" >>. pKeyword "SAVEPOINT" >>. pIdentifierExpr)
+        .>>. opt (pKeyword "TO" >>. pKeyword "SAVEPOINT" >>. pIdentifierExpression)
         |>> fun (chain, savepoint) -> Rollback(chain, savepoint)

@@ -14,7 +14,7 @@ open SqlParser.ExpressionParser
 // same name — the `Ref` cells are the same objects.
 module PredicateParser =
     // 8.20 <period predicand> ::= <period reference> | PERIOD ( <start> , <end> )
-    let pPeriodValue =
+    let pPeriodPredicand =
         pKeyword "PERIOD"
         >>. between (token (pstring "(")) (token (pstring ")")) (pExpression .>> token (pstring ",") .>>. pExpression)
         |>> (fun (start, finish) -> PeriodValue(start, finish))
@@ -26,13 +26,13 @@ module PredicateParser =
     // The 8.19/8.20 sub-parsers are local because this is their only consumer.
     let pPredicate pExpr =
         // 8.19 <user-defined type specification> ::= <user-defined type name> | ONLY <user-defined type name>
-        let pTypeSpec =
+        let pUserDefinedTypeSpecification =
             choice
-                [ pKeyword "ONLY" >>. pQualifiedNameExpr |>> Exclusive
-                  pQualifiedNameExpr |>> Inclusive ]
+                [ pKeyword "ONLY" >>. pSchemaQualifiedNameExpression |>> Exclusive
+                  pSchemaQualifiedNameExpression |>> Inclusive ]
 
         // 8.20 <period predicate> operators (OVERLAPS is covered by the existing Overlaps case)
-        let pPeriodPredicateKind =
+        let pPeriodPredicateOperator =
             choice
                 [ pKeyword "EQUALS" >>% PeriodEquals
                   pKeyword "CONTAINS" >>% PeriodContains
@@ -129,7 +129,7 @@ module PredicateParser =
               )
               // 10.7 <collate clause> ::= COLLATE <collation name>
               attempt (
-                  pKeyword "COLLATE" >>. pIdentifierExpr
+                  pKeyword "COLLATE" >>. pIdentifierExpression
                   |>> fun collation ->
                       fun e ->
                           { Expression.Kind = Collate(e, collation)
@@ -147,7 +147,10 @@ module PredicateParser =
               // 8.19 <type predicate> ::= IS [ NOT ] OF ( <type list> )
               attempt (
                   pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "OF"
-                  .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pTypeSpec (token (pstring ",")))
+                  .>>. between
+                      (token (pstring "("))
+                      (token (pstring ")"))
+                      (sepBy1 pUserDefinedTypeSpecification (token (pstring ",")))
                   |>> fun (isNot, types) ->
                       fun e ->
                           { Expression.Kind = IsOfType(e, Option.isSome isNot, types)
@@ -228,7 +231,7 @@ module PredicateParser =
               )
               // 8.20 <period predicate> ::= <period predicate operator> <period predicand>
               attempt (
-                  pPeriodPredicateKind .>>. (attempt pPeriodValue <|> pExpr)
+                  pPeriodPredicateOperator .>>. (attempt pPeriodPredicand <|> pExpr)
                   |>> fun (kind, right) ->
                       fun left ->
                           { Expression.Kind = PeriodPredicate(kind, left, right)
@@ -262,7 +265,7 @@ module PredicateParser =
         >>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (pJsonApiCommon
+                (pJsonApiCommonSyntax
                  .>>. opt (pJsonExistsErrorBehavior .>> pKeyword "ON" .>> pKeyword "ERROR"))
         |>> fun (common, onError) -> JsonExists(common, onError)
         |> withExprPosition
@@ -292,4 +295,4 @@ module PredicateParser =
               attempt pExistsPredicate
               attempt pUniquePredicate
               attempt pJsonExistsPredicate
-              attempt pPeriodValue ]
+              attempt pPeriodPredicand ]

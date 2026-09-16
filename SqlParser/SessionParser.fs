@@ -20,7 +20,7 @@ module SessionParser =
 
     // 19.2 <set session user identifier statement>
     // ::= SET SESSION AUTHORIZATION <value specification>
-    let pSetSessionAuthorizationStatement =
+    let pSetSessionUserIdentifierStatement =
         pKeyword "SET"
         >>. pKeyword "SESSION"
         >>. pKeyword "AUTHORIZATION"
@@ -29,11 +29,12 @@ module SessionParser =
 
     //   19.3 <set role statement> ::= SET ROLE <role specification>
     //   <role specification> ::= <value specification> | NONE
-    // Uses pSimpleValueSpecification (includes identifiers) to accept both SET ROLE admin and SET ROLE 'admin'.
+    // Uses pSimpleValueSpecificationCompatibility (includes identifiers) to accept both SET ROLE admin and SET ROLE 'admin'.
     let pSetRoleStatement =
         pKeyword "SET"
         >>. pKeyword "ROLE"
-        >>. (attempt (pKeyword "NONE" >>% None) <|> (pSimpleValueSpecification |>> Some))
+        >>. (attempt (pKeyword "NONE" >>% None)
+             <|> (pSimpleValueSpecificationCompatibility |>> Some))
         |>> SetRole
 
     // 19.4 <set local time zone statement>
@@ -41,7 +42,7 @@ module SessionParser =
     // <set time zone value> ::= <interval value expression> | LOCAL
     // None = LOCAL. The dedicated 6.37 <interval value expression> parser is used so that
     // boolean/comparison expressions are rejected here.
-    let pSetTimeZoneStatement =
+    let pSetLocalTimeZoneStatement =
         pKeyword "SET"
         >>. pKeyword "TIME"
         >>. pKeyword "ZONE"
@@ -83,7 +84,7 @@ module SessionParser =
                   >>. pKeyword "GROUP"
                   >>. pKeyword "FOR"
                   >>. pKeyword "TYPE"
-                  >>. pQualifiedNameExpr
+                  >>. pSchemaQualifiedNameExpression
                   .>>. pValueSpecification
                   |>> fun (t, g) -> g, Some t))
         |>> fun (group, typeName) -> SetTransformGroup(group, typeName)
@@ -97,5 +98,5 @@ module SessionParser =
         pKeyword "SET"
         >>. (attempt (pKeyword "NO" >>. pKeyword "COLLATION" >>% None)
              <|> (pKeyword "COLLATION" >>. pValueSpecification |>> Some))
-        .>>. opt (attempt (pKeyword "FOR" >>. sepBy1 pQualifiedNameExpr (token (pstring ","))))
+        .>>. opt (attempt (pKeyword "FOR" >>. sepBy1 pSchemaQualifiedNameExpression (token (pstring ","))))
         |>> fun (collation, charsets) -> SetSessionCollation(collation, charsets)

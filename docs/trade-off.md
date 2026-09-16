@@ -32,8 +32,8 @@ citation above a definition; uncited helpers stay with what they serve.
   group (6.1 → 6.43, with `ExpressionKind`/`Expression` at its 6.28 position) and
   the `createParserForwardedToRef` declarations at the top of `ExpressionParser.fs`
   (6.1 → 7.17). Single-use sub-parsers are nested inside their consumer and so
-  cause no inversion (`pForeignKeyConstraint` in `pTableConstraint`, `pMemberList`
-  in `pRepresentation`, `pSearchClause`/`pCycleClause` in `pCte`, …).
+  cause no inversion (`pForeignKeyConstraint` in `pTableConstraintDefinition`, `pMemberList`
+  in `pRepresentation`, `pSearchClause`/`pCycleClause` in `pWithListElement`, …).
 
 **Compile order is part of the design.** F# needs definition before use, so
 `SqlParser.fsproj` lists modules leaf-first: `PredicateParser.fs` (§8) after
@@ -149,7 +149,7 @@ dialects:
 - **Row value constructors and JSON.** 7.1's `<explicit row value constructor>` is
   an expression case (the parenthesized form needs ≥ 2 elements, so `(a)` still
   means the plain parenthesized expression). JSON paths are plain `string`s and the
-  JSON argument slots use the boolean-free `pValueExpressionNoBoolean` —
+  JSON argument slots use the boolean-free `pNonBooleanValueExpression` —
   deliberately stricter than the grammar, to keep comma-separated lists
   unambiguous. The `<JSON input clause>` (`FORMAT <JSON representation>`) on both
   the context item and each passing argument is preserved
@@ -198,7 +198,7 @@ dialects:
 - **Sequence options** are one `SequenceOption` DU shared by `CREATE`/`ALTER
   SEQUENCE` and `<identity column specification>`, composed from per-rule parsers;
   `MaxValue`/`MinValue` use `decimal option` (`None` = `NO MAXVALUE`/`NO MINVALUE`).
-  `CREATE TABLE` and `ALTER SEQUENCE` take the permissive `pSequenceOption`, while
+  `CREATE TABLE` and `ALTER SEQUENCE` take the permissive `pSequenceGeneratorOption`, while
   11.20 takes the narrowed parsers.
 - **`ALTER TABLE`** models every 11.10 action (`ADD`/`ALTER`/`DROP [COLUMN]`,
   constraints, periods, system versioning). `<drop behavior>` is a `bool`;
@@ -209,7 +209,7 @@ dialects:
   `MutatedSet` folding the dotted target into a `FieldReference` chain.
   `InsertSource.DefaultValues` plus `ExpressionKind.Default` cover `DEFAULT VALUES`
   and `VALUES (DEFAULT)` (`DEFAULT` is deliberately not a general expression).
-  `pOverride` is shared by `INSERT`/`MERGE` (`bool option`), and `MergeInsert`
+  `pOverrideClause` is shared by `INSERT`/`MERGE` (`bool option`), and `MergeInsert`
   keeps a single row. `FOR PORTION OF` is a `PortionOfSpec` using the 6.35 parser.
   `DmlTarget = TableTarget | OmittedTarget` lets positioned statements omit the
   target, guarded against `<portion of>`, aliases and search conditions (`MERGE`
@@ -256,7 +256,7 @@ dialects:
   `PARAMETER STYLE`.
 - **`<specific routine designator>` is a record** (`IsSpecific`, `RoutineType`,
   `Name`, `DataTypeList`, `ForType`) so it is round-trippable across its seven AST
-  positions; `RoutineType` stays an option, and `pRoutineDesignatorWithType` is now
+  positions; `RoutineType` stays an option, and `pRoutineDesignator` is now
   only used by `DROP ... <routine>` — the `GRANT`/`REVOKE` object name uses a local
   `pRoutineType .>>. <qualified name>` parser that keeps the `<routine type>`.
 - **Parameter and return types.** `ParameterType` (`DataTypeParameter |

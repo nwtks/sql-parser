@@ -43,8 +43,8 @@ module DataManipulationParser =
     // 14.1 <declare cursor> ::= DECLARE <cursor name> <cursor properties> FOR <cursor specification>
     // 14.3 <cursor specification> ::= <query expression> [ <updatability clause> ]
     // (pQuery already absorbs the trailing [ <updatability clause> ])
-    let pDeclareCursorStatement =
-        pKeyword "DECLARE" >>. pQualifiedNameExpr .>>. pCursorProperties
+    let pDeclareCursor =
+        pKeyword "DECLARE" >>. pSchemaQualifiedNameExpression .>>. pCursorProperties
         .>> pKeyword "FOR"
         .>>. pQuery
         |>> fun ((name, properties), specification) ->
@@ -62,26 +62,30 @@ module DataManipulationParser =
     // 20.10 <using descriptor> / 20.12 <into descriptor>
     // The `[ SQL ] DESCRIPTOR <descriptor name>` tail shared by both.
     let pDescriptorName =
-        opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR" >>. pQualifiedNameExpr
+        opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
+        >>. pSchemaQualifiedNameExpression
 
     // 20.11 <input using clause> ::= <using arguments> | <using input descriptor>
     // <using arguments> ::= USING <using argument> [ { <comma> <using argument> }... ]
-    let pUsingClause =
+    let pInputUsingClause =
         pKeyword "USING"
         >>. (attempt (pDescriptorName |>> UsingClause.UsingDescriptor)
              <|> (sepBy1 pExpression (token (pstring ",")) |>> UsingClause.UsingArguments))
 
     // 20.12 <output using clause> ::= <into arguments> | <into descriptor>
     // <into arguments> ::= INTO <into argument> [ { <comma> <into argument> }... ]
-    let pIntoClause =
+    let pOutputUsingClause =
         pKeyword "INTO"
         >>. (attempt (pDescriptorName |>> UsingClause.UsingDescriptor)
-             <|> (sepBy1 pQualifiedNameExpr (token (pstring ",")) |>> UsingClause.UsingArguments))
+             <|> (sepBy1 pSchemaQualifiedNameExpression (token (pstring ","))
+                  |>> UsingClause.UsingArguments))
 
     // 14.4 <open statement> ::= OPEN <cursor name>
     // 20.19 <dynamic open statement> ::= OPEN <conventional dynamic cursor name> [ <input using clause> ]
     let pOpenStatement =
-        pKeyword "OPEN" >>. pQualifiedNameExpr .>>. opt (attempt pUsingClause) |>> Open
+        pKeyword "OPEN" >>. pSchemaQualifiedNameExpression
+        .>>. opt (attempt pInputUsingClause)
+        |>> Open
 
     // 14.5 <fetch orientation> ::= NEXT | PRIOR | FIRST | LAST | { ABSOLUTE | RELATIVE } <simple value specification>
     let pFetchOrientation =
@@ -99,23 +103,23 @@ module DataManipulationParser =
     let pFetchStatement =
         pKeyword "FETCH" >>. opt (attempt pFetchOrientation)
         .>>. opt (attempt (pKeyword "FROM" >>% ()))
-        .>>. pQualifiedNameExpr
-        .>>. pIntoClause
+        .>>. pSchemaQualifiedNameExpression
+        .>>. pOutputUsingClause
         |>> fun (((orient, _), cursor), output) -> Fetch(orient, cursor, output)
 
     // 14.6 <close statement> ::= CLOSE <cursor name>
-    let pCloseStatement = pKeyword "CLOSE" >>. pQualifiedNameExpr |>> Close
+    let pCloseStatement = pKeyword "CLOSE" >>. pSchemaQualifiedNameExpression |>> Close
 
     // 14.7 <select statement: single row>
     // SELECT [ <set quantifier> ] <select list> INTO <select target list>
     //     <table expression>
     // The <table expression> (FROM/WHERE/GROUP BY/HAVING/WINDOW) reuses the
     // QueryParser clause parsers; INTO sits between the select list and FROM.
-    let pSelectIntoStatement =
+    let pSelectStatementSingleRow =
         pKeyword "SELECT" >>. pSetQuantifier
         .>>. sepBy1 pSelectSublist (token (pstring ","))
         >>= fun (dist, cols) ->
-            pKeyword "INTO" >>. sepBy1 pQualifiedNameExpr (token (pstring ","))
+            pKeyword "INTO" >>. sepBy1 pSchemaQualifiedNameExpression (token (pstring ","))
             >>= fun into ->
                 opt (attempt pFromClause)
                 >>= fun from ->
@@ -150,7 +154,7 @@ module DataManipulationParser =
     let pWhereClause =
         pKeyword "WHERE"
         >>. (attempt (
-                 pKeyword "CURRENT" >>. pKeyword "OF" >>. pQualifiedNameExpr
+                 pKeyword "CURRENT" >>. pKeyword "OF" >>. pSchemaQualifiedNameExpression
                  |>> fun c -> Some c, None
              )
              <|> (pExpression |>> fun e -> None, Some e))
@@ -160,15 +164,18 @@ module DataManipulationParser =
     let pTargetTable =
         attempt (
             pKeyword "ONLY"
-            >>. between (token (pstring "(")) (token (pstring ")")) pQualifiedNameExpr
+            >>. between (token (pstring "(")) (token (pstring ")")) pSchemaQualifiedNameExpression
             |>> fun name -> name, true
         )
-        <|> (pQualifiedNameExpr |>> fun name -> name, false)
+        <|> (pSchemaQualifiedNameExpression |>> fun name -> name, false)
 
     // 14.9/14.14 FOR PORTION OF <application time period name> FROM <point in time 1> TO <point in time 2>
     //     FROM <point in time 1> TO <point in time 2>
     let pPortionOf =
-        pKeyword "FOR" >>. pKeyword "PORTION" >>. pKeyword "OF" >>. pIdentifierExpr
+        pKeyword "FOR"
+        >>. pKeyword "PORTION"
+        >>. pKeyword "OF"
+        >>. pIdentifierExpression
         .>>. (pKeyword "FROM" >>. (pDatetimeValueExpression .>> ws))
         .>>. (pKeyword "TO" >>. (pDatetimeValueExpression .>> ws))
         |>> fun ((period, fromPoint), toPoint) ->
@@ -204,7 +211,7 @@ module DataManipulationParser =
     let pDeleteStatement =
         pKeyword "DELETE" >>. opt (attempt (pKeyword "FROM" >>. pTargetTable))
         .>>. opt (attempt pPortionOf)
-        .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
+        .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpression)
         .>>. opt pWhereClause
         >>= fun (((target, portion), alias), whr) ->
             let cursor, where =
@@ -235,8 +242,10 @@ module DataManipulationParser =
             >>. preturn statement
 
     // 14.10 <truncate table statement> ::= TRUNCATE TABLE <target table> [ <identity column restart option> ]
-    let pTruncateStatement =
-        pKeyword "TRUNCATE" >>. opt (pKeyword "TABLE") >>. pQualifiedNameExpr
+    let pTruncateTableStatement =
+        pKeyword "TRUNCATE"
+        >>. opt (pKeyword "TABLE")
+        >>. pSchemaQualifiedNameExpression
         .>>. opt (
             pKeyword "RESTART" >>. pKeyword "IDENTITY" >>% true
             <|> (pKeyword "CONTINUE" >>. pKeyword "IDENTITY" >>% false)
@@ -245,7 +254,7 @@ module DataManipulationParser =
 
     // 14.11 <override clause> ::= OVERRIDING USER VALUE | OVERRIDING SYSTEM VALUE
     // (None when absent; Some true = USER, Some false = SYSTEM)
-    let pOverride =
+    let pOverrideClause =
         opt (
             pKeyword "OVERRIDING"
             >>. (pKeyword "USER" >>% true <|> (pKeyword "SYSTEM" >>% false))
@@ -267,13 +276,15 @@ module DataManipulationParser =
                     (between
                         (token (pstring "("))
                         (token (pstring ")"))
-                        (sepBy1 (pDefaultValue <|> pExpression) (token (pstring ","))))
+                        (sepBy1 (pDefaultSpecification <|> pExpression) (token (pstring ","))))
                     (token (pstring ","))
             |>> Values
 
-        pKeyword "INSERT" >>. pKeyword "INTO" >>. pQualifiedNameExpr
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ","))))
-        .>>. pOverride
+        pKeyword "INSERT" >>. pKeyword "INTO" >>. pSchemaQualifiedNameExpression
+        .>>. opt (
+            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
+        )
+        .>>. pOverrideClause
         .>>. (pContextuallyTypedTableValueConstructor
               <|> (pQuery |>> Query)
               <|> (pKeyword "DEFAULT" >>. pKeyword "VALUES" >>% DefaultValues))
@@ -295,20 +306,22 @@ module DataManipulationParser =
             // <merge update or delete specification> ::= <merge update specification> | <merge delete specification>
             choice
                 [ attempt (pKeyword "UPDATE" >>. pKeyword "SET")
-                  >>. sepBy1 (pIdentifierExpr .>> token (pstring "=") .>>. pExpression) (token (pstring ","))
+                  >>. sepBy1 (pIdentifierExpression .>> token (pstring "=") .>>. pExpression) (token (pstring ","))
                   |>> MergeUpdate
                   pKeyword "DELETE" >>% MergeDelete ]
 
         // 14.12 <merge insert specification> ::= INSERT [ ( <insert column list> ) ] [ <override clause> ] VALUES <merge insert value list>
         let pNotMatchedAction =
             pKeyword "INSERT"
-            >>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ","))))
-            .>>. pOverride
+            >>. opt (
+                between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
+            )
+            .>>. pOverrideClause
             .>> pKeyword "VALUES"
             .>>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (sepBy1 (pDefaultValue <|> pExpression) (token (pstring ",")))
+                (sepBy1 (pDefaultSpecification <|> pExpression) (token (pstring ",")))
             |>> fun ((cols, ovr), values) -> MergeInsert(cols, ovr, values)
 
         // 14.12 <merge when matched clause>     ::= WHEN MATCHED [ AND <search condition> ] THEN <merge update or delete specification>
@@ -330,7 +343,7 @@ module DataManipulationParser =
                       Action = action }
 
         pKeyword "MERGE" >>. pKeyword "INTO" >>. pTargetTable
-        .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
+        .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpression)
         .>> pKeyword "USING"
         .>>. pTableReference
         .>> pKeyword "ON"
@@ -364,7 +377,7 @@ module DataManipulationParser =
             // 14.15 <multiple column assignment> ::= <set target list> <equals operator> <assigned row>
             // <set target list> ::= ( <set target> [ { <comma> <set target> }... ] )
             attempt (
-                between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
+                between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
                 .>> token (pstring "=")
                 .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ",")))
                 |>> MultipleSet
@@ -373,9 +386,9 @@ module DataManipulationParser =
                 // 14.15 <mutated set clause> ::= <mutated target> <period> <method name>
                 // <mutated target> ::= <object column> | <mutated set clause>
                 // <set clause> ::= <mutated set clause> <equals operator> <update source>
-                pIdentifierExpr .>>. many1 (token (pstring ".") >>. pIdentifierExpr)
+                pIdentifierExpression .>>. many1 (token (pstring ".") >>. pIdentifierExpression)
                 .>> token (pstring "=")
-                .>>. (pDefaultValue <|> pExpression)
+                .>>. (pDefaultSpecification <|> pExpression)
                 |>> fun ((first, rest), value) ->
                     // The last segment is the method name; the rest is the
                     // mutated target (folded into a FieldReference chain).
@@ -391,12 +404,13 @@ module DataManipulationParser =
             )
             <|> ( // 14.15 <set clause> ::= <set target> <equals operator> <update source>
             // <set target> ::= <update target> (<object column>)
-            pIdentifierExpr .>> token (pstring "=") .>>. (pDefaultValue <|> pExpression)
+            pIdentifierExpression .>> token (pstring "=")
+            .>>. (pDefaultSpecification <|> pExpression)
             |>> SingleSet)
 
         pKeyword "UPDATE" >>. pOptionalDmlTarget
         .>>. opt (attempt pPortionOf)
-        .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpr)
+        .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpression)
         .>> pKeyword "SET"
         .>>. sepBy1 pSetClause (token (pstring ","))
         .>>. opt pWhereClause
@@ -426,11 +440,11 @@ module DataManipulationParser =
 
     // 14.16 <temporary table declaration> ::= DECLARE LOCAL TEMPORARY TABLE <table name> <table element list>
     //     [ ON COMMIT <table commit action> ROWS ]
-    let pTemporaryTableDeclarationStatement =
+    let pTemporaryTableDeclaration =
         // 11.3 <table element> ::= <column definition> | <table constraint definition>
         let pTableElement =
             attempt (SchemaParser.pColumnDefinition |>> Choice1Of2)
-            <|> (SchemaParser.pTableConstraint |>> Choice2Of2)
+            <|> (SchemaParser.pTableConstraintDefinition |>> Choice2Of2)
 
         // 14.16 <table commit action> ::= PRESERVE | DELETE
         let pTableCommitAction =
@@ -441,7 +455,7 @@ module DataManipulationParser =
         >>. pKeyword "LOCAL"
         >>. pKeyword "TEMPORARY"
         >>. pKeyword "TABLE"
-        >>. pQualifiedNameExpr
+        >>. pSchemaQualifiedNameExpression
         .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pTableElement (token (pstring ",")))
         .>>. opt (attempt (pKeyword "ON" >>. pKeyword "COMMIT" >>. pTableCommitAction .>> pKeyword "ROWS"))
         |>> fun ((name, elements), onCommit) ->

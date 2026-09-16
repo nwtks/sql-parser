@@ -9,7 +9,7 @@ module QueryParser =
     let pQuery = ExpressionParser.pQuery
 
     // 10.10 <sort specification> ::= <sort key> [ <ordering specification> ] [ <null ordering> ]
-    let pOrderByItem = ExpressionParser.pOrderByItem
+    let pSortSpecification = ExpressionParser.pSortSpecification
 
     let withTablePosition p =
         getPosition .>>. p
@@ -29,12 +29,14 @@ module QueryParser =
 
     // 7.6 <correlation name> ::= [ AS ] <identifier>   (a.k.a. table alias)
     let pCorrelationName =
-        attempt (pKeyword "AS") >>. pIdentifierExpr <|> pIdentifierExpr
+        attempt (pKeyword "AS") >>. pIdentifierExpression <|> pIdentifierExpression
 
     // 7.6 <correlation or recognition> ::= [ AS ] <correlation name> [ ( <derived column list> ) ]
     let pCorrelationOrRecognition =
         pCorrelationName
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ","))))
+        .>>. opt (
+            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
+        )
 
     // 7.6 <sample method> ::= BERNOULLI | SYSTEM
     let pSampleMethod =
@@ -73,7 +75,7 @@ module QueryParser =
     //   | FOR SYSTEM_TIME FROM <p1> TO <p2>
     // <point in time> is a <datetime value expression> (6.35), whose '+'/'-' chain has no
     // boolean operators, so BETWEEN's AND is not consumed as a boolean operator.
-    let pSystemTimeSpec =
+    let pQuerySystemTimePeriodSpecification =
         let pPointInTime = pDatetimeValueExpression
 
         pKeyword "FOR"
@@ -115,7 +117,7 @@ module QueryParser =
               ) ]
 
     // 7.7 <row pattern recognition clause> ::= MATCH_RECOGNIZE ( [ <partition by> ] [ <order by> ] [ <measures> ] [ <rows per match> ] <common syntax> )
-    let pMatchRecognizeClause =
+    let pRowPatternRecognitionClause =
         pKeyword "MATCH_RECOGNIZE"
         >>. between
                 (token (pstring "("))
@@ -127,7 +129,13 @@ module QueryParser =
                         >>. sepBy1 pExpression (token (pstring ","))
                     )
                  )
-                 .>>. opt (attempt (pKeyword "ORDER" >>. pKeyword "BY" >>. sepBy1 pOrderByItem (token (pstring ","))))
+                 .>>. opt (
+                     attempt (
+                         pKeyword "ORDER"
+                         >>. pKeyword "BY"
+                         >>. sepBy1 pSortSpecification (token (pstring ","))
+                     )
+                 )
                  .>>. opt (attempt pRowPatternMeasures)
                  .>>. opt (attempt pRowPatternRowsPerMatch)
                  .>>. pRowPatternCommon
@@ -140,7 +148,7 @@ module QueryParser =
 
     // 7.11 <JSON table column empty/error behavior> ::= ERROR | NULL | DEFAULT <value expression>
     //     (formatted columns additionally allow EMPTY ARRAY | EMPTY OBJECT)
-    let pJsonColumnBehavior =
+    let pJsonTableColumnEmptyErrorBehavior =
         choice
             [ pKeyword "ERROR" >>% JsonColumnError
               pKeyword "NULL" >>% JsonColumnNull
@@ -153,7 +161,7 @@ module QueryParser =
         createParserForwardedToRef<JsonTableColumn list, unit> ()
 
     // 7.11 <JSON table column definition>
-    let pJsonTableColumn =
+    let pJsonTableColumnDefinition =
         choice
             [ // <JSON table nested columns definition> must precede the regular/formatted
               // column branch: <data type> accepts any identifier as a user-defined type,
@@ -161,7 +169,7 @@ module QueryParser =
               // column named NESTED of user-defined type PATH.
               attempt (
                   pKeyword "NESTED" >>. opt (pKeyword "PATH" >>% ()) >>. pCharacterStringLiteral
-                  .>>. opt (attempt (pKeyword "AS" >>. pIdentifierExpr))
+                  .>>. opt (attempt (pKeyword "AS" >>. pIdentifierExpression))
                   .>>. pJsonTableColumnsClause
                   |>> fun ((path, name), cols) ->
                       JsonNested
@@ -169,10 +177,16 @@ module QueryParser =
                             Name = name
                             Columns = cols }
               )
-              attempt (pIdentifierExpr .>> pKeyword "FOR" .>> pKeyword "ORDINALITY" |>> JsonOrdinality)
-              attempt (pIdentifierExpr .>> pKeyword "FOR" .>> pKeyword "CHAINING" |>> JsonChaining)
               attempt (
-                  pIdentifierExpr .>>. pDataType
+                  pIdentifierExpression .>> pKeyword "FOR" .>> pKeyword "ORDINALITY"
+                  |>> JsonOrdinality
+              )
+              attempt (
+                  pIdentifierExpression .>> pKeyword "FOR" .>> pKeyword "CHAINING"
+                  |>> JsonChaining
+              )
+              attempt (
+                  pIdentifierExpression .>>. pDataType
                   >>= fun (name, dt) ->
                       opt (attempt (pKeyword "FORMAT" >>. pJsonRepresentation))
                       >>= fun fmt ->
@@ -190,9 +204,19 @@ module QueryParser =
                                       )
                                   )
                                   >>= fun quotes ->
-                                      opt (attempt (pJsonColumnBehavior .>> pKeyword "ON" .>> pKeyword "EMPTY"))
+                                      opt (
+                                          attempt (
+                                              pJsonTableColumnEmptyErrorBehavior .>> pKeyword "ON" .>> pKeyword "EMPTY"
+                                          )
+                                      )
                                       >>= fun onEmpty ->
-                                          opt (attempt (pJsonColumnBehavior .>> pKeyword "ON" .>> pKeyword "ERROR"))
+                                          opt (
+                                              attempt (
+                                                  pJsonTableColumnEmptyErrorBehavior
+                                                  .>> pKeyword "ON"
+                                                  .>> pKeyword "ERROR"
+                                              )
+                                          )
                                           |>> fun onError ->
                                               match fmt with
                                               | Some f ->
@@ -216,7 +240,10 @@ module QueryParser =
 
     pJsonTableColumnsClauseRef.Value <-
         pKeyword "COLUMNS"
-        >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pJsonTableColumn (token (pstring ",")))
+        >>. between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (sepBy1 pJsonTableColumnDefinition (token (pstring ",")))
 
     // 7.11 <JSON table plan primary> ::= <path name> | ( <plan> )
     let pJsonTablePlanPrimary, pJsonTablePlanPrimaryRef =
@@ -232,21 +259,21 @@ module QueryParser =
                   between (token (pstring "(")) (token (pstring ")")) pJsonTablePlan
                   |>> JsonPlanPrimaryGroup
               )
-              pIdentifierExpr |>> JsonPlanPrimaryName ]
+              pIdentifierExpression |>> JsonPlanPrimaryName ]
 
     pJsonTablePlanRef.Value <-
         choice
             [ attempt (
-                  pIdentifierExpr .>> pKeyword "OUTER" .>>. pJsonTablePlanPrimary
+                  pIdentifierExpression .>> pKeyword "OUTER" .>>. pJsonTablePlanPrimary
                   |>> fun (n, p) -> JsonPlanOuter(n, p)
               )
               attempt (
-                  pIdentifierExpr .>> pKeyword "INNER" .>>. pJsonTablePlanPrimary
+                  pIdentifierExpression .>> pKeyword "INNER" .>>. pJsonTablePlanPrimary
                   |>> fun (n, p) -> JsonPlanInner(n, p)
               )
               attempt (sepBy1 pJsonTablePlanPrimary (pKeyword "UNION") |>> JsonPlanUnion)
               attempt (sepBy1 pJsonTablePlanPrimary (pKeyword "CROSS") |>> JsonPlanCross)
-              pIdentifierExpr |>> JsonPlanName ]
+              pIdentifierExpression |>> JsonPlanName ]
 
     // 7.11 <JSON table default plan choices>
     let pJsonTableDefaultPlanChoices =
@@ -293,12 +320,12 @@ module QueryParser =
 
     // 7.11 <JSON table> ::= JSON_TABLE ( <JSON API common syntax> <columns clause>
     //     [ <plan clause> ] [ <error behavior> ON ERROR ] )
-    let pJsonTableStatement =
+    let pJsonTable =
         pKeyword "JSON_TABLE"
         >>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (pJsonApiCommon
+                (pJsonApiCommonSyntax
                  .>>. pJsonTableColumnsClause
                  .>>. opt (attempt pJsonTablePlanClause)
                  .>>. opt (attempt (pJsonTableErrorBehavior .>> pKeyword "ON" .>> pKeyword "ERROR"))
@@ -310,12 +337,12 @@ module QueryParser =
 
     // 7.11 <JSON table primitive> ::= JSON_TABLE_PRIMITIVE ( <JSON API common syntax>
     //     <columns clause> <error behavior> ON ERROR )
-    let pJsonTablePrimitiveStatement =
+    let pJsonTablePrimitive =
         pKeyword "JSON_TABLE_PRIMITIVE"
         >>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (pJsonApiCommon
+                (pJsonApiCommonSyntax
                  .>>. pJsonTableColumnsClause
                  .>>. (pJsonTableErrorBehavior .>> pKeyword "ON" .>> pKeyword "ERROR")
                  |>> fun ((common, cols), onError) ->
@@ -367,7 +394,7 @@ module QueryParser =
                   // <only spec> ::= ONLY ( <table or query name> ) [ <correlation or recognition> ]
                   attempt (
                       pKeyword "ONLY"
-                      >>. between (token (pstring "(")) (token (pstring ")")) pQualifiedNameExpr
+                      >>. between (token (pstring "(")) (token (pstring ")")) pSchemaQualifiedNameExpression
                       .>>. opt (attempt pCorrelationOrRecognition)
                       |>> fun (name, corr) ->
                           let alias, cols =
@@ -416,13 +443,13 @@ module QueryParser =
                   |> withTablePosition
                   // <JSON table> <correlation or recognition>
                   attempt (
-                      pJsonTableStatement .>>. opt (attempt pCorrelationOrRecognition)
+                      pJsonTable .>>. opt (attempt pCorrelationOrRecognition)
                       |>> fun (stmt, corr) -> JsonTable(stmt, corr)
                   )
                   |> withTablePosition
                   // <JSON table primitive> <correlation name>
                   attempt (
-                      pJsonTablePrimitiveStatement .>>. opt (attempt pCorrelationName)
+                      pJsonTablePrimitive .>>. opt (attempt pCorrelationName)
                       |>> fun (stmt, name) -> JsonTablePrimitive(stmt, name)
                   )
                   |> withTablePosition
@@ -432,7 +459,7 @@ module QueryParser =
                   // Must precede the plain <table or query name> branch below so that
                   // "t MATCH_RECOGNIZE(...)" is not consumed as just "t".
                   attempt (
-                      pQualifiedNameExpr
+                      pSchemaQualifiedNameExpression
                       .>>. opt (
                           attempt (
                               pCorrelationName
@@ -440,11 +467,11 @@ module QueryParser =
                                   between
                                       (token (pstring "("))
                                       (token (pstring ")"))
-                                      (sepBy1 pIdentifierExpr (token (pstring ",")))
+                                      (sepBy1 pIdentifierExpression (token (pstring ",")))
                               )
                           )
                       )
-                      .>>. pMatchRecognizeClause
+                      .>>. pRowPatternRecognitionClause
                       .>>. opt (
                           attempt (
                               pCorrelationName
@@ -452,7 +479,7 @@ module QueryParser =
                                   between
                                       (token (pstring "("))
                                       (token (pstring ")"))
-                                      (sepBy1 pIdentifierExpr (token (pstring ",")))
+                                      (sepBy1 pIdentifierExpression (token (pstring ",")))
                               )
                           )
                       )
@@ -463,8 +490,8 @@ module QueryParser =
                   //     [ <correlation or recognition> ]
                   attempt (
                       getPosition
-                      .>>. (pQualifiedNameExpr
-                            .>>. opt (attempt pSystemTimeSpec)
+                      .>>. (pSchemaQualifiedNameExpression
+                            .>>. opt (attempt pQuerySystemTimePeriodSpecification)
                             .>>. opt (attempt pCorrelationName))
                       |>> fun (pos, ((name, sysTime), alias)) ->
                           let pos' = { Line = pos.Line; Column = pos.Column }
@@ -514,17 +541,23 @@ module QueryParser =
         choice
             [ pKeyword "ON" >>. pExpression |>> fun e -> On e, None
               pKeyword "USING"
-              >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
-              .>>. opt (attempt (pKeyword "AS" >>. pIdentifierExpr))
+              >>. between
+                      (token (pstring "("))
+                      (token (pstring ")"))
+                      (sepBy1 pIdentifierExpression (token (pstring ",")))
+              .>>. opt (attempt (pKeyword "AS" >>. pIdentifierExpression))
               |>> fun (cols, alias) -> Using cols, alias ]
 
     // 7.10 <partitioned join column reference list> ::= ( <column reference> [ { , <column reference> }... ] )
     // <partitioned join column reference> ::= <column reference> — column references only,
     // not arbitrary value expressions.
-    let pPartitionBy =
+    let pPartitionedJoinColumnReferenceList =
         pKeyword "PARTITION"
         >>. pKeyword "BY"
-        >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pColumnReferenceExpr (token (pstring ",")))
+        >>. between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (sepBy1 pColumnReferenceExpression (token (pstring ",")))
 
     // 7.10 <joined table> — one suffix folded into a left-associative chain:
     // 7.10 <joined table> ::= <cross join> | <qualified join> | <natural join>
@@ -543,7 +576,7 @@ module QueryParser =
 
             joinType
             .>>. pTablePrimary
-            .>>. opt (attempt pPartitionBy)
+            .>>. opt (attempt pPartitionedJoinColumnReferenceList)
             .>>. opt pJoinSpecification
             |>> fun (((jt, right), partitionBy), cond) ->
                 let condition, usingAlias =
@@ -618,20 +651,24 @@ module QueryParser =
 
     // 7.15 <window definition> ::= <new window name> AS <window specification>
     let pWindowDefinition =
-        pIdentifierExpr .>> pKeyword "AS"
+        pIdentifierExpression .>> pKeyword "AS"
         .>>. between
             (token (pstring "("))
             (token (pstring ")"))
-            (opt pIdentifierExpr
+            (opt pIdentifierExpression
              .>>. opt (
                  // <window partition clause> ::= PARTITION BY <window partition column reference list>
                  // <window partition column reference> ::= <column reference> [ <collate clause> ]
                  pKeyword "PARTITION"
                  >>. pKeyword "BY"
-                 >>. sepBy1 pColumnReferenceExpr (token (pstring ","))
+                 >>. sepBy1 pColumnReferenceExpression (token (pstring ","))
              )
-             .>>. opt (pKeyword "ORDER" >>. pKeyword "BY" >>. sepBy1 pOrderByItem (token (pstring ",")))
-             .>>. opt pWindowFrame
+             .>>. opt (
+                 pKeyword "ORDER"
+                 >>. pKeyword "BY"
+                 >>. sepBy1 pSortSpecification (token (pstring ","))
+             )
+             .>>. opt pWindowFrameClause
              |>> fun (((name, pb), ob), frame) ->
                  { ExistingWindowName = name
                    PartitionBy = Option.defaultValue [] pb
@@ -661,7 +698,10 @@ module QueryParser =
         opt (
             attempt (
                 pKeyword "AS"
-                >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
+                >>. between
+                        (token (pstring "("))
+                        (token (pstring ")"))
+                        (sepBy1 pIdentifierExpression (token (pstring ",")))
             )
         )
 
@@ -778,16 +818,18 @@ module QueryParser =
         choice
             [ attempt (pQuerySpecification |>> SelectQuery)
               attempt (pTableValueConstructor |>> TableValueConstructor)
-              attempt (pKeyword "TABLE" >>. pQualifiedNameExpr |>> ExplicitTable) ]
+              attempt (pKeyword "TABLE" >>. pSchemaQualifiedNameExpression |>> ExplicitTable) ]
 
     // 7.17 <order by clause> ::= ORDER BY <sort specification list>
     let pOrderByClause =
-        pKeyword "ORDER" >>. pKeyword "BY" >>. sepBy1 pOrderByItem (token (pstring ","))
+        pKeyword "ORDER"
+        >>. pKeyword "BY"
+        >>. sepBy1 pSortSpecification (token (pstring ","))
 
     // 7.17 <result offset clause> ::= OFFSET <offset row count> { ROW | ROWS }
     // <offset row count> ::= <simple value specification> (strict: literals + host params only)
     let pResultOffsetClause =
-        pKeyword "OFFSET" >>. pSimpleValueSpecificationStrict
+        pKeyword "OFFSET" >>. pSimpleValueSpecification
         .>> (attempt (pKeyword "ROWS") <|> pKeyword "ROW")
 
     // 7.17 <fetch first clause> ::= FETCH { FIRST | NEXT } [ <fetch first quantity> ]
@@ -803,7 +845,7 @@ module QueryParser =
             // <fetch first row count> ::= <simple value specification> (strict); <fetch first percentage> ::= <simple value specification> (strict) PERCENT
             pKeyword "FETCH"
             >>. (pKeyword "FIRST" <|> pKeyword "NEXT")
-            >>. opt pSimpleValueSpecificationStrict
+            >>. opt pSimpleValueSpecification
             .>>. opt (pKeyword "PERCENT" >>% true)
             .>> (attempt (pKeyword "ROWS") <|> pKeyword "ROW")
             .>>. (pKeyword "ONLY" >>% false <|> (pKeyword "WITH" >>. pKeyword "TIES" >>% true))
@@ -824,15 +866,15 @@ module QueryParser =
         pKeyword "CORRESPONDING"
         >>. opt (
             pKeyword "BY"
-            >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
+            >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
         )
 
     // 14.3 <updatability clause> ::= FOR { READ ONLY | UPDATE [ OF <column name list> ] }
-    let pLockingClause =
+    let pUpdatabilityClause =
         pKeyword "FOR"
         >>. (attempt (
                  pKeyword "UPDATE"
-                 >>. opt (attempt (pKeyword "OF" >>. sepBy1 pIdentifierExpr (token (pstring ","))))
+                 >>. opt (attempt (pKeyword "OF" >>. sepBy1 pIdentifierExpression (token (pstring ","))))
                  |>> ForUpdate
              )
              <|> (pKeyword "READ" >>. pKeyword "ONLY" >>% ForReadOnly))
@@ -880,7 +922,7 @@ module QueryParser =
                       (pQueryExpressionBody
                        .>>. opt pOrderByClause
                        .>>. opt pOffsetFetch
-                       .>>. opt (attempt pLockingClause)
+                       .>>. opt (attempt pUpdatabilityClause)
                        |>> fun (((body, orderBy), limitOffset), locking) ->
                            applyOrderByOffsetFetch (Option.defaultValue [] orderBy) limitOffset locking body)
               )
@@ -930,7 +972,7 @@ module QueryParser =
                       .>>. pQueryExpressionBody
                       .>>. opt pOrderByClause
                       .>>. opt pOffsetFetch
-                      .>>. opt (attempt pLockingClause)
+                      .>>. opt (attempt pUpdatabilityClause)
                       |>> fun (((((recu, ctes), body), orderBy), limitOffset), locking) ->
                           (WithQuery(recu, ctes, body), Option.defaultValue [] orderBy, limitOffset, locking)
                   )
@@ -938,7 +980,7 @@ module QueryParser =
                       pQueryExpressionBody
                       .>>. opt pOrderByClause
                       .>>. opt pOffsetFetch
-                      .>>. opt (attempt pLockingClause)
+                      .>>. opt (attempt pUpdatabilityClause)
                       |>> fun (((body, orderBy), limitOffset), locking) ->
                           (body, Option.defaultValue [] orderBy, limitOffset, locking)
                   ) ]

@@ -8,24 +8,24 @@ open SqlParser.SchemaParser
 module AccessControlParser =
     // 12.3 <grantor> ::= CURRENT_USER | CURRENT_ROLE
     // (an <authorization identifier> is also accepted in the <grantor> position — see
-    //  docs/trade-off.md; the keywords are reserved words, so pIdentifierExpr fails on
+    //  docs/trade-off.md; the keywords are reserved words, so pIdentifierExpression fails on
     //  them and the keyword alternatives are reachable)
     let pGrantor =
-        pIdentifierExpr |>> Grantor.AuthorizationId
+        pIdentifierExpression |>> Grantor.AuthorizationId
         <|> (pKeyword "CURRENT_USER" >>% Grantor.CurrentUser)
         <|> (pKeyword "CURRENT_ROLE" >>% Grantor.CurrentRole)
 
     // 12.3 <grantee> ::= PUBLIC | <authorization identifier>
     let pGrantee =
         (pKeyword "PUBLIC" >>% Grantee.Public)
-        <|> (pIdentifierExpr |>> Grantee.AuthorizationId)
+        <|> (pIdentifierExpression |>> Grantee.AuthorizationId)
 
     // 12.3 <privileges> ::= ALL PRIVILEGES | <action> [ { <comma> <action> }... ]
     // The three 12.3 sub-rules below are local because <privileges> is their only consumer.
     let pPrivileges =
         // 12.3 <privilege column list> ::= ( <column name list> )
         let pPrivilegeColumnList =
-            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpr (token (pstring ",")))
+            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
 
         // 12.3 <privilege method list> ::= <specific routine designator> [ { , <specific routine designator> }... ]
         let pPrivilegeMethodList = sepBy1 pSpecificRoutineDesignator (token (pstring ","))
@@ -83,11 +83,17 @@ module AccessControlParser =
 
         // The <specific routine designator> branch must be tried first: ROUTINE is a
         // non-reserved word, so the kind branch below would otherwise consume it as a
-        // plain <qualified name>. A local variant of pRoutineDesignatorWithType (which
+        // plain <qualified name>. A local variant of pRoutineDesignator (which
         // pDropStatement shares) is used so the <routine type> is kept in the AST.
         choice
-            [ attempt (pRoutineType .>>. pQualifiedNameExpr |>> fun (rt, name) -> (None, Some rt, name))
-              attempt (opt pKind .>>. pQualifiedNameExpr |>> fun (kind, name) -> (kind, None, name)) ]
+            [ attempt (
+                  pRoutineType .>>. pSchemaQualifiedNameExpression
+                  |>> fun (rt, name) -> (None, Some rt, name)
+              )
+              attempt (
+                  opt pKind .>>. pSchemaQualifiedNameExpression
+                  |>> fun (kind, name) -> (kind, None, name)
+              ) ]
 
     // 12.2 <grant privilege statement> ::= GRANT <privileges> TO <grantee> [ { , <grantee> }... ]
     //     [ WITH HIERARCHY OPTION ] [ WITH GRANT OPTION ] [ GRANTED BY <grantor> ]
@@ -124,7 +130,7 @@ module AccessControlParser =
                   // 12.5 <grant role statement> ::= GRANT <role granted> [ { , <role granted> }... ]
                   //     TO <grantee> [ { , <grantee> }... ] [ WITH ADMIN OPTION ] [ GRANTED BY <grantor> ]
                   attempt (
-                      sepBy1 pIdentifierExpr (token (pstring ",")) .>> pKeyword "TO"
+                      sepBy1 pIdentifierExpression (token (pstring ",")) .>> pKeyword "TO"
                       .>>. sepBy1 pGrantee (token (pstring ","))
                       .>>. opt (attempt (pKeyword "WITH" >>. pKeyword "ADMIN" >>. pKeyword "OPTION"))
                       .>>. opt (attempt (pKeyword "GRANTED" >>. pKeyword "BY" >>. pGrantor))
@@ -134,7 +140,7 @@ module AccessControlParser =
 
     // 12.4 <role definition> ::= CREATE ROLE <role name> [ WITH ADMIN <grantor> ]
     let pCreateRoleStatement =
-        pKeyword "CREATE" >>. pKeyword "ROLE" >>. pIdentifierExpr
+        pKeyword "CREATE" >>. pKeyword "ROLE" >>. pIdentifierExpression
         .>>. opt (pKeyword "WITH" >>. pKeyword "ADMIN" >>. pGrantor)
         |>> fun (name, grantor) -> CreateRole(name, grantor)
 
@@ -186,7 +192,7 @@ module AccessControlParser =
                   //     [ GRANTED BY <grantor> ] <drop behavior>
                   attempt (
                       opt (attempt (pKeyword "ADMIN" >>. pKeyword "OPTION" >>. pKeyword "FOR" >>% true))
-                      .>>. sepBy1 pIdentifierExpr (token (pstring ","))
+                      .>>. sepBy1 pIdentifierExpression (token (pstring ","))
                       .>> pKeyword "FROM"
                       .>>. sepBy1 pGrantee (token (pstring ","))
                       .>>. opt (attempt (pKeyword "GRANTED" >>. pKeyword "BY" >>. pGrantor))

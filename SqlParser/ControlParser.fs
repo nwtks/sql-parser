@@ -9,7 +9,7 @@ module ControlParser =
     // <routine invocation> ::= <routine name> <SQL argument list>
     // <routine name> ::= [ <schema name> <period> ] <qualified identifier>
     let pCallStatement =
-        pKeyword "CALL" >>. pQualifiedNameExpr
+        pKeyword "CALL" >>. pSchemaQualifiedNameExpression
         .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy pExpression (token (pstring ",")))
         |>> fun (name, args) -> Call(name, args)
 

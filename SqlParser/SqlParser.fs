@@ -58,74 +58,74 @@ module SqlParser =
     // Only CREATE-family elements and GRANT are schema elements — DROP / ALTER /
     // TRUNCATE / REVOKE are NOT. It is a local binding because the CREATE SCHEMA parser
     // (SchemaParser.fs) takes it as a parameter and is its only consumer.
-    let pDdl =
+    let pSqlSchemaStatement =
         let pSchemaElement =
             choice
-                [ attempt pCreateTableStatement
-                  attempt pCreateViewStatement
+                [ attempt pTableDefinition
+                  attempt pViewDefinition
                   attempt pCreateRoleStatement
-                  attempt pCreateSequenceStatement
-                  attempt pCreateDomainStatement
-                  attempt pCreateCharacterSetStatement
-                  attempt pCreateCollationStatement
-                  attempt pCreateTransliterationStatement
-                  attempt pCreateAssertionStatement
-                  attempt pCreateCastStatement
-                  attempt pCreateOrderingStatement
-                  attempt pCreateTransformStatement
-                  attempt pCreateTypeStatement
-                  attempt pCreateProcedureStatement
-                  attempt pCreateFunctionStatement
-                  attempt pCreateMethodStatement
-                  attempt pCreateTriggerStatement
+                  attempt pSequenceGeneratorDefinition
+                  attempt pDomainDefinition
+                  attempt pCharacterSetDefinition
+                  attempt pCollationDefinition
+                  attempt pTransliterationDefinition
+                  attempt pAssertionDefinition
+                  attempt pUserDefinedCastDefinition
+                  attempt pUserDefinedOrderingDefinition
+                  attempt pTransformDefinition
+                  attempt pUserDefinedTypeDefinition
+                  attempt pSchemaProcedure
+                  attempt pSchemaFunction
+                  attempt pSchemaMethod
+                  attempt pTriggerDefinition
                   attempt pGrantStatement ]
 
         choice
-            [ attempt pCreateTableStatement
-              attempt pCreateViewStatement
+            [ attempt pTableDefinition
+              attempt pViewDefinition
               attempt pCreateRoleStatement
-              attempt pCreateSequenceStatement
+              attempt pSequenceGeneratorDefinition
               attempt pAlterSequenceStatement
               attempt (pCreateSchemaStatement pSchemaElement)
-              attempt pCreateDomainStatement
+              attempt pDomainDefinition
               attempt pAlterDomainStatement
-              attempt pCreateCharacterSetStatement
-              attempt pCreateCollationStatement
-              attempt pCreateTransliterationStatement
-              attempt pCreateAssertionStatement
-              attempt pCreateCastStatement
-              attempt pCreateOrderingStatement
-              attempt pCreateTransformStatement
+              attempt pCharacterSetDefinition
+              attempt pCollationDefinition
+              attempt pTransliterationDefinition
+              attempt pAssertionDefinition
+              attempt pUserDefinedCastDefinition
+              attempt pUserDefinedOrderingDefinition
+              attempt pTransformDefinition
               attempt pAlterTransformStatement
-              attempt pCreateTypeStatement
-              attempt pCreateProcedureStatement
-              attempt pCreateFunctionStatement
-              attempt pCreateMethodStatement
+              attempt pUserDefinedTypeDefinition
+              attempt pSchemaProcedure
+              attempt pSchemaFunction
+              attempt pSchemaMethod
               attempt pAlterTypeStatement
               attempt pAlterRoutineStatement
-              attempt pCreateTriggerStatement
+              attempt pTriggerDefinition
               attempt pGrantStatement
               attempt pRevokeStatement
               pDropStatement
               pAlterTableStatement
-              pTruncateStatement ]
+              pTruncateTableStatement ]
 
     // 14.1 <declare cursor> / 14.4 <open statement> / 14.5 <fetch statement> / 14.6 <close statement>
     // 14.7 <select statement: single row> / 14.16 <temporary table declaration>
     // 14.17 <free locator statement> / 14.18 <hold locator statement>
-    let pCursor =
+    let pSqlDataStatement =
         choice
-            [ attempt pTemporaryTableDeclarationStatement
-              attempt pDeclareCursorStatement
+            [ attempt pTemporaryTableDeclaration
+              attempt pDeclareCursor
               attempt pFreeLocatorStatement
               attempt pHoldLocatorStatement
               attempt pOpenStatement
               attempt pFetchStatement
               attempt pCloseStatement
-              attempt pSelectIntoStatement ]
+              attempt pSelectStatementSingleRow ]
 
     // 14.8-14.15 <DML statement> ::= <insert statement> | <update statement> | <delete statement> | <merge statement> | <query expression>
-    let pDml =
+    let pSqlDataChangeStatement =
         choice
             [ attempt (pQuery |>> Select)
               pInsertStatement
@@ -134,12 +134,13 @@ module SqlParser =
               pMergeStatement ]
 
     // 16 <SQL control statement> ::= <call statement> | <return statement>
-    let pControl = choice [ attempt pCallStatement; attempt pReturnStatement ]
+    let pSqlControlStatement =
+        choice [ attempt pCallStatement; attempt pReturnStatement ]
 
     // 17 <SQL-transaction statement> ::= <start transaction statement> | <set transaction statement>
     //     | <set constraints mode statement> | <savepoint statement> | <release savepoint statement>
     //     | <commit statement> | <rollback statement> — dispatcher
-    let pTransactionStatement =
+    let pSqlTransactionStatement =
         choice
             [ attempt pStartTransactionStatement
               attempt pSetTransactionStatement
@@ -150,18 +151,18 @@ module SqlParser =
               attempt pRollbackStatement ]
 
     // 18.1 <connect statement> / 18.2 <set connection statement> / 18.3 <disconnect statement>
-    let pConnection =
+    let pSqlConnectionStatement =
         choice
             [ attempt pConnectStatement
               attempt pSetConnectionStatement
               attempt pDisconnectStatement ]
 
     // 19 <SQL-session statement> — dispatcher
-    let pSession =
+    let pSqlSessionStatement =
         choice
             [ attempt pSetRoleStatement
-              attempt pSetSessionAuthorizationStatement
-              attempt pSetTimeZoneStatement
+              attempt pSetSessionUserIdentifierStatement
+              attempt pSetLocalTimeZoneStatement
               attempt pSetSessionCharacteristicsStatement
               attempt pSetCatalogStatement
               attempt pSetSchemaStatement
@@ -171,13 +172,13 @@ module SqlParser =
               attempt pSetSessionCollationStatement ]
 
     // 20 <SQL-dynamic statement> — dispatcher
-    let pDynamic =
+    let pSqlDynamicStatement =
         choice
             [ attempt pDynamicDeclareCursorStatement
               attempt pExecuteImmediateStatement
               attempt pExecuteStatement
               attempt pPrepareStatement
-              attempt pDeallocatePrepareStatement
+              attempt pDeallocatePreparedStatement
               attempt pDescribeStatement
               attempt pAllocateDescriptorStatement
               attempt pAllocateExtendedDynamicCursorStatement
@@ -227,28 +228,28 @@ module SqlParser =
               attempt (pSearchedUpdateStatement |> withStmtPosition)
               attempt (pSearchedDeleteStatement |> withStmtPosition)
               attempt (pMergeStatement |> withStmtPosition)
-              attempt (pTemporaryTableDeclarationStatement |> withStmtPosition)
-              attempt (pDdl |> withStmtPosition)
-              attempt (pTransactionStatement |> withStmtPosition)
-              attempt (pConnection |> withStmtPosition)
-              attempt (pSession |> withStmtPosition) ]
+              attempt (pTemporaryTableDeclaration |> withStmtPosition)
+              attempt (pSqlSchemaStatement |> withStmtPosition)
+              attempt (pSqlTransactionStatement |> withStmtPosition)
+              attempt (pSqlConnectionStatement |> withStmtPosition)
+              attempt (pSqlSessionStatement |> withStmtPosition) ]
         .>> pSemicolon
 
     // 23.1 <get diagnostics statement> ::= GET DIAGNOSTICS <SQL diagnostics information>
-    let pDiagnostics = choice [ attempt pGetDiagnosticsStatement ]
+    let pSqlDiagnosticsStatement = choice [ attempt pGetDiagnosticsStatement ]
 
     pStatementRef.Value <-
         choice
             [ attempt pWithStatement
-              attempt (pCursor |> withStmtPosition)
-              attempt (pDml |> withStmtPosition)
-              attempt (pDdl |> withStmtPosition)
-              attempt (pControl |> withStmtPosition)
-              attempt (pTransactionStatement |> withStmtPosition)
-              attempt (pConnection |> withStmtPosition)
-              attempt (pSession |> withStmtPosition)
-              attempt (pDynamic |> withStmtPosition)
-              attempt (pDiagnostics |> withStmtPosition) ]
+              attempt (pSqlDataStatement |> withStmtPosition)
+              attempt (pSqlDataChangeStatement |> withStmtPosition)
+              attempt (pSqlSchemaStatement |> withStmtPosition)
+              attempt (pSqlControlStatement |> withStmtPosition)
+              attempt (pSqlTransactionStatement |> withStmtPosition)
+              attempt (pSqlConnectionStatement |> withStmtPosition)
+              attempt (pSqlSessionStatement |> withStmtPosition)
+              attempt (pSqlDynamicStatement |> withStmtPosition)
+              attempt (pSqlDiagnosticsStatement |> withStmtPosition) ]
 
     let private runParser p sql =
         match run p sql with
