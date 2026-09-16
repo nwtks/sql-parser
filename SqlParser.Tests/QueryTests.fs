@@ -880,6 +880,22 @@ let ``USING with join correlation name verification`` () =
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
+let ``Comma-separated FROM list verification`` () =
+    match parse "SELECT * FROM users, orders" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = TableSourceKind.Table({ Kind = Identifier "USERS" }, None) }
+            { Kind = TableSourceKind.Table({ Kind = Identifier "ORDERS" }, None) } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected two tables, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
+let ``SELECT DISTINCT verification`` () =
+    match parse "SELECT DISTINCT name FROM users" with
+    | Select(SelectQuery s) -> Assert.True(s.IsDistinct)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
 let ``GROUP BY grouping elements verification`` () =
     match parse "SELECT a, b FROM t GROUP BY (a, b)" with
     | Select(SelectQuery s) ->
@@ -968,12 +984,6 @@ let ``Window definition with existing window name verification`` () =
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
-let ``SELECT DISTINCT verification`` () =
-    match parse "SELECT DISTINCT name FROM users" with
-    | Select(SelectQuery s) -> Assert.True(s.IsDistinct)
-    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
-
-[<Fact>]
 let ``Qualified asterisk verification`` () =
     match parse "SELECT t.* FROM users t" with
     | Select(SelectQuery s) ->
@@ -1024,16 +1034,6 @@ let ``All fields reference verification`` () =
     // rejected before the '.*'.
     parseFails "SELECT EXISTS (SELECT 1).* FROM t"
     parseFails "SELECT ** FROM t"
-
-[<Fact>]
-let ``Comma-separated FROM list verification`` () =
-    match parse "SELECT * FROM users, orders" with
-    | Select(SelectQuery s) ->
-        match s.From with
-        | [ { Kind = TableSourceKind.Table({ Kind = Identifier "USERS" }, None) }
-            { Kind = TableSourceKind.Table({ Kind = Identifier "ORDERS" }, None) } ] -> ()
-        | res -> Assert.Fail(sprintf "Expected two tables, got %A" res)
-    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``Full SELECT structure verification`` () =

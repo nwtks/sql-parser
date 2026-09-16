@@ -31,7 +31,7 @@ citation above a definition; uncited helpers stay with what they serve.
   order is compiler-irrelevant it is strictly ascending: `Ast.fs`'s recursive `and`
   group (6.1 → 6.43, with `ExpressionKind`/`Expression` at its 6.28 position) and
   the `createParserForwardedToRef` declarations at the top of `ExpressionParser.fs`
-  (6.1 → 7.17). Single-use sub-parsers are nested inside their consumer and so
+  (6.1 → 8.9). Single-use sub-parsers are nested inside their consumer and so
   cause no inversion (`pForeignKeyConstraint` in `pTableConstraintDefinition`, `pMemberList`
   in `pRepresentation`, `pSearchClause`/`pCycleClause` in `pWithListElement`, …).
 

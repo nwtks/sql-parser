@@ -355,6 +355,11 @@ reordering a whole file is safest done with a block-level rewrite that re-insert
 every test exactly once (an insert+delete pair applied out of order can duplicate
 or drop a block).
 
+Order each block by the rule it names, not by the umbrella parser it happens to
+call: `LexerTests.fs` drives `<regular identifier>` / `<delimited identifier>` (5.2)
+through `pIdentifier` (5.4), and the blocks sit at the 5.2 position - next to
+`pAnyRune`/`pUnicode*Escape` and before the numeric literals - mirroring `Lexer.fs`.
+
 ### `ROUTINE` is a regular identifier - try the designator branch first
 
 In `<object name>` (12.3) the kind branch (`opt <object kind> <qualified name>`)

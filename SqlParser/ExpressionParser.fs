@@ -13,6 +13,12 @@ module ExpressionParser =
     let pNonBooleanValueExpression, pValueExpressionNoBooleanRef =
         createParserForwardedToRef<Expression, unit> ()
 
+    // 6.29 <numeric value expression> — forward ref (wired after pValueExpressionPrimaryStrict is defined
+    // to break the cycle: pValueExpressionPrimaryImpl → pArrayElementReference → pNumericValueExpression
+    // → pValueExpressionPrimaryStrict → pValueExpressionPrimaryImpl).
+    let pNumericValueExpression, pNumericValueExpressionRef =
+        createParserForwardedToRef<Expression, unit> ()
+
     // 6.35 <datetime value expression> — forward ref. Defined after pTimeZoneSuffix,
     // but needed by the 6.37 <interval value expression> 4th alternative.
     let pDatetimeValueExpression, pDatetimeValueExpressionRef =
@@ -42,18 +48,24 @@ module ExpressionParser =
     let pPredicatePrimary, pPredicatePrimaryRef =
         createParserForwardedToRef<Expression, unit> ()
 
-    // 6.29 <numeric value expression> — forward ref (wired after pValueExpressionPrimaryStrict is defined
-    // to break the cycle: pValueExpressionPrimaryImpl → pArrayElementReference → pNumericValueExpression
-    // → pValueExpressionPrimaryStrict → pValueExpressionPrimaryImpl).
-    let pNumericValueExpression, pNumericValueExpressionRef =
-        createParserForwardedToRef<Expression, unit> ()
-
     // 6.3 <value expression primary> helper — attaches source position to an ExpressionKind
     let withExprPosition p =
         getPosition .>>. p
         |>> fun (pos, kind) ->
             { Expression.Kind = kind
               Pos = { Line = pos.Line; Column = pos.Column } }
+
+    // 5.3 <literal> ::= NULL | <character string literal> | <numeric literal>
+    //     | <boolean literal> | <datetime literal> | <interval literal> | <hex string literal>
+    let pLiteralExpression = pLiteral |> withExprPosition
+
+    // 5.4 <schema qualified name>
+    let pSchemaQualifiedNameExpression =
+        pSchemaQualifiedName
+        |>> function
+            | [ s ] -> Identifier s
+            | parts -> ColumnReference parts
+        |> withExprPosition
 
     // 6.1 <character string type> ::= CHARACTER [ ( <character length> ) ] | CHAR [ ( <length> ) ] | CHARACTER VARYING ( <length> ) | VARCHAR ( <length> ) | <character large object type>
     let pCharacterStringType =
@@ -189,14 +201,6 @@ module ExpressionParser =
                 (sepBy1 (pIdentifierExpression .>>. pDataType) (token (pstring ",")))
         |>> RowType
 
-    // 5.4 <schema qualified name>
-    let pSchemaQualifiedNameExpression =
-        pSchemaQualifiedName
-        |>> function
-            | [ s ] -> Identifier s
-            | parts -> ColumnReference parts
-        |> withExprPosition
-
     // 6.1 <scope clause> ::= SCOPE <table name>
     // Shared by <reference type> (6.1), <column option list> (11.3) and
     // <add column scope clause> (11.17); it lives here because ExpressionParser.fs is
@@ -263,28 +267,6 @@ module ExpressionParser =
         |>> fun (t, suffixes) -> List.fold (fun acc f -> f acc) t suffixes
 
     pDataTypeRef.Value <- choice [ attempt pCollectionType; pDataTypeElement ]
-
-    // 5.1 <left bracket> ::= [ | ??( — and <right bracket> ::= ] | ??)
-    let pLeftBracket = pstring "[" <|> pstring "??("
-    // 5.1 <right bracket> ::= ] | ??)
-    let pRightBracket = pstring "]" <|> pstring "??)"
-
-    // 5.3 <literal> ::= NULL | <character string literal> | <numeric literal>
-    //     | <boolean literal> | <datetime literal> | <interval literal> | <hex string literal>
-    let pLiteralExpression =
-        choice
-            [ attempt (pKeyword "NULL" >>% Null |>> Literal)
-              attempt (pCharacterStringLiteral |>> String |>> Literal)
-              attempt (pNationalCharacterStringLiteral |>> NationalString |>> Literal)
-              attempt (pUnicodeCharacterStringLiteral |>> UnicodeString |>> Literal)
-              attempt (pUnsignedNumericLiteral |>> Number |>> Literal)
-              attempt (pBooleanLiteral |>> Bool |>> Literal)
-              attempt (pDateLiteral |>> Date |>> Literal)
-              attempt (pTimeLiteral |>> Time |>> Literal)
-              attempt (pTimestampLiteral |>> Timestamp |>> Literal)
-              attempt (pIntervalLiteral |>> Interval |>> Literal)
-              attempt (pBinaryStringLiteral |>> Literal.Binary |>> Literal) ]
-        |> withExprPosition
 
     // 6.4 <dynamic parameter specification> ::= <question mark>
     let pQuestionMark: Parser<char, unit> = pchar '?' .>> ws
@@ -382,107 +364,110 @@ module ExpressionParser =
     // QueryParser's MATCH_RECOGNIZE. They depend only on `pExpression` (forward ref) and
     // Lexer terminals.
 
-    // 7.8 <row pattern measure definition> ::= <row pattern measure expression> AS <measure name>
-    let pRowPatternMeasure =
-        pExpression .>> pKeyword "AS" .>>. pIdentifierExpression
-        |>> fun (expr, name) ->
-            { RowPatternMeasure.Expression = expr
-              Name = name }
-
     // 7.8 <row pattern measures> ::= MEASURES <row pattern measure list>
     let pRowPatternMeasures =
+        // 7.8 <row pattern measure definition> ::= <row pattern measure expression> AS <measure name>
+        let pRowPatternMeasure =
+            pExpression .>> pKeyword "AS" .>>. pIdentifierExpression
+            |>> fun (expr, name) ->
+                { RowPatternMeasure.Expression = expr
+                  Name = name }
+
         pKeyword "MEASURES" >>. sepBy1 pRowPatternMeasure (token (pstring ","))
 
     // 7.9 <row pattern> — forward ref (recursive)
     let pRowPattern, pRowPatternRef = createParserForwardedToRef<RowPattern, unit> ()
 
-    // 7.9 <row pattern quantifier>
-    let pRowPatternQuantifier =
-        choice
-            [ attempt (
-                  token (pstring "*") >>. opt (token (pstring "?"))
-                  |>> fun q -> RowPatternQuantifier.Star(Option.isSome q)
-              )
-              attempt (
-                  token (pstring "+") >>. opt (token (pstring "?"))
-                  |>> fun q -> RowPatternQuantifier.Plus(Option.isSome q)
-              )
-              attempt (
-                  token (pstring "?") >>. opt (token (pstring "?"))
-                  |>> fun q -> RowPatternQuantifier.Question(Option.isSome q)
-              )
-              attempt (
-                  between
-                      (token pLeftBrace)
-                      (token pRightBrace)
-                      (opt pUnsignedIntegerExpr .>> token (pstring ",") .>>. opt pUnsignedIntegerExpr)
-                  .>>. opt (token (pstring "?"))
-                  |>> fun ((lo, hi), q) -> RowPatternQuantifier.Brace(lo, hi, Option.isSome q)
-              )
-              attempt (
-                  between (token pLeftBrace) (token pRightBrace) pUnsignedIntegerExpr
-                  |>> RowPatternQuantifier.BraceExact
-              ) ]
-
-    // 7.9 <row pattern primary>
-    let pRowPatternPrimary =
-        choice
-            [ attempt (
-                  token pLeftBraceMinus >>. pRowPattern .>> token pRightMinusBrace
-                  |>> RowPatternExclude
-              )
-              attempt (token pCircumflex >>% RowPatternAnchorStart)
-              attempt (token pDollarSign >>% RowPatternAnchorEnd)
-              attempt (
-                  pKeyword "PERMUTE"
-                  >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pRowPattern (token (pstring ",")))
-                  |>> RowPatternPermute
-              )
-              attempt (
-                  between (token (pstring "(")) (token (pstring ")")) (opt pRowPattern)
-                  |>> RowPatternGroup
-              )
-              pIdentifierExpression |>> RowPatternVariable ]
-
-    // 7.9 <row pattern factor> ::= <row pattern primary> [ <row pattern quantifier> ]
-    let pRowPatternFactor =
-        pRowPatternPrimary .>>. opt (attempt pRowPatternQuantifier)
-        |>> fun (primary, quant) ->
-            { Primary = primary
-              Quantifier = quant }
-
     // 7.9 <row pattern term> ::= <row pattern factor> | <row pattern term> <row pattern factor>
     let pRowPatternTerm =
+        // 7.9 <row pattern quantifier>
+        let pRowPatternQuantifier =
+            choice
+                [ attempt (
+                      token (pstring "*") >>. opt (token (pstring "?"))
+                      |>> fun q -> RowPatternQuantifier.Star(Option.isSome q)
+                  )
+                  attempt (
+                      token (pstring "+") >>. opt (token (pstring "?"))
+                      |>> fun q -> RowPatternQuantifier.Plus(Option.isSome q)
+                  )
+                  attempt (
+                      token (pstring "?") >>. opt (token (pstring "?"))
+                      |>> fun q -> RowPatternQuantifier.Question(Option.isSome q)
+                  )
+                  attempt (
+                      between
+                          (token pLeftBrace)
+                          (token pRightBrace)
+                          (opt pUnsignedIntegerExpr .>> token (pstring ",") .>>. opt pUnsignedIntegerExpr)
+                      .>>. opt (token (pstring "?"))
+                      |>> fun ((lo, hi), q) -> RowPatternQuantifier.Brace(lo, hi, Option.isSome q)
+                  )
+                  attempt (
+                      between (token pLeftBrace) (token pRightBrace) pUnsignedIntegerExpr
+                      |>> RowPatternQuantifier.BraceExact
+                  ) ]
+
+        // 7.9 <row pattern primary>
+        let pRowPatternPrimary =
+            choice
+                [ attempt (
+                      token pLeftBraceMinus >>. pRowPattern .>> token pRightMinusBrace
+                      |>> RowPatternExclude
+                  )
+                  attempt (token pCircumflex >>% RowPatternAnchorStart)
+                  attempt (token pDollarSign >>% RowPatternAnchorEnd)
+                  attempt (
+                      pKeyword "PERMUTE"
+                      >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pRowPattern (token (pstring ",")))
+                      |>> RowPatternPermute
+                  )
+                  attempt (
+                      between (token (pstring "(")) (token (pstring ")")) (opt pRowPattern)
+                      |>> RowPatternGroup
+                  )
+                  pIdentifierExpression |>> RowPatternVariable ]
+
+        // 7.9 <row pattern factor> ::= <row pattern primary> [ <row pattern quantifier> ]
+        let pRowPatternFactor =
+            pRowPatternPrimary .>>. opt (attempt pRowPatternQuantifier)
+            |>> fun (primary, quant) ->
+                { Primary = primary
+                  Quantifier = quant }
+
         many1 pRowPatternFactor |>> fun factors -> { Factors = factors }
 
     // 7.9 <row pattern> ::= <row pattern term> | <row pattern alternation>
     pRowPatternRef.Value <- sepBy1 pRowPatternTerm (token pVerticalBar) |>> fun terms -> { Terms = terms }
 
-    // 7.9 <row pattern skip to>
-    let pRowPatternSkipTo =
-        pKeyword "SKIP"
-        >>. pKeyword "TO"
-        >>. choice
-                [ attempt (pKeyword "NEXT" >>. pKeyword "ROW" >>% SkipToNextRow)
-                  attempt (pKeyword "PAST" >>. pKeyword "LAST" >>. pKeyword "ROW" >>% SkipPastLastRow)
-                  attempt (pKeyword "FIRST" >>. pIdentifierExpression |>> SkipToFirst)
-                  attempt (pKeyword "LAST" >>. pIdentifierExpression |>> SkipToLast)
-                  pIdentifierExpression |>> SkipTo ]
-
-    // 7.9 <row pattern subset item> ::= <var> = ( <var> [ , <var> ]... )
-    let pRowPatternSubset =
-        pIdentifierExpression .>> token (pstring "=")
-        .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
-        |>> fun (name, vars) -> { Name = name; Variables = vars }
-
-    // 7.9 <row pattern definition> ::= <var> AS <search condition>
-    let pRowPatternDefinition =
-        pIdentifierExpression .>> pKeyword "AS" .>>. pExpression
-        |>> fun (name, cond) -> { Name = name; Condition = cond }
-
     // 7.9 <row pattern common syntax> ::= [ AFTER MATCH <skip to> ] [ INITIAL | SEEK ]
     //     PATTERN ( <row pattern> ) [ <subset clause> ] DEFINE <definition list>
     let pRowPatternCommon =
+        // 7.9 <row pattern skip to>
+        let pRowPatternSkipTo =
+            pKeyword "SKIP"
+            >>. pKeyword "TO"
+            >>. choice
+                    [ attempt (pKeyword "NEXT" >>. pKeyword "ROW" >>% SkipToNextRow)
+                      attempt (pKeyword "PAST" >>. pKeyword "LAST" >>. pKeyword "ROW" >>% SkipPastLastRow)
+                      attempt (pKeyword "FIRST" >>. pIdentifierExpression |>> SkipToFirst)
+                      attempt (pKeyword "LAST" >>. pIdentifierExpression |>> SkipToLast)
+                      pIdentifierExpression |>> SkipTo ]
+
+        // 7.9 <row pattern subset item> ::= <var> = ( <var> [ , <var> ]... )
+        let pRowPatternSubset =
+            pIdentifierExpression .>> token (pstring "=")
+            .>>. between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (sepBy1 pIdentifierExpression (token (pstring ",")))
+            |>> fun (name, vars) -> { Name = name; Variables = vars }
+
+        // 7.9 <row pattern definition> ::= <var> AS <search condition>
+        let pRowPatternDefinition =
+            pIdentifierExpression .>> pKeyword "AS" .>>. pExpression
+            |>> fun (name, cond) -> { Name = name; Condition = cond }
+
         opt (attempt (pKeyword "AFTER" >>. pKeyword "MATCH" >>. pRowPatternSkipTo))
         .>>. opt (attempt (pKeyword "INITIAL" >>% true <|> (pKeyword "SEEK" >>% false)))
         .>> pKeyword "PATTERN"
@@ -1467,48 +1452,6 @@ module ExpressionParser =
              |>> RowValueConstructor)
         |> withExprPosition
 
-    // plus optional OVER (window), FILTER (WHERE), WITHIN GROUP (ORDER BY) clauses.
-    // 10.4 <routine invocation> ::= <routine name> <SQL argument list>
-    // 10.9 <aggregate function> — names used by <aggregate function>, <binary set function> and
-    // <hypothetical set function>. Shared by the 10.4 <routine invocation> reserved-name whitelist
-    // and by the 6.9 <set function specification> RUNNING/FINAL prefix check.
-    let aggregateFunctionKeywords =
-        [ "AVG"
-          "MAX"
-          "MIN"
-          "SUM"
-          "EVERY"
-          "ANY"
-          "SOME"
-          "COUNT"
-          "STDDEV_POP"
-          "STDDEV_SAMP"
-          "VAR_SAMP"
-          "VAR_POP"
-          "COLLECT"
-          "FUSION"
-          "INTERSECTION"
-          "COVAR_POP"
-          "COVAR_SAMP"
-          "CORR"
-          "REGR_SLOPE"
-          "REGR_INTERCEPT"
-          "REGR_COUNT"
-          "REGR_R2"
-          "REGR_AVGX"
-          "REGR_AVGY"
-          "REGR_SXX"
-          "REGR_SYY"
-          "REGR_SXY"
-          "RANK"
-          "DENSE_RANK"
-          "PERCENT_RANK"
-          "CUME_DIST"
-          "LISTAGG"
-          "ARRAY_AGG" ]
-
-    let aggregateFunctionNames = Set.ofList aggregateFunctionKeywords
-
     let pRoutineInvocation =
         let pArgs =
             between
@@ -1530,51 +1473,6 @@ module ExpressionParser =
                     (pKeyword "ORDER"
                      >>. pKeyword "BY"
                      >>. sepBy1 pSortSpecification (token (pstring ",")))
-
-        // 10.4 <routine name> ::= [ <schema name> <period> ] <qualified identifier>
-        // — <qualified identifier> is a <nonreserved qualifier>, so a reserved word
-        // cannot normally name a routine. However the standard also spells a large
-        // family of built-in functions using *reserved* keywords (<aggregate function>,
-        // <window function type>, <inverse distribution function type>,
-        // <numeric value function>, <string value function>, <array value function>,
-        // <multiset value function>, <grouping operation>). Those keywords are
-        // whitelisted here so they still parse as routine invocations; every other
-        // reserved word (EXISTS, UNIQUE, PERIOD, VALUE_OF, SELECT, ...) is rejected,
-        // and the dedicated parsers for the special forms are tried before this one.
-        let functionKeywords =
-            [ // <aggregate function>
-              // <binary set function>
-              // <hypothetical set function>
-              yield! aggregateFunctionKeywords
-              // <inverse distribution function type>
-              "PERCENTILE_CONT"
-              "PERCENTILE_DISC"
-              // <window function type>
-              "ROW_NUMBER"
-              "NTILE"
-              "LEAD"
-              "LAG"
-              "FIRST_VALUE"
-              "LAST_VALUE"
-              "NTH_VALUE" ]
-
-        let pReservedFunctionName: Parser<string, unit> =
-            functionKeywords
-            |> List.map pKeyword
-            |> choice
-            >>= fun kw ->
-                if reservedWords.Contains kw then
-                    preturn kw
-                else
-                    fail "not a reserved function keyword."
-
-        // 5.4 <identifier> — regular (non-reserved), delimited, or reserved function keyword
-        let pRoutineName: Parser<string, unit> =
-            choice
-                [ attempt pReservedFunctionName
-                  attempt pUnicodeDelimitedIdentifier
-                  pRegularIdentifier
-                  pDelimitedIdentifier ]
 
         let nameExpr =
             getPosition .>>. pRoutineName
@@ -1644,61 +1542,6 @@ module ExpressionParser =
                     { Expression.Kind = SetFunction(Some scope, e)
                       Pos = { Line = pos.Line; Column = pos.Column } }
             | _ -> fail "RUNNING/FINAL requires an <aggregate function>"
-
-    // 7.17 <with list element> ::= <query name> [ ( <with column list> ) ] AS <table subquery> [ <search or cycle clause> ]
-    let pWithListElement =
-        // 7.18 <search clause> ::= SEARCH { DEPTH FIRST | BREADTH FIRST } BY <cols> SET <col>
-        // Local because pWithListElement is the only consumer of the 7.18 clauses.
-        let pSearchClause =
-            pKeyword "SEARCH"
-            >>. (attempt (pKeyword "DEPTH" >>. pKeyword "FIRST" >>% true)
-                 <|> (pKeyword "BREADTH" >>. pKeyword "FIRST" >>% false))
-            .>> pKeyword "BY"
-            .>>. sepBy1 pIdentifierExpression (token (pstring ","))
-            .>> pKeyword "SET"
-            .>>. pIdentifierExpression
-            |>> fun ((isDepthFirst, orderBy), setCol) ->
-                { IsDepthFirst = isDepthFirst
-                  OrderBy = orderBy
-                  SetColumn = setCol }
-
-        // 7.18 <cycle clause> ::= CYCLE <cols> SET <col> TO <mark> DEFAULT <default> USING <path>
-        let pCycleClause =
-            pKeyword "CYCLE" >>. sepBy1 pIdentifierExpression (token (pstring ","))
-            .>> pKeyword "SET"
-            .>>. pIdentifierExpression
-            .>> pKeyword "TO"
-            .>>. pExpression
-            .>> pKeyword "DEFAULT"
-            .>>. pExpression
-            .>> pKeyword "USING"
-            .>>. pIdentifierExpression
-            |>> fun ((((cols, setCol), mark), defaultVal), path) ->
-                { CycleColumns = cols
-                  SetColumn = setCol
-                  MarkValue = mark
-                  DefaultValue = defaultVal
-                  PathColumn = path }
-
-        pIdentifierExpression
-        .>>. opt (
-            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
-        )
-        .>> pKeyword "AS"
-        .>>. between (token (pstring "(")) (token (pstring ")")) pQuery
-        .>>. (opt (attempt pSearchClause) .>>. opt (attempt pCycleClause))
-        |>> fun (((name, cols), q), (search, cycle)) ->
-            { Cte.Name = name
-              Columns = cols
-              Query = q
-              SearchClause = search
-              CycleClause = cycle }
-
-    // 7.17 <with clause> ::= WITH [ RECURSIVE ] <with list>
-    let pWithClause =
-        pKeyword "WITH" >>. opt (pKeyword "RECURSIVE" >>% true)
-        .>>. sepBy1 pWithListElement (token (pstring ","))
-        |>> fun (recu, ctes) -> Option.defaultValue false recu, ctes
 
     // — the atomic building block of every <value expression>, used as the term parser of the operator-precedence parser below.
     // 6.3 <value expression primary> — the atomic building block of every <value expression>

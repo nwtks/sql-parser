@@ -26,6 +26,10 @@ module Lexer =
     let pVerticalBar: Parser<char, unit> = pchar '|'
     // 5.1 <dollar sign> ::= $
     let pDollarSign: Parser<char, unit> = pchar '$'
+    // 5.1 <left bracket> ::= [ | ??(
+    let pLeftBracket: Parser<string, unit> = pstring "[" <|> pstring "??("
+    // 5.1 <right bracket> ::= ] | ??)
+    let pRightBracket: Parser<string, unit> = pstring "]" <|> pstring "??)"
 
     // 5.2 <reserved word> — keywords that cannot be used as <regular identifier>
     let reservedWords =
@@ -558,7 +562,7 @@ module Lexer =
         .>> ws
 
     // 5.3 <unsigned numeric literal> ::= <exact numeric literal> | <approximate numeric literal>
-    let pUnsignedNumericLiteral: Parser<decimal, unit> =
+    let pUnsignedNumericLiteral =
         attempt pApproximateNumericLiteral <|> pExactNumericLiteral
 
     // 5.3 <signed numeric literal> ::= [ <sign> ] <unsigned numeric literal>
@@ -644,7 +648,7 @@ module Lexer =
         .>> ws
 
     // 5.3 <boolean literal> ::= TRUE | FALSE | UNKNOWN
-    let pBooleanLiteral: Parser<bool option, unit> =
+    let pBooleanLiteral =
         pKeyword "TRUE" >>% Some true
         <|> (pKeyword "FALSE" >>% Some false)
         <|> (pKeyword "UNKNOWN" >>% None)
@@ -829,6 +833,101 @@ module Lexer =
             else
                 fail "invalid interval value"
 
+    // 5.3 <literal> ::= NULL | <character string literal> | <numeric literal>
+    //     | <boolean literal> | <datetime literal> | <interval literal> | <hex string literal>
+    let pLiteral =
+        choice
+            [ attempt (pKeyword "NULL" >>% Null |>> Literal)
+              attempt (pCharacterStringLiteral |>> String |>> Literal)
+              attempt (pNationalCharacterStringLiteral |>> NationalString |>> Literal)
+              attempt (pUnicodeCharacterStringLiteral |>> UnicodeString |>> Literal)
+              attempt (pUnsignedNumericLiteral |>> Number |>> Literal)
+              attempt (pBooleanLiteral |>> Bool |>> Literal)
+              attempt (pDateLiteral |>> Date |>> Literal)
+              attempt (pTimeLiteral |>> Time |>> Literal)
+              attempt (pTimestampLiteral |>> Timestamp |>> Literal)
+              attempt (pIntervalLiteral |>> Interval |>> Literal)
+              attempt (pBinaryStringLiteral |>> Literal.Binary |>> Literal) ]
+
+    // plus optional OVER (window), FILTER (WHERE), WITHIN GROUP (ORDER BY) clauses.
+    // 10.4 <routine invocation> ::= <routine name> <SQL argument list>
+    // 10.9 <aggregate function> — names used by <aggregate function>, <binary set function> and
+    // <hypothetical set function>. Shared by the 10.4 <routine invocation> reserved-name whitelist
+    // and by the 6.9 <set function specification> RUNNING/FINAL prefix check.
+    let aggregateFunctionKeywords =
+        [ "AVG"
+          "MAX"
+          "MIN"
+          "SUM"
+          "EVERY"
+          "ANY"
+          "SOME"
+          "COUNT"
+          "STDDEV_POP"
+          "STDDEV_SAMP"
+          "VAR_SAMP"
+          "VAR_POP"
+          "COLLECT"
+          "FUSION"
+          "INTERSECTION"
+          "COVAR_POP"
+          "COVAR_SAMP"
+          "CORR"
+          "REGR_SLOPE"
+          "REGR_INTERCEPT"
+          "REGR_COUNT"
+          "REGR_R2"
+          "REGR_AVGX"
+          "REGR_AVGY"
+          "REGR_SXX"
+          "REGR_SYY"
+          "REGR_SXY"
+          "RANK"
+          "DENSE_RANK"
+          "PERCENT_RANK"
+          "CUME_DIST"
+          "LISTAGG"
+          "ARRAY_AGG" ]
+
+    let aggregateFunctionNames = Set.ofList aggregateFunctionKeywords
+
+    // 10.4 <routine name> ::= [ <schema name> <period> ] <qualified identifier>
+    // — <qualified identifier> is a <nonreserved qualifier>, so a reserved word
+    // cannot normally name a routine. However the standard also spells a large
+    // family of built-in functions using *reserved* keywords (<aggregate function>,
+    // <window function type>, <inverse distribution function type>,
+    // <numeric value function>, <string value function>, <array value function>,
+    // <multiset value function>, <grouping operation>). Those keywords are
+    // whitelisted here so they still parse as routine invocations; every other
+    // reserved word (EXISTS, UNIQUE, PERIOD, VALUE_OF, SELECT, ...) is rejected,
+    // and the dedicated parsers for the special forms are tried before this one.
+    let functionKeywords =
+        [ // <aggregate function>
+          // <binary set function>
+          // <hypothetical set function>
+          yield! aggregateFunctionKeywords
+          // <inverse distribution function type>
+          "PERCENTILE_CONT"
+          "PERCENTILE_DISC"
+          // <window function type>
+          "ROW_NUMBER"
+          "NTILE"
+          "LEAD"
+          "LAG"
+          "FIRST_VALUE"
+          "LAST_VALUE"
+          "NTH_VALUE" ]
+
+    let pReservedFunctionName =
+        functionKeywords
+        |> List.map pKeyword
+        |> choice
+        >>= fun kw ->
+            if reservedWords.Contains kw then
+                preturn kw
+            else
+                fail "not a reserved function keyword."
+
     // 5.4 <identifier> ::= <actual identifier> — <regular identifier> | <delimited identifier> | <Unicode delimited identifier>
     let pIdentifier =
         choice
@@ -846,10 +945,17 @@ module Lexer =
         |>> fun (first, rest) -> first :: rest
 
     // 5.4 <host parameter name> ::= <colon> <identifier>
-    let pHostParameter: Parser<string, unit> =
-        pchar ':' >>. pIdentifier |>> (fun name -> ":" + name) .>> ws
+    let pHostParameter = pchar ':' >>. pIdentifier |>> (fun name -> ":" + name) .>> ws
 
     // 5.4 <scope option> ::= GLOBAL | LOCAL
     let pScopeOption: Parser<ScopeOption, unit> =
         pKeyword "GLOBAL" >>% ScopeOption.ScopeGlobal
         <|> (pKeyword "LOCAL" >>% ScopeOption.ScopeLocal)
+
+    // 5.4 <identifier> — regular (non-reserved), delimited, or reserved function keyword
+    let pRoutineName =
+        choice
+            [ attempt pReservedFunctionName
+              attempt pUnicodeDelimitedIdentifier
+              pRegularIdentifier
+              pDelimitedIdentifier ]

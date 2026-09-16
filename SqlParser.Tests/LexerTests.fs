@@ -43,16 +43,6 @@ let ``Delimited identifiers are parsed correctly`` () =
     Assert.Equal("Quoted \" quote", test pIdentifier "\"Quoted \"\" quote\"")
 
 [<Fact>]
-let ``Unicode escape sequences are decoded correctly`` () =
-    Assert.Equal("A", test pUnicodeCharacterStringLiteral "U&'\\0041'")
-    Assert.Equal("AB", test pUnicodeCharacterStringLiteral "U&'\\0041\\0042'")
-    Assert.Equal("A", test pUnicodeDelimitedIdentifier "U&\"\\0041\"")
-
-[<Fact>]
-let ``Unicode escape specifier accepts a surrogate pair rune`` () =
-    Assert.Equal("\uD83D\uDE00", test pUnicodeEscapeSpecifier "UESCAPE '\uD83D\uDE00'")
-
-[<Fact>]
 let ``Unicode escape value decodes a pair and rejects lone surrogates`` () =
     let high = string (char 0xD83D)
     let low = string (char 0xDE00)
@@ -62,9 +52,19 @@ let ``Unicode escape value decodes a pair and rejects lone surrogates`` () =
     testFails pAnyRune (high + "A")
 
 [<Fact>]
+let ``Unicode escape sequences are decoded correctly`` () =
+    Assert.Equal("A", test pUnicodeCharacterStringLiteral "U&'\\0041'")
+    Assert.Equal("AB", test pUnicodeCharacterStringLiteral "U&'\\0041\\0042'")
+    Assert.Equal("A", test pUnicodeDelimitedIdentifier "U&\"\\0041\"")
+
+[<Fact>]
 let ``Unicode six digit escape is decoded correctly`` () =
     Assert.Equal("\uD83D\uDE00", test pUnicodeCharacterStringLiteral "U&'\\+01F600'")
     Assert.Equal("A", test pUnicodeCharacterStringLiteral "U&'\\+000041'")
+
+[<Fact>]
+let ``Unicode escape specifier accepts a surrogate pair rune`` () =
+    Assert.Equal("\uD83D\uDE00", test pUnicodeEscapeSpecifier "UESCAPE '\uD83D\uDE00'")
 
 [<Fact>]
 let ``Numeric literals are parsed correctly`` () =
@@ -85,17 +85,17 @@ let ``Approximate numeric literals with an explicit exponent sign are parsed`` (
     Assert.True(test pUnsignedNumericLiteral "1E+400" > 0m)
 
 [<Fact>]
-let ``String literals are parsed correctly`` () =
-    Assert.Equal("hello", test pCharacterStringLiteral "'hello'")
-    Assert.Equal("It's a trap", test pCharacterStringLiteral "'It''s a trap'")
-    Assert.Equal("Multiline", test pCharacterStringLiteral "'Multi' 'line'")
-
-[<Fact>]
 let ``Character set specification is parsed correctly`` () =
     Assert.Equal("UTF8", test pCharacterSetSpecification "utf8")
     Assert.Equal("APP.UTF8", test pCharacterSetSpecification "app.utf8")
     Assert.Equal("abc", test pCharacterStringLiteral "_UTF8'abc'")
     Assert.Equal("abc", test pCharacterStringLiteral "_APP.UTF8'abc'")
+
+[<Fact>]
+let ``String literals are parsed correctly`` () =
+    Assert.Equal("hello", test pCharacterStringLiteral "'hello'")
+    Assert.Equal("It's a trap", test pCharacterStringLiteral "'It''s a trap'")
+    Assert.Equal("Multiline", test pCharacterStringLiteral "'Multi' 'line'")
 
 [<Fact>]
 let ``Binary literals are parsed correctly`` () =

@@ -605,6 +605,17 @@ module QueryParser =
                       Pos = acc.Pos })
                 first
 
+    // 7.5 <from clause> ::= FROM <table reference list>
+    let pFromClause = pKeyword "FROM" >>. sepBy1 pTableReference (token (pstring ","))
+
+    // 7.12 <where clause> ::= WHERE <search condition>
+    let pWhereClause = pKeyword "WHERE" >>. pExpression
+
+    // 7.16 <set quantifier> ::= DISTINCT | ALL
+    // Forced inversion: consumed by the 7.13 <group by clause> below.
+    let pSetQuantifier =
+        opt (pKeyword "DISTINCT" >>% true <|> (pKeyword "ALL" >>% false))
+
     // 7.13 <grouping element> — forward ref
     let pGroupingElement, pGroupingElementRef =
         createParserForwardedToRef<GroupingElement, unit> ()
@@ -649,6 +660,14 @@ module QueryParser =
               attempt pEmptyGroupingSet
               attempt pOrdinaryGroupingSet ]
 
+    // 7.13 <group by clause> ::= GROUP BY [ <set quantifier> ] <grouping element list>
+    let pGroupByClause =
+        pKeyword "GROUP" >>. pKeyword "BY" >>. pSetQuantifier
+        .>>. sepBy1 pGroupingElement (token (pstring ","))
+
+    // 7.14 <having clause> ::= HAVING <search condition>
+    let pHavingClause = pKeyword "HAVING" >>. pExpression
+
     // 7.15 <window definition> ::= <new window name> AS <window specification>
     let pWindowDefinition =
         pIdentifierExpression .>> pKeyword "AS"
@@ -678,10 +697,6 @@ module QueryParser =
     // 7.15 <window clause> ::= WINDOW <window definition list>
     let pWindowClause =
         pKeyword "WINDOW" >>. sepBy1 pWindowDefinition (token (pstring ","))
-
-    // 7.16 <set quantifier> ::= DISTINCT | ALL
-    let pSetQuantifier =
-        opt (pKeyword "DISTINCT" >>% true <|> (pKeyword "ALL" >>% false))
 
     // 7.16 <derived column> ::= <value expression> [ <as clause> ]
     let pDerivedColumn =
@@ -759,20 +774,6 @@ module QueryParser =
         <|> pDerivedColumn
         <|> (pstring "*" .>> ws >>% ExpressionKind.Star |> withExprPosition
              |>> fun e -> Column(e, None))
-
-    // 7.5 <from clause> ::= FROM <table reference list>
-    let pFromClause = pKeyword "FROM" >>. sepBy1 pTableReference (token (pstring ","))
-
-    // 7.12 <where clause> ::= WHERE <search condition>
-    let pWhereClause = pKeyword "WHERE" >>. pExpression
-
-    // 7.13 <group by clause> ::= GROUP BY [ <set quantifier> ] <grouping element list>
-    let pGroupByClause =
-        pKeyword "GROUP" >>. pKeyword "BY" >>. pSetQuantifier
-        .>>. sepBy1 pGroupingElement (token (pstring ","))
-
-    // 7.14 <having clause> ::= HAVING <search condition>
-    let pHavingClause = pKeyword "HAVING" >>. pExpression
 
     // <query specification> — the SELECT core without ORDER BY/OFFSET/FETCH/LOCKING.
     // Those trailing clauses are parsed at the <query expression> level (7.17) so
@@ -961,6 +962,61 @@ module QueryParser =
     // 7.17 <query expression body> ::= <query term>
     //     | <query expression body> UNION|EXCEPT [ <corresponding spec> ] <query term>
     pQueryExpressionBodyRef.Value <- chainl1 pQueryTerm (pUnionExceptOp |>> fun op -> fun l r -> SetOperation(l, op, r))
+
+    // 7.17 <with list element> ::= <query name> [ ( <with column list> ) ] AS <table subquery> [ <search or cycle clause> ]
+    let pWithListElement =
+        // 7.18 <search clause> ::= SEARCH { DEPTH FIRST | BREADTH FIRST } BY <cols> SET <col>
+        // Local because pWithListElement is the only consumer of the 7.18 clauses.
+        let pSearchClause =
+            pKeyword "SEARCH"
+            >>. (attempt (pKeyword "DEPTH" >>. pKeyword "FIRST" >>% true)
+                 <|> (pKeyword "BREADTH" >>. pKeyword "FIRST" >>% false))
+            .>> pKeyword "BY"
+            .>>. sepBy1 pIdentifierExpression (token (pstring ","))
+            .>> pKeyword "SET"
+            .>>. pIdentifierExpression
+            |>> fun ((isDepthFirst, orderBy), setCol) ->
+                { IsDepthFirst = isDepthFirst
+                  OrderBy = orderBy
+                  SetColumn = setCol }
+
+        // 7.18 <cycle clause> ::= CYCLE <cols> SET <col> TO <mark> DEFAULT <default> USING <path>
+        let pCycleClause =
+            pKeyword "CYCLE" >>. sepBy1 pIdentifierExpression (token (pstring ","))
+            .>> pKeyword "SET"
+            .>>. pIdentifierExpression
+            .>> pKeyword "TO"
+            .>>. pExpression
+            .>> pKeyword "DEFAULT"
+            .>>. pExpression
+            .>> pKeyword "USING"
+            .>>. pIdentifierExpression
+            |>> fun ((((cols, setCol), mark), defaultVal), path) ->
+                { CycleColumns = cols
+                  SetColumn = setCol
+                  MarkValue = mark
+                  DefaultValue = defaultVal
+                  PathColumn = path }
+
+        pIdentifierExpression
+        .>>. opt (
+            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
+        )
+        .>> pKeyword "AS"
+        .>>. between (token (pstring "(")) (token (pstring ")")) pQuery
+        .>>. (opt (attempt pSearchClause) .>>. opt (attempt pCycleClause))
+        |>> fun (((name, cols), q), (search, cycle)) ->
+            { Cte.Name = name
+              Columns = cols
+              Query = q
+              SearchClause = search
+              CycleClause = cycle }
+
+    // 7.17 <with clause> ::= WITH [ RECURSIVE ] <with list>
+    let pWithClause =
+        pKeyword "WITH" >>. opt (pKeyword "RECURSIVE" >>% true)
+        .>>. sepBy1 pWithListElement (token (pstring ","))
+        |>> fun (recu, ctes) -> Option.defaultValue false recu, ctes
 
     // 7.17 <query expression> ::= [ <with clause> ] <query expression body>
     //     [ <order by clause> ] [ <result offset clause> ] [ <fetch first clause> ]

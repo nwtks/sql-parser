@@ -31,6 +31,13 @@ let ``Navigation keywords are still usable as identifiers`` () =
     Assert.Equal(Identifier "LAST", parse "SELECT last FROM t")
 
 [<Fact>]
+let ``Literal expressions verification`` () =
+    Assert.Equal(Literal(Number 123m), parse "SELECT 123")
+    Assert.Equal(Literal(String "hello"), parse "SELECT 'hello'")
+    Assert.Equal(Literal(Bool(Some true)), parse "SELECT TRUE")
+    Assert.Equal(Literal Null, parse "SELECT NULL")
+
+[<Fact>]
 let ``Exact numeric type variants are parsed`` () =
     match parse "SELECT CAST(x AS DECIMAL(10,2))" with
     | Cast(_, Decimal(Some 10, Some 2)) -> ()
@@ -102,13 +109,6 @@ let ``Interval type keeps its qualifier structure`` () =
 
     // A malformed qualifier is now rejected (the old raw-string parser accepted it).
     parseFails "SELECT CAST(x AS INTERVAL FOO BAR)"
-
-[<Fact>]
-let ``Literal expressions verification`` () =
-    Assert.Equal(Literal(Number 123m), parse "SELECT 123")
-    Assert.Equal(Literal(String "hello"), parse "SELECT 'hello'")
-    Assert.Equal(Literal(Bool(Some true)), parse "SELECT TRUE")
-    Assert.Equal(Literal Null, parse "SELECT NULL")
 
 [<Fact>]
 let ``General value specification keyword forms verification`` () =
