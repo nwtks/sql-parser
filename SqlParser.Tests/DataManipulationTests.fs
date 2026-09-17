@@ -163,11 +163,18 @@ let ``FETCH ABSOLUTE verification`` () =
 
 [<Fact>]
 let ``FETCH RELATIVE verification`` () =
+    // <simple value specification> admits a <signed numeric literal> (5.3), so `-1` is one literal.
     match parseStatement "FETCH RELATIVE -1 FROM cur INTO a" with
-    | Fetch(Some(Relative { Kind = UnaryOp(Minus, { Kind = Literal(Number 1m) }) }),
+    | Fetch(Some(Relative { Kind = Literal(Number -1m) }),
             { Kind = Identifier "CUR" },
             UsingArguments [ { Kind = Identifier "A" } ]) -> ()
     | res -> Assert.Fail(sprintf "Expected Fetch RELATIVE, got %A" res)
+
+[<Fact>]
+let ``DECLARE cursor name is a local qualified name`` () =
+    // 5.4 <local qualified name> admits only the MODULE qualifier.
+    parseStatement "DECLARE MODULE.c CURSOR FOR SELECT 1" |> ignore
+    parseStatementFails "DECLARE a.b CURSOR FOR SELECT 1"
 
 [<Fact>]
 let ``FETCH without INTO is rejected`` () = parseStatementFails "FETCH cur"
@@ -231,6 +238,9 @@ let ``SELECT INTO WINDOW verification`` () =
 let ``SELECT INTO without select list is rejected`` () = parseStatementFails "SELECT INTO x"
 
 [<Fact>]
+let ``SELECT INTO without a FROM clause is rejected`` () = parseStatementFails "SELECT a INTO x"
+
+[<Fact>]
 let ``DELETE with alias verification`` () =
     match parse "DELETE FROM users AS u WHERE u.id = 1" with
     | Delete { Target = TableTarget({ Kind = Identifier "USERS" }, false)
@@ -281,6 +291,10 @@ let ``DELETE without target table and FOR PORTION OF is rejected`` () =
     parseStatementFails "DELETE FOR PORTION OF p FROM x TO y WHERE CURRENT OF cur"
 
 [<Fact>]
+let ``DELETE with FOR PORTION OF and WHERE CURRENT OF is rejected`` () =
+    parseStatementFails "DELETE FROM t FOR PORTION OF p FROM x TO y WHERE CURRENT OF cur"
+
+[<Fact>]
 let ``DELETE without FROM and without CURRENT OF is rejected`` () = parseFails "DELETE"
 
 [<Fact>]
@@ -295,6 +309,9 @@ let ``TRUNCATE TABLE verification`` () =
     match parse "TRUNCATE TABLE logs RESTART IDENTITY" with
     | Truncate({ Kind = Identifier "LOGS" }, Some true) -> ()
     | res -> Assert.Fail(sprintf "Expected Truncate RESTART IDENTITY, got %A" res)
+
+[<Fact>]
+let ``TRUNCATE without the TABLE keyword is rejected`` () = parseFails "TRUNCATE logs"
 
 [<Fact>]
 let ``INSERT verification`` () =
@@ -318,6 +335,11 @@ let ``INSERT DEFAULT VALUES verification`` () =
                Source = DefaultValues
                Override = None } -> ()
     | res -> Assert.Fail(sprintf "Expected Insert DefaultValues, got %A" res)
+
+[<Fact>]
+let ``INSERT DEFAULT VALUES rejects a column list and an override clause`` () =
+    parseFails "INSERT INTO users (id) DEFAULT VALUES"
+    parseFails "INSERT INTO users OVERRIDING USER VALUE DEFAULT VALUES"
 
 [<Fact>]
 let ``INSERT OVERRIDING SYSTEM VALUE verification`` () =
@@ -497,6 +519,10 @@ let ``UPDATE without target table and alias is rejected`` () =
 [<Fact>]
 let ``UPDATE without target table and FOR PORTION OF is rejected`` () =
     parseStatementFails "UPDATE FOR PORTION OF p FROM x TO y SET name = 'x' WHERE CURRENT OF cur"
+
+[<Fact>]
+let ``UPDATE with FOR PORTION OF and WHERE CURRENT OF is rejected`` () =
+    parseStatementFails "UPDATE t FOR PORTION OF p FROM x TO y SET a = 1 WHERE CURRENT OF cur"
 
 [<Fact>]
 let ``Temporary table declaration verification`` () =

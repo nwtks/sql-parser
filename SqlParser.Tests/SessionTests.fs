@@ -28,8 +28,8 @@ let ``SET SESSION AUTHORIZATION verification`` () =
 
 [<Fact>]
 let ``SET ROLE verification`` () =
-    match parse "SET ROLE admin" with
-    | SetRole(Some { Kind = Identifier "ADMIN" }) -> ()
+    match parse "SET ROLE 'admin'" with
+    | SetRole(Some { Kind = Literal(String "admin") }) -> ()
     | res -> Assert.Fail(sprintf "Expected SetRole, got %A" res)
 
     match parse "SET ROLE NONE" with

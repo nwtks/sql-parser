@@ -66,6 +66,29 @@ let ``Unicode six digit escape is decoded correctly`` () =
 let ``Unicode escape specifier accepts a surrogate pair rune`` () =
     Assert.Equal("\uD83D\uDE00", test pUnicodeEscapeSpecifier "UESCAPE '\uD83D\uDE00'")
 
+[<Theory>]
+[<InlineData("+")>]
+[<InlineData("0")>]
+[<InlineData("a")>]
+[<InlineData(" ")>]
+let ``Unicode escape characters that are hexits or punctuation are rejected`` (c: string) =
+    testFails pUnicodeEscapeSpecifier ("UESCAPE '" + c + "'")
+
+[<Theory>]
+[<InlineData("U&'\\+110000'")>]
+[<InlineData("U&'\\+00D800'")>]
+[<InlineData("U&'\\D800'")>]
+let ``Unicode character string escapes outside the scalar range are rejected`` (sql: string) =
+    testFails pUnicodeCharacterStringLiteral sql
+
+[<Fact>]
+let ``A surrogate pair written as two escapes is accepted`` () =
+    Assert.Equal("\uD83D\uDE00", test pUnicodeCharacterStringLiteral "U&'\\D83D\\DE00'")
+
+[<Fact>]
+let ``Unicode delimited identifier with an unpaired escape is rejected`` () =
+    testFails pUnicodeDelimitedIdentifier "U&\"\\DE00\""
+
 [<Fact>]
 let ``Numeric literals are parsed correctly`` () =
     Assert.Equal(123m, test pUnsignedNumericLiteral "123")
@@ -73,16 +96,53 @@ let ``Numeric literals are parsed correctly`` () =
     Assert.Equal(0.45m, test pUnsignedNumericLiteral ".45")
     Assert.Equal(12300m, test pUnsignedNumericLiteral "1.23E4")
     Assert.Equal(0.0123m, test pUnsignedNumericLiteral "1.23E-2")
+    Assert.Equal(10000000000000000000000000000m, test pUnsignedNumericLiteral "1E28")
+    Assert.True(test pUnsignedNumericLiteral "1E-28" > 0m)
 
-[<Fact>]
-let ``Large exponent literals do not overflow`` () =
-    let result = test pUnsignedNumericLiteral "1E400"
-    Assert.True(result > 0m)
+[<Theory>]
+[<InlineData("1E29")>]
+[<InlineData("1E400")>]
+[<InlineData("1E-29")>]
+[<InlineData("1E+400")>]
+[<InlineData("1E99999999999999999999")>]
+let ``Approximate numeric literals outside the decimal range are rejected`` (sql: string) =
+    testFails pUnsignedNumericLiteral sql
 
 [<Fact>]
 let ``Approximate numeric literals with an explicit exponent sign are parsed`` () =
     Assert.Equal(12300m, test pUnsignedNumericLiteral "1.23E+4")
-    Assert.True(test pUnsignedNumericLiteral "1E+400" > 0m)
+
+[<Theory>]
+[<InlineData("1E")>]
+[<InlineData("1E+")>]
+[<InlineData("1E5x")>]
+[<InlineData("0x10")>]
+let ``Numeric tokens must not run into a following identifier character`` (sql: string) =
+    testFails pUnsignedNumericLiteral sql
+
+[<Theory>]
+[<InlineData("100000000000000000000000000000")>]
+[<InlineData("9999999999999999999999999999999999999999")>]
+let ``Numeric literals whose mantissa exceeds decimal are rejected`` (sql: string) =
+    testFails pUnsignedNumericLiteral sql
+
+[<Fact>]
+let ``Unsigned integer and int conversions are checked`` () =
+    Assert.Equal(123UL, test pUnsignedInteger "123")
+    Assert.Equal(123, test pUnsignedIntegerAsInt "123")
+    testFails pUnsignedInteger "99999999999999999999999999"
+    testFails pUnsignedIntegerAsInt "99999999999"
+
+[<Fact>]
+let ``Numeric literals are parsed with the invariant culture`` () =
+    let original = System.Globalization.CultureInfo.CurrentCulture
+
+    try
+        System.Globalization.CultureInfo.CurrentCulture <- System.Globalization.CultureInfo.GetCultureInfo "de-DE"
+
+        Assert.Equal(1.5m, test pUnsignedNumericLiteral "1.5")
+    finally
+        System.Globalization.CultureInfo.CurrentCulture <- original
 
 [<Fact>]
 let ``Character set specification is parsed correctly`` () =
@@ -96,6 +156,11 @@ let ``String literals are parsed correctly`` () =
     Assert.Equal("hello", test pCharacterStringLiteral "'hello'")
     Assert.Equal("It's a trap", test pCharacterStringLiteral "'It''s a trap'")
     Assert.Equal("Multiline", test pCharacterStringLiteral "'Multi' 'line'")
+
+[<Fact>]
+let ``National character string literals are parsed without an introducer`` () =
+    Assert.Equal("abc", test pNationalCharacterStringLiteral "N'abc'")
+    testFails pNationalCharacterStringLiteral "N_UTF8'abc'"
 
 [<Fact>]
 let ``Binary literals are parsed correctly`` () =
@@ -140,12 +205,33 @@ let ``Invalid date values are rejected`` () =
     testFails pDateLiteral "DATE '2023--1-01'"
     testFails pDateLiteral "DATE '2023-00-01'"
     testFails pDateLiteral "DATE '2023-01-00'"
+    testFails pDateLiteral "DATE '0000-01-01'"
+    testFails pDateLiteral "DATE '10000-01-01'"
 
 [<Fact>]
 let ``Invalid time seconds fail cleanly`` () =
     match run (pTimeLiteral .>> eof) "TIME '12:00:00.5.5'" with
     | Failure _ -> ()
     | Success _ -> Assert.Fail("Expected TIME literal with invalid seconds to fail")
+
+[<Theory>]
+[<InlineData("TIME '24:00:00'")>]
+[<InlineData("TIME '12:60:00'")>]
+[<InlineData("TIME '12:00:61'")>]
+[<InlineData("TIME '-1:00:00'")>]
+[<InlineData("TIME '12:00:00+14:01'")>]
+[<InlineData("TIME '12:00:00+99:99'")>]
+let ``Time values outside the field ranges are rejected`` (sql: string) = testFails pTimeLiteral sql
+
+[<Fact>]
+let ``Time values at the field range boundaries are accepted`` () =
+    Assert.Equal(
+        { Hour = 23
+          Minute = 59
+          Second = 60m
+          TzOffset = Some { Sign = 1; Hours = 14; Minutes = 0 } },
+        test pTimeLiteral "TIME '23:59:60+14:00'"
+    )
 
 [<Fact>]
 let ``Interval literals are parsed correctly`` () =
@@ -306,6 +392,34 @@ let ``Interval precision with invalid value shape is rejected`` () =
     testFails pIntervalLiteral "INTERVAL '1-2' YEAR(4)"
     testFails pIntervalLiteral "INTERVAL 'abc' SECOND(2,3)"
     testFails pIntervalLiteral "INTERVAL '1:30' HOUR TO SECOND(3)"
+
+[<Theory>]
+[<InlineData("INTERVAL '12345' YEAR(2)")>]
+[<InlineData("INTERVAL '12-2' YEAR(1) TO MONTH")>]
+[<InlineData("INTERVAL '1.12345' SECOND(2,2)")>]
+let ``Interval values exceeding their declared precision are rejected`` (sql: string) = testFails pIntervalLiteral sql
+
+[<Fact>]
+let ``Interval values within their declared precision are accepted`` () =
+    Assert.Equal(
+        { IsNegative = false
+          ValueString = "12345"
+          Qualifier =
+            IntervalQualifier.SingleField(
+                Year,
+                Some
+                    { IntervalPrecision.Leading = Some 5
+                      FractionalSeconds = None }
+            ) },
+        test pIntervalLiteral "INTERVAL '12345' YEAR(5)"
+    )
+
+[<Theory>]
+[<InlineData("INTERVAL '1' DAY TO YEAR")>]
+[<InlineData("INTERVAL '1' HOUR TO DAY")>]
+[<InlineData("INTERVAL '1' MINUTE TO HOUR")>]
+[<InlineData("INTERVAL '1' SECOND TO MINUTE")>]
+let ``Interval qualifiers with an out-of-order field pair are rejected`` (sql: string) = testFails pIntervalLiteral sql
 
 [<Fact>]
 let ``Schema qualified names are parsed correctly`` () =

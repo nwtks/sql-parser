@@ -52,13 +52,11 @@ module DiagnosticsParser =
 
     // 23.1 <statement information item> ::= <simple target specification> <equals operator> <statement information item name>
     let pStatementInfoItem =
-        pSchemaQualifiedNameExpression .>> token (pstring "=")
-        .>>. pStatementInfoItemName
+        pSimpleTargetSpecification .>> token (pstring "=") .>>. pStatementInfoItemName
 
     // 23.1 <condition information item> ::= <simple target specification> <equals operator> <condition information item name>
     let pConditionInfoItem =
-        pSchemaQualifiedNameExpression .>> token (pstring "=")
-        .>>. pConditionInfoItemName
+        pSimpleTargetSpecification .>> token (pstring "=") .>>. pConditionInfoItemName
 
     // 23.1 <get diagnostics statement> ::= GET DIAGNOSTICS <SQL diagnostics information>
     // <SQL diagnostics information> ::= <statement information> | <condition information> | <all information>
@@ -69,15 +67,15 @@ module DiagnosticsParser =
         pKeyword "GET"
         >>. pKeyword "DIAGNOSTICS"
         >>. (attempt (
-                 pKeyword "CONDITION" >>. pExpression
+                 pKeyword "CONDITION" >>. pSimpleValueSpecification
                  .>>. sepBy1 pConditionInfoItem (token (pstring ","))
                  |>> fun (num, items) -> ConditionInfo(num, items)
              )
              <|> attempt (
-                 pSchemaQualifiedNameExpression .>> token (pstring "=") .>> pKeyword "ALL"
+                 pSimpleTargetSpecification .>> token (pstring "=") .>> pKeyword "ALL"
                  .>>. opt (
                      attempt (pKeyword "STATEMENT" >>% AllStatement)
-                     <|> (pKeyword "CONDITION" >>. opt pExpression |>> AllCondition)
+                     <|> (pKeyword "CONDITION" >>. opt pSimpleValueSpecification |>> AllCondition)
                  )
                  |>> fun (target, qual) -> AllInfo(target, qual)
              )

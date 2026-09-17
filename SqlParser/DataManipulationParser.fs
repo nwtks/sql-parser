@@ -44,7 +44,7 @@ module DataManipulationParser =
     // 14.3 <cursor specification> ::= <query expression> [ <updatability clause> ]
     // (pQuery already absorbs the trailing [ <updatability clause> ])
     let pDeclareCursor =
-        pKeyword "DECLARE" >>. pSchemaQualifiedNameExpression .>>. pCursorProperties
+        pKeyword "DECLARE" >>. pLocalQualifiedNameExpression .>>. pCursorProperties
         .>> pKeyword "FOR"
         .>>. pQuery
         |>> fun ((name, properties), specification) ->
@@ -62,8 +62,7 @@ module DataManipulationParser =
     // 20.10 <using descriptor> / 20.12 <into descriptor>
     // The `[ SQL ] DESCRIPTOR <descriptor name>` tail shared by both.
     let pDescriptorName =
-        opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. pSchemaQualifiedNameExpression
+        opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR" >>. pIdentifierExpression
 
     // 20.11 <input using clause> ::= <using arguments> | <using input descriptor>
     // <using arguments> ::= USING <using argument> [ { <comma> <using argument> }... ]
@@ -77,13 +76,13 @@ module DataManipulationParser =
     let pOutputUsingClause =
         pKeyword "INTO"
         >>. (attempt (pDescriptorName |>> UsingClause.UsingDescriptor)
-             <|> (sepBy1 pSchemaQualifiedNameExpression (token (pstring ","))
+             <|> (sepBy1 pSimpleTargetSpecification (token (pstring ","))
                   |>> UsingClause.UsingArguments))
 
     // 14.4 <open statement> ::= OPEN <cursor name>
     // 20.19 <dynamic open statement> ::= OPEN <conventional dynamic cursor name> [ <input using clause> ]
     let pOpenStatement =
-        pKeyword "OPEN" >>. pSchemaQualifiedNameExpression
+        pKeyword "OPEN" >>. pLocalQualifiedNameExpression
         .>>. opt (attempt pInputUsingClause)
         |>> Open
 
@@ -93,8 +92,8 @@ module DataManipulationParser =
         <|> (pKeyword "PRIOR" >>% Prior)
         <|> (pKeyword "FIRST" >>% First)
         <|> (pKeyword "LAST" >>% Last)
-        <|> (pKeyword "ABSOLUTE" >>. pExpression |>> Absolute)
-        <|> (pKeyword "RELATIVE" >>. pExpression |>> Relative)
+        <|> (pKeyword "ABSOLUTE" >>. pSimpleValueSpecification |>> Absolute)
+        <|> (pKeyword "RELATIVE" >>. pSimpleValueSpecification |>> Relative)
 
     // 14.5 <fetch statement> ::= FETCH [ [ <fetch orientation> ] FROM ]
     //                                <cursor name> INTO <fetch target list>
@@ -103,12 +102,12 @@ module DataManipulationParser =
     let pFetchStatement =
         pKeyword "FETCH" >>. opt (attempt pFetchOrientation)
         .>>. opt (attempt (pKeyword "FROM" >>% ()))
-        .>>. pSchemaQualifiedNameExpression
+        .>>. pLocalQualifiedNameExpression
         .>>. pOutputUsingClause
         |>> fun (((orient, _), cursor), output) -> Fetch(orient, cursor, output)
 
     // 14.6 <close statement> ::= CLOSE <cursor name>
-    let pCloseStatement = pKeyword "CLOSE" >>. pSchemaQualifiedNameExpression |>> Close
+    let pCloseStatement = pKeyword "CLOSE" >>. pLocalQualifiedNameExpression |>> Close
 
     // 14.7 <select statement: single row>
     // SELECT [ <set quantifier> ] <select list> INTO <select target list>
@@ -121,7 +120,7 @@ module DataManipulationParser =
         >>= fun (dist, cols) ->
             pKeyword "INTO" >>. sepBy1 pSchemaQualifiedNameExpression (token (pstring ","))
             >>= fun into ->
-                opt (attempt pFromClause)
+                pFromClause
                 >>= fun from ->
                     opt (attempt pWhereClause)
                     >>= fun whr ->
@@ -139,7 +138,7 @@ module DataManipulationParser =
                                     { IsDistinct = Option.defaultValue false dist
                                       Columns = cols
                                       Into = into
-                                      From = Option.defaultValue [] from
+                                      From = from
                                       Where = whr
                                       GroupBy = grpList
                                       GroupByDistinct = grpDistinct
@@ -202,6 +201,14 @@ module DataManipulationParser =
             )
         | _ -> preturn ()
 
+    // 14.8/14.13 are the positioned forms (WHERE CURRENT OF) and 14.9/14.14 the searched forms
+    // (FOR PORTION OF); the two clause sets are mutually exclusive.
+    let pPositionedPortionGuard portion cursor =
+        if Option.isSome portion && Option.isSome cursor then
+            fail "FOR PORTION OF cannot be combined with WHERE CURRENT OF."
+        else
+            preturn ()
+
     // 14.8 <delete statement: positioned> ::= DELETE FROM <target table> [ [ AS ] <correlation name> ] WHERE CURRENT OF <cursor name>
     // 14.9 <delete statement: searched>   ::= DELETE FROM <target table>
     //     [ FOR PORTION OF <application time period name> FROM <point in time 1> TO <point in time 2> ]
@@ -239,13 +246,12 @@ module DataManipulationParser =
                 where
                 portion
                 alias
+            >>. pPositionedPortionGuard portion cursor
             >>. preturn statement
 
     // 14.10 <truncate table statement> ::= TRUNCATE TABLE <target table> [ <identity column restart option> ]
     let pTruncateTableStatement =
-        pKeyword "TRUNCATE"
-        >>. opt (pKeyword "TABLE")
-        >>. pSchemaQualifiedNameExpression
+        pKeyword "TRUNCATE" >>. pKeyword "TABLE" >>. pSchemaQualifiedNameExpression
         .>>. opt (
             pKeyword "RESTART" >>. pKeyword "IDENTITY" >>% true
             <|> (pKeyword "CONTINUE" >>. pKeyword "IDENTITY" >>% false)
@@ -288,12 +294,27 @@ module DataManipulationParser =
         .>>. (pContextuallyTypedTableValueConstructor
               <|> (pQuery |>> Query)
               <|> (pKeyword "DEFAULT" >>. pKeyword "VALUES" >>% DefaultValues))
-        |>> fun (((table, cols), ovr), source) ->
-            { Table = table
-              Columns = cols
-              Source = source
-              Override = ovr }
-            |> Insert
+        >>= fun (((table, cols), ovr), source) ->
+            // 14.11 <from default> has neither an <insert column list> nor an <override clause>.
+            match source with
+            | InsertSource.DefaultValues when Option.isSome cols || Option.isSome ovr ->
+                fail "DEFAULT VALUES cannot carry an <insert column list> or an <override clause>."
+            | InsertSource.DefaultValues ->
+                preturn (
+                    Insert
+                        { Table = table
+                          Columns = None
+                          Source = InsertSource.DefaultValues
+                          Override = None }
+                )
+            | _ ->
+                preturn (
+                    Insert
+                        { Table = table
+                          Columns = cols
+                          Source = source
+                          Override = ovr }
+                )
 
     // 14.12 <merge statement> ::= MERGE INTO <target table> [ [ AS ] <merge correlation name> ]
     //     USING <table reference> ON <search condition> <merge operation specification>
@@ -436,6 +457,7 @@ module DataManipulationParser =
                 where
                 portion
                 alias
+            >>. pPositionedPortionGuard portion cursor
             >>. preturn statement
 
     // 14.16 <temporary table declaration> ::= DECLARE LOCAL TEMPORARY TABLE <table name> <table element list>

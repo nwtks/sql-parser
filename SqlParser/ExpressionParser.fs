@@ -80,7 +80,7 @@ module ExpressionParser =
               pKeyword "CLOB" >>% CharacterLargeObject
               pKeyword "CHARACTER" >>% Character
               pKeyword "CHAR" >>% Character ]
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
+        .>>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedIntegerAsInt)
         |>> fun (typ, len) -> typ len
 
     // 6.1 <national character string type> ::= NATIONAL CHARACTER [ ( <character length> ) ] | NCHAR [ ... ] | NATIONAL CHARACTER VARYING ... | <national character large object type>
@@ -104,7 +104,7 @@ module ExpressionParser =
               attempt (pKeyword "NATIONAL" .>> pKeyword "CHARACTER") >>% NationalCharacter
               attempt (pKeyword "NATIONAL" .>> pKeyword "CHAR") >>% NationalCharacter
               pKeyword "NCHAR" >>% NationalCharacter ]
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
+        .>>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedIntegerAsInt)
         |>> fun (typ, len) -> typ len
 
     // 6.1 <binary string type> ::= BINARY [ ( <length> ) ] | BINARY VARYING ( <length> ) | VARBINARY ( <length> ) | <binary large object string type>
@@ -116,7 +116,7 @@ module ExpressionParser =
               >>% BinaryLargeObject
               pKeyword "BLOB" >>% BinaryLargeObject
               pKeyword "BINARY" >>% Binary ]
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
+        .>>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedIntegerAsInt)
         |>> fun (typ, len) -> typ len
 
     // 6.1 <exact numeric type> ::= NUMERIC [ ( <precision> [ , <scale> ] ) ] | DECIMAL [ ... ] | DEC [ ... ] | SMALLINT | INTEGER | INT | BIGINT  —  <decimal floating-point type> ::= DECFLOAT [ ( <precision> ) ]
@@ -125,8 +125,8 @@ module ExpressionParser =
             between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (pUnsignedInteger .>>. opt (token (pstring ",") >>. pUnsignedInteger))
-            |>> fun (p, s) -> Some(int p), Option.map int s
+                (pUnsignedIntegerAsInt .>>. opt (token (pstring ",") >>. pUnsignedIntegerAsInt))
+            |>> fun (p, s) -> Some p, s
 
         choice
             [ pKeyword "NUMERIC" >>. opt pPrecScale
@@ -151,7 +151,7 @@ module ExpressionParser =
                       | None -> None, None
                   )
               pKeyword "DECFLOAT"
-              >>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
+              >>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedIntegerAsInt)
               |>> DecFloat
               pKeyword "SMALLINT" >>% SmallInt
               pKeyword "INTEGER" >>% Integer
@@ -162,7 +162,7 @@ module ExpressionParser =
     let pApproximateNumericType =
         choice
             [ pKeyword "FLOAT"
-              >>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
+              >>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedIntegerAsInt)
               |>> Float
               pKeyword "REAL" >>% Real
               attempt (pKeyword "DOUBLE" .>> pKeyword "PRECISION") >>% DoublePrecision ]
@@ -178,11 +178,11 @@ module ExpressionParser =
         choice
             [ pKeyword "DATE" >>% DateType
               pKeyword "TIME"
-              >>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
+              >>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedIntegerAsInt)
               .>>. pTz
               |>> fun (p, tz) -> TimeType(p, tz)
               pKeyword "TIMESTAMP"
-              >>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
+              >>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedIntegerAsInt)
               .>>. pTz
               |>> fun (p, tz) -> TimestampType(p, tz) ]
 
@@ -301,19 +301,12 @@ module ExpressionParser =
     //     | <SQL parameter reference> | <embedded variable name>
     // (<embedded variable name> is a host-language construct and is not modelled;
     //  it degrades to <host parameter name> — see docs/trade-off.md.)
+    // 5.3 <literal> also admits <signed numeric literal>, which pLiteral does not cover.
     let pSimpleValueSpecification =
         choice
             [ pLiteralExpression
+              (pSignedNumericLiteral |>> Number |>> Literal |> withExprPosition)
               pQuestionMark >>% "?" <|> pHostParameter |>> Parameter |> withExprPosition ]
-
-    // 6.4 <simple value specification> (compatibility) — extends the grammar production
-    // with bare identifiers (pSchemaQualifiedNameExpression) for backward compatibility with existing
-    // SET/CONNECT/DISCONNECT usage where identifiers are common.
-    let pSimpleValueSpecificationCompatibility =
-        choice
-            [ pLiteralExpression
-              pQuestionMark >>% "?" <|> pHostParameter |>> Parameter |> withExprPosition
-              pSchemaQualifiedNameExpression ]
 
     // 6.4 <value specification> ::= <literal> | <general value specification>
     // Used where the grammar requires a <value specification> (SET CATALOG/SCHEMA/NAMES/PATH,
@@ -339,10 +332,52 @@ module ExpressionParser =
             | first, rest -> ColumnReference(first :: rest)
         |> withExprPosition
 
+    // 6.7 <column reference> [ <collate clause> ] — the shape shared by
+    // 7.13 <grouping column reference>, 7.15 <window partition column reference> and
+    // 7.7 <row pattern partition column>.
+    let pColumnReferenceWithCollate =
+        pColumnReferenceExpression
+        .>>. opt (pKeyword "COLLATE" >>. pSchemaQualifiedNameExpression)
+        |>> fun (e, collation) ->
+            match collation with
+            | Some c ->
+                { Expression.Kind = Collate(e, c)
+                  Pos = e.Pos }
+            | None -> e
+
+    // 5.4 <local qualified name> ::= [ <local qualifier> <period> ] <qualified identifier>
+    // 14.1 <cursor name> ::= <local qualified name>; <local qualifier> ::= MODULE is the only
+    // qualifier a cursor name admits, so `DECLARE a.b CURSOR ...` is rejected.
+    let pLocalQualifiedNameExpression =
+        getPosition
+        .>>. opt (attempt (pKeyword "MODULE" >>. token (pstring ".")))
+        .>>. pIdentifier
+        |>> fun ((pos, qualifier), name) ->
+            { Expression.Kind =
+                (match qualifier with
+                 | Some _ -> ColumnReference [ "MODULE"; name ]
+                 | None -> Identifier name)
+              Pos = { Line = pos.Line; Column = pos.Column } }
+
+    // 20.4/23.1 <simple target specification> ::= <host parameter name> | <SQL parameter reference>
+    //     | <column reference> | <embedded variable name>
+    // (<embedded variable name> is a host-language construct and degrades to <host parameter name>,
+    //  as elsewhere — see docs/trade-off.md.)
+    let pSimpleTargetSpecification =
+        choice
+            [ pColumnReferenceExpression
+              (getPosition .>>. (pQuestionMark >>% "?" <|> pHostParameter)
+               |>> fun (pos, name) ->
+                   { Expression.Kind = Parameter name
+                     Pos = { Line = pos.Line; Column = pos.Column } }) ]
+
     // 6.9 <grouping operation> ::= GROUPING ( <column reference> [ , <column reference> ]... )
     let pGroupingOperation =
         pKeyword "GROUPING"
-        >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ",")))
+        >>. between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (sepBy1 pColumnReferenceWithCollate (token (pstring ",")))
         |>> Grouping
         |> withExprPosition
 
@@ -504,6 +539,19 @@ module ExpressionParser =
                   attempt (pValueSpecification .>> pKeyword "PRECEDING" |>> Preceding)
                   attempt (pValueSpecification .>> pKeyword "FOLLOWING" |>> Following) ]
 
+        // 7.15 <window frame start> ::= UNBOUNDED PRECEDING | <window frame preceding> | CURRENT ROW
+        // — a frame that is not a BETWEEN (and the first bound of one) cannot start at FOLLOWING.
+        let pBoundStart =
+            choice
+                [ attempt (pKeyword "UNBOUNDED" >>. pKeyword "PRECEDING" >>% UnboundedPreceding)
+                  attempt (pKeyword "CURRENT" >>. pKeyword "ROW" >>% CurrentRow)
+                  attempt (pValueSpecification .>> pKeyword "PRECEDING" |>> Preceding) ]
+
+        // 7.15 <window frame bound 1> ::= <window frame start> | UNBOUNDED FOLLOWING
+        let pBound1 =
+            pBoundStart
+            <|> (attempt (pKeyword "UNBOUNDED" >>. pKeyword "FOLLOWING") >>% UnboundedFollowing)
+
         // 7.15 <window frame exclusion> ::= EXCLUDE CURRENT ROW | EXCLUDE GROUP | EXCLUDE TIES | EXCLUDE NO OTHERS
         let pExclusion =
             pKeyword "EXCLUDE"
@@ -519,10 +567,10 @@ module ExpressionParser =
         .>>. pUnit
         .>>. choice
             [ attempt (
-                  pKeyword "BETWEEN" >>. pBound .>> pKeyword "AND" .>>. pBound
+                  pKeyword "BETWEEN" >>. pBound1 .>> pKeyword "AND" .>>. pBound
                   |>> fun (s, e) -> s, Some e
               )
-              pBound |>> fun s -> s, None ]
+              pBoundStart |>> fun s -> s, None ]
         .>>. opt pExclusion
         .>>. opt (attempt pRowPatternCommon)
         |>> fun ((((measures, unit), (start, endBound)), exclusion), rowPattern) ->
@@ -552,9 +600,10 @@ module ExpressionParser =
     // 6.10 <window name or specification> ::= <window name> | <window specification>
     let pWindowNameOrSpecification =
         let pPartitionBy =
+            // 7.15 <window partition column reference> ::= <column reference> [ <collate clause> ]
             pKeyword "PARTITION"
             >>. pKeyword "BY"
-            >>. sepBy1 pExpression (token (pstring ","))
+            >>. sepBy1 pColumnReferenceWithCollate (token (pstring ","))
 
         let pOrderBy =
             pKeyword "ORDER"
@@ -948,6 +997,14 @@ module ExpressionParser =
             )
         |> withExprPosition
 
+    // 6.1 <char length units> ::= CHARACTERS | OCTETS
+    // A closed set, so `USING <identifier>` is rejected instead of silently accepted.
+    let pCharLengthUnits =
+        pKeyword "CHARACTERS" >>% "CHARACTERS" <|> (pKeyword "OCTETS" >>% "OCTETS")
+
+    // The same keyword set in the <position expression> slot, which models the units as an <identifier>.
+    let pCharLengthUnitsExpr = pCharLengthUnits |>> Identifier |> withExprPosition
+
     // 6.30 <position expression> ::= POSITION ( <character value expression> IN
     //     <character value expression> [ USING <char length units> ] )
     let pPositionExpression =
@@ -957,7 +1014,7 @@ module ExpressionParser =
                 (token (pstring ")"))
                 (pExpression .>> pKeyword "IN"
                  .>>. pExpression
-                 .>>. opt (pKeyword "USING" >>. pIdentifierExpression))
+                 .>>. opt (pKeyword "USING" >>. pCharLengthUnitsExpr))
         |>> (fun ((target, source), unit) -> ExpressionKind.Position(target, source, unit))
         |> withExprPosition
 
@@ -965,20 +1022,23 @@ module ExpressionParser =
     //   <char length expression> ::= { CHAR_LENGTH | CHARACTER_LENGTH } ( <character value expression>
     //       [ USING <char length units> ] )
     //   <octet length expression> ::= OCTET_LENGTH ( <string value expression> )
+    // — <octet length expression> has no USING slot, so it takes a separate body parser.
     let pLengthExpression =
         let pBody =
             between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (pExpression .>>. opt (pKeyword "USING" >>. pIdentifierRaw))
+                (pExpression .>>. opt (pKeyword "USING" >>. pCharLengthUnits))
+
+        let pOctetBody = between (token (pstring "(")) (token (pstring ")")) pExpression
 
         choice
             [ pKeyword "CHAR_LENGTH" >>. pBody
               |>> fun (e, units) -> LengthExpression(LengthFunction.CharLength, e, units)
               pKeyword "CHARACTER_LENGTH" >>. pBody
               |>> fun (e, units) -> LengthExpression(LengthFunction.CharacterLength, e, units)
-              pKeyword "OCTET_LENGTH" >>. pBody
-              |>> fun (e, units) -> LengthExpression(LengthFunction.OctetLength, e, units) ]
+              pKeyword "OCTET_LENGTH" >>. pOctetBody
+              |>> fun e -> LengthExpression(LengthFunction.OctetLength, e, None) ]
         |> withExprPosition
 
     // 6.30 <numeric value function> — the built-ins of the shape <name> ( <args> )
@@ -1059,7 +1119,7 @@ module ExpressionParser =
         .>>. pOperand
         .>>. opt (attempt (pKeyword "WITH" >>. pOperand))
         .>>. opt (attempt (pKeyword "FROM" >>. pOperand))
-        .>>. opt (attempt (pKeyword "USING" >>. pIdentifierRaw))
+        .>>. opt (attempt (pKeyword "USING" >>. pCharLengthUnits))
         .>>. opt (attempt (pKeyword "OCCURRENCE" >>. pOccurrence))
         .>>. opt (attempt (pKeyword "GROUP" >>. pOperand))
         |>> fun (((((((pattern, flag), subject), replacement), start), units), occurrence), captureGroup) ->
@@ -1124,7 +1184,7 @@ module ExpressionParser =
                 (pExpression .>> pKeyword "FROM"
                  .>>. pExpression
                  .>>. opt (pKeyword "FOR" >>. pExpression)
-                 .>>. opt (pKeyword "USING" >>. pIdentifierRaw))
+                 .>>. opt (pKeyword "USING" >>. pCharLengthUnits))
         |>> fun (((src, start), len), units) -> Substring(src, start, len, units)
         |> withExprPosition
 
@@ -1358,7 +1418,7 @@ module ExpressionParser =
     //     <time precision> <right paren> ] | CURRENT_TIME ... | LOCALTIMESTAMP ... | LOCALTIME ...
     let pDateTimeValueFunction =
         let pPrecision =
-            opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedInteger |>> int)
+            opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedIntegerAsInt)
 
         choice
             [ pKeyword "CURRENT_DATE" >>% CurrentDate
@@ -1485,15 +1545,39 @@ module ExpressionParser =
         .>>. opt pWindowNameOrSpecification
         .>>. opt pFilter
         .>>. opt pWithinGroup
-        |>> fun ((((name, (dist, args)), window), filter), withinGroup) ->
-            match window with
-            | Some w ->
-                WindowFunction
-                    { Function = name
-                      Args = args
-                      IsDistinct = Option.defaultValue false dist
-                      Window = w }
-            | None -> FunctionCall(name, Option.defaultValue false dist, args, None, filter, withinGroup)
+        >>= fun ((((name, (dist, args)), window), filter), withinGroup) ->
+            // 6.10 and 10.9 make the suffix mandatory for some reserved function keywords: those
+            // names are whitelisted, so without this check `ROW_NUMBER()` or `LISTAGG(x, ',')` would
+            // degrade to a plain <routine invocation>.
+            let functionName =
+                match name.Kind with
+                | Identifier n -> n
+                | _ -> ""
+
+            if Set.contains functionName windowOnlyFunctionNames && Option.isNone window then
+                fail (sprintf "%s requires an OVER clause (6.10 <window function>)." functionName)
+            elif
+                Set.contains functionName overOrWithinGroupFunctionNames
+                && Option.isNone window
+                && Option.isNone withinGroup
+            then
+                fail (sprintf "%s requires an OVER or WITHIN GROUP clause (6.10 / 10.9)." functionName)
+            elif
+                Set.contains functionName withinGroupOnlyFunctionNames
+                && Option.isNone withinGroup
+            then
+                fail (sprintf "%s requires a WITHIN GROUP clause (10.9)." functionName)
+            else
+                match window with
+                | Some w ->
+                    preturn (
+                        WindowFunction
+                            { Function = name
+                              Args = args
+                              IsDistinct = Option.defaultValue false dist
+                              Window = w }
+                    )
+                | None -> preturn (FunctionCall(name, Option.defaultValue false dist, args, None, filter, withinGroup))
         |> withExprPosition
 
     // 10.11 <JSON object aggregate> ::= JSON_OBJECTAGG ( <JSON name and value>

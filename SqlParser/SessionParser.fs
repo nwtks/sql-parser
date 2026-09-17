@@ -29,12 +29,10 @@ module SessionParser =
 
     //   19.3 <set role statement> ::= SET ROLE <role specification>
     //   <role specification> ::= <value specification> | NONE
-    // Uses pSimpleValueSpecificationCompatibility (includes identifiers) to accept both SET ROLE admin and SET ROLE 'admin'.
     let pSetRoleStatement =
         pKeyword "SET"
         >>. pKeyword "ROLE"
-        >>. (attempt (pKeyword "NONE" >>% None)
-             <|> (pSimpleValueSpecificationCompatibility |>> Some))
+        >>. (attempt (pKeyword "NONE" >>% None) <|> (pValueSpecification |>> Some))
         |>> SetRole
 
     // 19.4 <set local time zone statement>

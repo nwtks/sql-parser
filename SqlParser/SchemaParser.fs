@@ -323,7 +323,7 @@ module SchemaParser =
         >>. (pKeyword "ALWAYS" >>% true <|> (pKeyword "BY" >>. pKeyword "DEFAULT" >>% false))
         .>> pKeyword "AS"
         .>> pKeyword "IDENTITY"
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (many pSequenceGeneratorOption))
+        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (many1 pSequenceGeneratorOption))
         |>> fun (isAlways, opts) ->
             { IsAlways = isAlways
               Options = Option.defaultValue [] opts }
@@ -1167,10 +1167,12 @@ module SchemaParser =
 
     // 11.52 <attribute definition> ::= <attribute name> <data type>
     //     [ <attribute default> ] [ <collate clause> ]
+    // 11.52 <attribute default> ::= <default clause> — the same closed 11.5 option set as a column,
+    // so `DEFAULT 1 + 1` is rejected here too.
     let pAttributeDefinition =
         pIdentifierExpression
         .>>. pDataType
-        .>>. opt (pKeyword "DEFAULT" >>. pExpression)
+        .>>. opt pDefaultClause
         .>>. opt (pKeyword "COLLATE" >>. pSchemaQualifiedNameExpression)
         |>> fun (((name, dataType), def), collate) ->
             { Name = name
@@ -1757,15 +1759,18 @@ module SchemaParser =
               )
               attempt (pKeyword "NAME" >>. pSchemaQualifiedNameExpression |>> ExternalName) ]
 
+    // 11.61 <alter routine characteristics> ::= <alter routine characteristic>...
     let pAlterRoutineCharacteristics =
-        many pAlterRoutineCharacteristic >>= rejectDuplicateCharacteristics
+        many1 pAlterRoutineCharacteristic >>= rejectDuplicateCharacteristics
 
-    // 11.61 <alter routine statement> ::= ALTER <specific routine designator> <alter routine characteristic>... [ RESTRICT ]
+    // 11.61 <alter routine statement> ::= ALTER <specific routine designator> <alter routine characteristic>... RESTRICT
+    // 11.61 <alter routine behavior> ::= RESTRICT — required. It is validated but not stored: RESTRICT is
+    // the only alternative, so the AST carries no information only if it were omitted.
     let pAlterRoutineStatement =
         pKeyword "ALTER" >>. pSpecificRoutineDesignator
         .>>. pAlterRoutineCharacteristics
-        .>>. opt (pKeyword "RESTRICT")
-        |>> fun ((routine, characteristics), _) ->
+        .>> pKeyword "RESTRICT"
+        |>> fun (routine, characteristics) ->
             AlterRoutine
                 { Routine = routine
                   Characteristics = characteristics }

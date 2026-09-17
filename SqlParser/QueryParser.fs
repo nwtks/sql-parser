@@ -126,7 +126,7 @@ module QueryParser =
                     attempt (
                         pKeyword "PARTITION"
                         >>. pKeyword "BY"
-                        >>. sepBy1 pExpression (token (pstring ","))
+                        >>. sepBy1 pColumnReferenceWithCollate (token (pstring ","))
                     )
                  )
                  .>>. opt (
@@ -158,6 +158,11 @@ module QueryParser =
 
     // 7.11 <JSON table columns clause> (recursive — nested columns contain one)
     let pJsonTableColumnsClause, pJsonTableColumnsClauseRef =
+        createParserForwardedToRef<JsonTableColumn list, unit> ()
+
+    // 7.11 <columns clause> for a JSON_TABLE_PRIMITIVE, whose column definitions have no
+    // <JSON table nested columns definition> alternative (7.11).
+    let pJsonTablePrimitiveColumnsClause, pJsonTablePrimitiveColumnsClauseRef =
         createParserForwardedToRef<JsonTableColumn list, unit> ()
 
     // 7.11 <JSON table column definition>
@@ -217,33 +222,88 @@ module QueryParser =
                                                   .>> pKeyword "ERROR"
                                               )
                                           )
-                                          |>> fun onError ->
-                                              match fmt with
-                                              | Some f ->
-                                                  JsonFormatted
-                                                      { Name = name
-                                                        DataType = dt
-                                                        Format = f
-                                                        Path = path
-                                                        Wrapper = wrapper
-                                                        Quotes = quotes
-                                                        OnEmpty = onEmpty
-                                                        OnError = onError }
-                                              | None ->
-                                                  JsonRegular
-                                                      { Name = name
-                                                        DataType = dt
-                                                        Path = path
-                                                        OnEmpty = onEmpty
-                                                        OnError = onError }
+                                          >>= fun onError ->
+                                              // 7.11: WRAPPER / QUOTES belong only to a formatted column, and
+                                              // EMPTY ARRAY / EMPTY OBJECT only to a formatted column's empty/error
+                                              // behavior; DEFAULT only to a regular column's.
+                                              let hasFormattedOnlyBehavior =
+                                                  onEmpty = Some JsonColumnEmptyArray
+                                                  || onEmpty = Some JsonColumnEmptyObject
+                                                  || onError = Some JsonColumnEmptyArray
+                                                  || onError = Some JsonColumnEmptyObject
+
+                                              let isDefault =
+                                                  function
+                                                  | Some(JsonColumnDefault _) -> true
+                                                  | _ -> false
+
+                                              if
+                                                  fmt.IsNone
+                                                  && (Option.isSome wrapper
+                                                      || Option.isSome quotes
+                                                      || hasFormattedOnlyBehavior)
+                                              then
+                                                  fail
+                                                      "WRAPPER, QUOTES and EMPTY ARRAY/OBJECT require FORMAT JSON (7.11)."
+                                              elif fmt.IsSome && (isDefault onEmpty || isDefault onError) then
+                                                  fail "DEFAULT is not a formatted column behavior (7.11)."
+                                              else
+                                                  match fmt with
+                                                  | Some f ->
+                                                      preturn (
+                                                          JsonFormatted
+                                                              { Name = name
+                                                                DataType = dt
+                                                                Format = f
+                                                                Path = path
+                                                                Wrapper = wrapper
+                                                                Quotes = quotes
+                                                                OnEmpty = onEmpty
+                                                                OnError = onError }
+                                                      )
+                                                  | None ->
+                                                      preturn (
+                                                          JsonRegular
+                                                              { Name = name
+                                                                DataType = dt
+                                                                Path = path
+                                                                OnEmpty = onEmpty
+                                                                OnError = onError }
+                                                      )
               ) ]
 
-    pJsonTableColumnsClauseRef.Value <-
+    // 7.11 — the two column-definition dialects are not interchangeable: NESTED belongs only to
+    // <JSON table column definition> and FOR CHAINING only to <JSON table primitive column definition>.
+    let private validateColumnKind allowNested cols =
+        let hasNested =
+            cols
+            |> List.exists (function
+                | JsonNested _ -> true
+                | _ -> false)
+
+        let hasChaining =
+            cols
+            |> List.exists (function
+                | JsonChaining _ -> true
+                | _ -> false)
+
+        if allowNested && hasChaining then
+            fail "FOR CHAINING is only valid in a JSON_TABLE_PRIMITIVE column list (7.11)."
+        elif not allowNested && hasNested then
+            fail "NESTED is only valid in a JSON_TABLE column list (7.11)."
+        else
+            preturn cols
+
+    let private pJsonTableColumnsClauseBody allowNested =
         pKeyword "COLUMNS"
         >>. between
                 (token (pstring "("))
                 (token (pstring ")"))
                 (sepBy1 pJsonTableColumnDefinition (token (pstring ",")))
+        >>= validateColumnKind allowNested
+
+    pJsonTableColumnsClauseRef.Value <- pJsonTableColumnsClauseBody true
+    pJsonTablePrimitiveColumnsClauseRef.Value <- pJsonTableColumnsClauseBody false
 
     // 7.11 <JSON table plan primary> ::= <path name> | ( <plan> )
     let pJsonTablePlanPrimary, pJsonTablePlanPrimaryRef =
@@ -343,7 +403,7 @@ module QueryParser =
                 (token (pstring "("))
                 (token (pstring ")"))
                 (pJsonApiCommonSyntax
-                 .>>. pJsonTableColumnsClause
+                 .>>. pJsonTablePrimitiveColumnsClause
                  .>>. (pJsonTableErrorBehavior .>> pKeyword "ON" .>> pKeyword "ERROR")
                  |>> fun ((common, cols), onError) ->
                      { Common = common
@@ -625,10 +685,13 @@ module QueryParser =
     let pOrdinaryGroupingSet =
         choice
             [ attempt (
-                  between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ",")))
+                  between
+                      (token (pstring "("))
+                      (token (pstring ")"))
+                      (sepBy1 pColumnReferenceWithCollate (token (pstring ",")))
                   |>> GroupingSet
               )
-              pExpression |>> fun e -> GroupingSet [ e ] ]
+              pColumnReferenceWithCollate |>> fun e -> GroupingSet [ e ] ]
 
     // 7.13 <grouping sets specification> ::= GROUPING SETS ( <grouping set list> )
     let pGroupingSetsSpecification =
@@ -680,7 +743,7 @@ module QueryParser =
                  // <window partition column reference> ::= <column reference> [ <collate clause> ]
                  pKeyword "PARTITION"
                  >>. pKeyword "BY"
-                 >>. sepBy1 pColumnReferenceExpression (token (pstring ","))
+                 >>. sepBy1 pColumnReferenceWithCollate (token (pstring ","))
              )
              .>>. opt (
                  pKeyword "ORDER"

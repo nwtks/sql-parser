@@ -96,6 +96,34 @@ dialects:
   is rejected for the same reason. Adding a reserved-name built-in means extending
   `functionKeywords`.
 
+- **A numeric literal whose value does not fit `decimal` is rejected**, not clamped to a different
+  number (`1E29` used to become `1e28`). Every numeric conversion is checked and reads the
+  *invariant* culture, so a malformed or out-of-range value fails the parse instead of throwing.
+  A numeric token must also not run into a following identifier character, so `1E`, `1E5x` and
+  `0x10` are rejected rather than re-read as a number plus an alias.
+- **Datetime and interval values are range-checked:** hours 0-23, minutes 0-59, seconds 0-60 (leap
+  second), `<time zone interval>` within +-14:00, years 0001-9999, month 1-12, day 1-31, and an
+  `<interval literal>`'s digits must fit its leading / fractional-seconds precision. Calendar
+  validity (February 30, leap years) is deliberately *not* checked — that distinction is semantic.
+- **`<simple value specification>` admits no bare identifier.** `CONNECT TO 'server'` and
+  `SET ROLE 'admin'` are the standard spellings, so the compatibility extension that accepted
+  `CONNECT TO server` / `SET ROLE admin` was removed. `<literal>` includes `<signed numeric
+  literal>`, so `FETCH RELATIVE -1` is still accepted (as one literal, not a unary minus).
+- **Reserved built-ins keep their mandatory suffix.** A `<window function>` needs `OVER` and a
+  `<hypothetical set function>` / `<listagg set function>` needs `WITHIN GROUP`, so `ROW_NUMBER()`
+  and `LISTAGG(x, ',')` are rejected instead of degrading to a generic `FunctionCall`.
+- **A clause stays in the clause it belongs to.** `<char length units>` is the closed set
+  `CHARACTERS | OCTETS` and `OCTET_LENGTH` has no `USING` slot; a `JSON_TABLE` column list admits
+  `NESTED` but not `FOR CHAINING` and a `JSON_TABLE_PRIMITIVE` list the reverse; `WRAPPER`,
+  `QUOTES` and `EMPTY ARRAY`/`EMPTY OBJECT` require `FORMAT JSON` while `DEFAULT` excludes it.
+- **Mandatory clauses are parsed as mandatory:** `ALTER ROUTINE` needs at least one characteristic
+  and the `RESTRICT` behavior (11.61 brackets neither), `TRUNCATE TABLE` needs `TABLE`, a
+  `SELECT ... INTO` needs its `<table expression>`, and `INSERT ... DEFAULT VALUES` accepts neither
+  an `<insert column list>` nor an `<override clause>`.
+- **Nothing throws out of the public API.** The per-parser checks above are the primary defence;
+  `runParser` additionally converts any escaping exception into `Result.Error`, so a value the
+  grammar does not model can never surface as a raw .NET exception.
+
 - **Trade-off (all of the above):** Real-world SQL that omits standard-mandated
   clauses no longer parses, so consumers would have to layer extensions on top. In
   exchange, an accepted string is much more likely to be valid SQL-2016.

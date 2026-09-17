@@ -385,6 +385,10 @@ let ``MATCH_RECOGNIZE verification`` () =
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
+let ``MATCH_RECOGNIZE partition rejects non column references`` () =
+    parseFails "SELECT * FROM t MATCH_RECOGNIZE (PARTITION BY a + 1 PATTERN (A) DEFINE A AS a > 0)"
+
+[<Fact>]
 let ``MATCH_RECOGNIZE full clauses verification`` () =
     match
         parse
@@ -472,6 +476,27 @@ let ``JSON_TABLE formatted column verification`` () =
             | res -> Assert.Fail(sprintf "Expected JsonFormatted, got %A" res)
         | res -> Assert.Fail(sprintf "Expected JsonTable, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
+let ``JSON_TABLE regular columns reject formatted-only clauses`` () =
+    // 7.11 — WRAPPER and EMPTY ARRAY/OBJECT belong only to a formatted column.
+    parseFails "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT WITH WRAPPER))"
+    parseFails "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT EMPTY ARRAY ON EMPTY))"
+    parseFails "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT EMPTY OBJECT ON ERROR))"
+
+[<Fact>]
+let ``JSON_TABLE formatted columns reject a DEFAULT behavior`` () =
+    // 7.11 — DEFAULT belongs only to a regular column's empty/error behavior.
+    parseFails "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT FORMAT JSON DEFAULT 1 ON EMPTY))"
+    parseFails "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT FORMAT JSON DEFAULT 1 ON ERROR))"
+
+[<Fact>]
+let ``JSON_TABLE column kinds are not interchangeable with JSON_TABLE_PRIMITIVE`` () =
+    // 7.11 — NESTED is only a <JSON table column definition>; FOR CHAINING only a
+    // <JSON table primitive column definition>.
+    parseFails "SELECT * FROM JSON_TABLE_PRIMITIVE(doc, '$' COLUMNS (NESTED PATH '$.a' COLUMNS (x INT)) ERROR ON ERROR)"
+
+    parseFails "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (v FOR CHAINING))"
 
 [<Fact>]
 let ``JSON_TABLE nested columns verification`` () =
@@ -927,6 +952,15 @@ let ``GROUP BY grouping elements verification`` () =
             ()
         | res -> Assert.Fail(sprintf "Expected GroupingSets, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
+let ``GROUP BY grouping elements reject non column references`` () =
+    parseFails "SELECT a FROM t GROUP BY a + 1"
+    parseFails "SELECT a FROM t GROUP BY 1"
+    parseFails "SELECT a FROM t GROUP BY *"
+    parseFails "SELECT a FROM t ROLLUP(a + 1)"
+    parseFails "SELECT a FROM t CUBE(a + 1)"
+    parseFails "SELECT a FROM t GROUP BY GROUPING SETS ((a + 1))"
 
 [<Fact>]
 let ``Window clause verification`` () =

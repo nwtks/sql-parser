@@ -215,7 +215,33 @@ The omitted DML target relies on `SET` and `WHERE` being reserved words —
 Item names that are reserved words (`NUMBER`, `ROW_COUNT`, `DATA`, …) cannot use
 `pIdentifier`, but `pIdentifierRaw` also accepts `ALL`, `SELECT`, …. Use an
 explicit `choice [ pKeyword "…" ]` enumeration (diagnostics/descriptor item names,
-`<language name>`, `<parameter style>`).
+`<language name>`, `<parameter style>`). The same applies to `<char length units>`
+(`CHARACTERS | OCTETS`), which is `pCharLengthUnits` in `ExpressionParser.fs`.
+
+### A citation must name the clause that *defines* the rule
+
+`RuleNumberingTests` matches an unnumbered `<rule name>` against the clauses that
+*mention* it, so the number must be the defining clause even when the rule is used
+elsewhere: `<local qualified name>` is a **5.4** rule (not 14.1/20.1, where it is the
+`<cursor name>` production) and `<char length units>` is a **6.1** rule (not
+6.30/6.32, where it is used). Same class as the `<scope option>` (5.4) and
+`<semicolon>` (5.1) entries above.
+
+### Numeric conversions must be checked *and* culture-invariant
+
+`uint64`/`int`/`decimal` conversions throw `OverflowException`/`FormatException` on
+out-of-range input, and F#'s `decimal` reads a string with the **current culture**
+(de-DE reads `1.5` as 15). Use the checked helpers (`toUnsignedInteger`,
+`toDecimal`, `pUnsignedIntegerAsInt`) with `CultureInfo.InvariantCulture`; the
+`runParser` try/with in `SqlParser.fs` is only a safety net, not the fix.
+
+### `<literal>` includes `<signed numeric literal>`, but `pLiteral` does not
+
+`pLiteral` covers the unsigned and general literal forms only, so `pLiteralExpression`
+rejects a leading sign. Where the grammar requires a `<simple value specification>`
+(which does admit `<signed numeric literal>`), add the sign form at that slot —
+`pSimpleValueSpecification` does — instead of widening `pLiteral`, which would change
+the AST of every `SELECT -1` (a unary-minus expression today, a literal after).
 
 ### Non-reserved keywords need explicit handling
 

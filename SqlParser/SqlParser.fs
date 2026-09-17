@@ -251,17 +251,19 @@ module SqlParser =
               attempt (pSqlDynamicStatement |> withStmtPosition)
               attempt (pSqlDiagnosticsStatement |> withStmtPosition) ]
 
+    // Every parser validates its input, so a malformed value yields an FParsec `Failure`. Should an
+    // exception still escape (e.g. a numeric conversion a source check missed), it surfaces as
+    // `Result.Error` rather than being thrown out of the public API — see docs/gotchas.md.
     let private runParser p sql =
-        match run p sql with
-        | Success(res, _, _) -> Result.Ok res
-        | Failure(msg, error, _) ->
-            Result.Error(
-                ParseError(
-                    msg,
-                    { Line = int64 error.Position.Line
-                      Column = int64 error.Position.Column }
-                )
-            )
+        let toError msg line column =
+            Result.Error(ParseError(msg, { Line = line; Column = column }))
+
+        try
+            match run p sql with
+            | Success(res, _, _) -> Result.Ok res
+            | Failure(msg, error, _) -> toError msg (int64 error.Position.Line) (int64 error.Position.Column)
+        with ex ->
+            toError ex.Message 0L 0L
 
     /// 22.1 — parses a <direct SQL statement> (the directly executable statement families).
     let parse sql =

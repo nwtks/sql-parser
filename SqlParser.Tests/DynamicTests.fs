@@ -195,11 +195,19 @@ let ``EXECUTE IMMEDIATE verification`` () =
     | res -> Assert.Fail(sprintf "Expected ExecuteImmediate, got %A" res)
 
 [<Fact>]
+let ``Dynamic SQL slots take only a simple value specification`` () =
+    parseStatementFails "EXECUTE IMMEDIATE 1 + 1"
+    parseStatementFails "PREPARE s FROM 1 + 1"
+    parseStatementFails "GET DESCRIPTOR d1 VALUE 1 + 1 x = DATA"
+    parseStatementFails "SET DESCRIPTOR d1 VALUE 1 + 1 DATA = 'x'"
+    parseStatementFails "COPY d1 VALUE 1 + 1 (DATA) TO d2 VALUE 2"
+
+[<Fact>]
 let ``DYNAMIC DECLARE CURSOR verification`` () =
-    match parseStatement "DECLARE c CURSOR FOR s1" with
+    match parseStatement "DECLARE c CURSOR FOR :s1" with
     | DynamicDeclareCursor dc ->
         match dc.Name.Kind, dc.Statement.Scope, dc.Statement.SimpleValue.Kind with
-        | Identifier "C", None, Identifier "S1" -> ()
+        | Identifier "C", None, Parameter ":S1" -> ()
         | _ -> Assert.Fail(sprintf "Unexpected DynamicDeclareCursor %A" dc)
 
         Assert.Equal(None, dc.Properties.Sensitivity)
@@ -210,14 +218,14 @@ let ``DYNAMIC DECLARE CURSOR verification`` () =
 
 [<Fact>]
 let ``DYNAMIC DECLARE CURSOR with properties and scope verification`` () =
-    match parseStatement "DECLARE c INSENSITIVE CURSOR WITH HOLD FOR GLOBAL s1" with
+    match parseStatement "DECLARE c INSENSITIVE CURSOR WITH HOLD FOR GLOBAL :s1" with
     | DynamicDeclareCursor dc ->
         Assert.Equal(Some Insensitive, dc.Properties.Sensitivity)
         Assert.Equal(Some WithHold, dc.Properties.Holdability)
         Assert.Equal(Some ScopeGlobal, dc.Statement.Scope)
 
         match dc.Statement.SimpleValue.Kind with
-        | Identifier "S1" -> ()
+        | Parameter ":S1" -> ()
         | _ -> Assert.Fail(sprintf "Unexpected statement name %A" dc.Statement)
     | res -> Assert.Fail(sprintf "Expected DynamicDeclareCursor, got %A" res)
 
@@ -235,13 +243,13 @@ let ``DYNAMIC DECLARE CURSOR without CURSOR keyword is rejected`` () = parseStat
 
 [<Fact>]
 let ``ALLOCATE EXTENDED DYNAMIC CURSOR verification`` () =
-    match parseStatement "ALLOCATE c SCROLL CURSOR FOR GLOBAL s1" with
+    match parseStatement "ALLOCATE :c SCROLL CURSOR FOR GLOBAL :s1" with
     | AllocateExtendedDynamicCursor ac ->
         Assert.Equal(Some Scroll, ac.Properties.Scrollability)
         Assert.Equal(Some ScopeGlobal, ac.Statement.Scope)
 
         match ac.Cursor.Scope, ac.Cursor.SimpleValue.Kind, ac.Statement.SimpleValue.Kind with
-        | None, Identifier "C", Identifier "S1" -> ()
+        | None, Parameter ":C", Parameter ":S1" -> ()
         | _ -> Assert.Fail(sprintf "Unexpected AllocateExtendedDynamicCursor %A" ac)
     | res -> Assert.Fail(sprintf "Expected AllocateExtendedDynamicCursor, got %A" res)
 
@@ -292,6 +300,9 @@ let ``ALLOCATE DESCRIPTOR WITH MAX rejects expression`` () =
 
 [<Fact>]
 let ``PIPE ROW verification`` () =
-    match parseStatement "PIPE ROW d1" with
-    | PipeRow { Kind = Identifier "D1" } -> ()
+    // 20.28 <pipe row statement> ::= PIPE ROW <PTF descriptor name> ::= PTF <simple value specification>
+    match parseStatement "PIPE ROW PTF :d1" with
+    | PipeRow { Kind = Parameter ":D1" } -> ()
     | res -> Assert.Fail(sprintf "Expected PipeRow, got %A" res)
+
+    parseStatementFails "PIPE ROW d1"

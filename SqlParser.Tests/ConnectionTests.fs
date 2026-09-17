@@ -16,8 +16,8 @@ let parseFails (sql: string) =
 
 [<Fact>]
 let ``CONNECT TO verification`` () =
-    match parse "CONNECT TO server1" with
-    | Connect { Server = Some { Kind = Identifier "SERVER1" }
+    match parse "CONNECT TO 'server1'" with
+    | Connect { Server = Some { Kind = Literal(String "server1") }
                 ConnectionName = None
                 User = None } -> ()
     | res -> Assert.Fail(sprintf "Expected Connect, got %A" res)
@@ -32,10 +32,10 @@ let ``CONNECT TO DEFAULT verification`` () =
 
 [<Fact>]
 let ``CONNECT TO with AS and USER verification`` () =
-    match parse "CONNECT TO server1 AS c1 USER u1" with
-    | Connect { Server = Some { Kind = Identifier "SERVER1" }
-                ConnectionName = Some { Kind = Identifier "C1" }
-                User = Some { Kind = Identifier "U1" } } -> ()
+    match parse "CONNECT TO 'server1' AS 'c1' USER 'u1'" with
+    | Connect { Server = Some { Kind = Literal(String "server1") }
+                ConnectionName = Some { Kind = Literal(String "c1") }
+                User = Some { Kind = Literal(String "u1") } } -> ()
     | res -> Assert.Fail(sprintf "Expected Connect with AS/USER, got %A" res)
 
 [<Fact>]
@@ -43,8 +43,8 @@ let ``CONNECT TO without target is rejected`` () = parseFails "CONNECT TO"
 
 [<Fact>]
 let ``SET CONNECTION verification`` () =
-    match parse "SET CONNECTION c1" with
-    | SetConnection(Some { Kind = Identifier "C1" }) -> ()
+    match parse "SET CONNECTION 'c1'" with
+    | SetConnection(Some { Kind = Literal(String "c1") }) -> ()
     | res -> Assert.Fail(sprintf "Expected SetConnection, got %A" res)
 
 [<Fact>]
@@ -55,8 +55,8 @@ let ``SET CONNECTION DEFAULT verification`` () =
 
 [<Fact>]
 let ``DISCONNECT verification`` () =
-    match parse "DISCONNECT c1" with
-    | Disconnect(DisconnectName { Kind = Identifier "C1" }) -> ()
+    match parse "DISCONNECT 'c1'" with
+    | Disconnect(DisconnectName { Kind = Literal(String "c1") }) -> ()
     | res -> Assert.Fail(sprintf "Expected Disconnect, got %A" res)
 
 [<Fact>]

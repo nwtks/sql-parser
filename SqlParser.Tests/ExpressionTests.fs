@@ -180,6 +180,12 @@ let ``GROUPING operation verification`` () =
     | res -> Assert.Fail(sprintf "Expected Grouping(a, b), got %A" res)
 
 [<Fact>]
+let ``GROUPING operation rejects non column references`` () =
+    parseFails "SELECT GROUPING(a + 1)"
+    parseFails "SELECT GROUPING(*)"
+    parseFails "SELECT GROUPING(1)"
+
+[<Fact>]
 let ``Window frame row pattern measures verification`` () =
     match
         parse
@@ -218,6 +224,30 @@ let ``GROUPS window frame verification`` () =
     | res -> Assert.Fail(sprintf "Expected GROUPS frame, got %A" res)
 
 [<Fact>]
+let ``Window frame with a leading PRECEDING start is accepted`` () =
+    match parse "SELECT SUM(x) OVER (ORDER BY y ROWS 1 PRECEDING)" with
+    | WindowFunction { Window = { Frame = Some { Start = Preceding { Kind = Literal(Number 1m) }
+                                                 End = None } } } -> ()
+    | res -> Assert.Fail(sprintf "Expected ROWS 1 PRECEDING frame, got %A" res)
+
+[<Fact>]
+let ``Window frame start cannot be FOLLOWING`` () =
+    parseFails "SELECT SUM(x) OVER (ORDER BY y ROWS 1 FOLLOWING)"
+    parseFails "SELECT SUM(x) OVER (ORDER BY y ROWS UNBOUNDED FOLLOWING)"
+    parseFails "SELECT SUM(x) OVER (ORDER BY y ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING)"
+
+[<Fact>]
+let ``Window partition accepts a collate clause`` () =
+    match parse "SELECT SUM(x) OVER (PARTITION BY a COLLATE c)" with
+    | WindowFunction { Window = { PartitionBy = [ { Kind = Collate(_, _) } ] } } -> ()
+    | res -> Assert.Fail(sprintf "Expected a COLLATE partition item, got %A" res)
+
+[<Fact>]
+let ``Window partition rejects non column references`` () =
+    parseFails "SELECT SUM(x) OVER (PARTITION BY a + 1)"
+    parseFails "SELECT SUM(x) OVER (PARTITION BY 1)"
+
+[<Fact>]
 let ``Window functions verification`` () =
     match parse "SELECT ROW_NUMBER() OVER (ORDER BY id DESC)" with
     | WindowFunction { Function = { Kind = Identifier "ROW_NUMBER" }
@@ -241,6 +271,30 @@ let ``Window functions verification`` () =
                                   OrderBy = [ { Kind = Identifier "HIRE_DATE" }, true, None ]
                                   Frame = None } } -> ()
     | res -> Assert.Fail(sprintf "Expected SUM(...) OVER ..., got %A" res)
+
+[<Fact>]
+let ``Window-only functions require an OVER clause`` () =
+    parseFails "SELECT ROW_NUMBER()"
+    parseFails "SELECT RANK()"
+    parseFails "SELECT DENSE_RANK()"
+    parseFails "SELECT LEAD(x)"
+    parseFails "SELECT NTILE(4)"
+    parseFails "SELECT PERCENTILE_CONT(0.5)"
+    parseFails "SELECT LISTAGG(x, ',')"
+
+[<Fact>]
+let ``Set functions that need a suffix are accepted with one`` () =
+    match parse "SELECT RANK() OVER (ORDER BY x)" with
+    | WindowFunction _ -> ()
+    | res -> Assert.Fail(sprintf "Expected RANK OVER, got %A" res)
+
+    match parse "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x)" with
+    | FunctionCall(_, _, _, _, _, Some _) -> ()
+    | res -> Assert.Fail(sprintf "Expected PERCENTILE_CONT WITHIN GROUP, got %A" res)
+
+    match parse "SELECT LISTAGG(x, ',') WITHIN GROUP (ORDER BY x)" with
+    | FunctionCall(_, _, _, _, _, Some _) -> ()
+    | res -> Assert.Fail(sprintf "Expected LISTAGG WITHIN GROUP, got %A" res)
 
 [<Fact>]
 let ``Nested row number function verification`` () =
@@ -534,6 +588,10 @@ let ``POSITION verification`` () =
     | res -> Assert.Fail(sprintf "Expected Position, got %A" res)
 
 [<Fact>]
+let ``POSITION rejects a non char length unit`` () =
+    parseFails "SELECT POSITION('a' IN 'abc' USING JUNK)"
+
+[<Fact>]
 let ``CHARACTER length expressions verification`` () =
     match parse "SELECT CHAR_LENGTH(name)" with
     | LengthExpression(LengthFunction.CharLength, { Kind = Identifier "NAME" }, None) -> ()
@@ -546,6 +604,12 @@ let ``CHARACTER length expressions verification`` () =
     match parse "SELECT OCTET_LENGTH(name)" with
     | LengthExpression(LengthFunction.OctetLength, { Kind = Identifier "NAME" }, None) -> ()
     | res -> Assert.Fail(sprintf "Expected OCTET_LENGTH, got %A" res)
+
+[<Fact>]
+let ``Length expressions reject a non char length unit`` () =
+    parseFails "SELECT CHARACTER_LENGTH(name USING JUNK)"
+    // <octet length expression> has no USING slot at all
+    parseFails "SELECT OCTET_LENGTH(name USING CHARACTERS)"
 
 [<Fact>]
 let ``ABS absolute value verification`` () =
@@ -676,6 +740,14 @@ let ``SUBSTRING FROM FOR verification`` () =
     | Substring({ Kind = Identifier "NAME" }, { Kind = Literal(Number 2m) }, Some { Kind = Literal(Number 3m) }, None) ->
         ()
     | res -> Assert.Fail(sprintf "Expected Substring, got %A" res)
+
+[<Fact>]
+let ``Regex functions reject a non char length unit`` () =
+    parseFails "SELECT OCCURRENCES_REGEX('a' IN s USING JUNK)"
+
+[<Fact>]
+let ``SUBSTRING rejects a non char length unit`` () =
+    parseFails "SELECT SUBSTRING(name FROM 2 USING JUNK)"
 
 [<Fact>]
 let ``OVERLAY PLACING verification`` () =

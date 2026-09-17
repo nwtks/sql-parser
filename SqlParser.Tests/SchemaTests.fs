@@ -262,6 +262,10 @@ let ``IDENTITY combined with a default clause is rejected`` () =
     parseFails "CREATE TABLE t (c INT GENERATED ALWAYS AS IDENTITY DEFAULT 5)"
 
 [<Fact>]
+let ``IDENTITY with an empty option list is rejected`` () =
+    parseFails "CREATE TABLE t (c INT GENERATED ALWAYS AS IDENTITY ())"
+
+[<Fact>]
 let ``the single-value clause precedes the column constraints`` () =
     // 11.4 — [ <default clause> | ... ] comes before [ <column constraint definition>... ]
     match parse "CREATE TABLE t (c INT DEFAULT 1 NOT NULL)" with
@@ -1080,6 +1084,17 @@ let ``CREATE TYPE with member list verification`` () =
     | res -> Assert.Fail(sprintf "Expected CreateType member list, got %A" res)
 
 [<Fact>]
+let ``CREATE TYPE attribute default is a default clause`` () =
+    parseFails "CREATE TYPE my_type AS (a INT DEFAULT 1 + 1)"
+
+    match parse "CREATE TYPE my_type AS (a INT DEFAULT 1)" with
+    | CreateType { Representation = Some(TypeRepresentation.MemberList attrs) } ->
+        match attrs with
+        | [ { Default = Some { Kind = Literal(Number 1m) } } ] -> ()
+        | _ -> Assert.Fail(sprintf "Unexpected attributes: %A" attrs)
+    | res -> Assert.Fail(sprintf "Expected CreateType, got %A" res)
+
+[<Fact>]
 let ``CREATE TYPE with options verification`` () =
     match parse "CREATE TYPE my_type AS (a INT) INSTANTIABLE NOT FINAL REF USING INT" with
     | CreateType { Options = [ TypeOption.Instantiable true; TypeOption.Final false; TypeOption.RefUsing Integer ] } ->
@@ -1509,15 +1524,18 @@ let ``ALTER ROUTINE characteristic catalogue verification`` () =
     // 11.61 <alter routine characteristic> = <language clause> | <parameter style clause>
     //     | <SQL-data access indication> | <null-call clause> | <returned result sets characteristic>
     //     | NAME <external routine name>
-    match parse "ALTER FUNCTION f LANGUAGE SQL NAME ext RETURNS NULL ON NULL INPUT" with
+    match parse "ALTER FUNCTION f LANGUAGE SQL NAME ext RETURNS NULL ON NULL INPUT RESTRICT" with
     | AlterRoutine { Characteristics = [ Language "SQL"; ExternalName { Kind = Identifier "EXT" }; NullCall true ] } ->
         ()
     | res -> Assert.Fail(sprintf "Expected the 11.61 catalogue, got %A" res)
 
     // 11.61 does not allow SPECIFIC / <deterministic characteristic> / <savepoint level indication>
-    parseFails "ALTER FUNCTION f DETERMINISTIC"
-    parseFails "ALTER FUNCTION f SPECIFIC f_spec"
-    parseFails "ALTER FUNCTION f OLD SAVEPOINT LEVEL"
+    parseFails "ALTER FUNCTION f DETERMINISTIC RESTRICT"
+    parseFails "ALTER FUNCTION f SPECIFIC f_spec RESTRICT"
+    parseFails "ALTER FUNCTION f OLD SAVEPOINT LEVEL RESTRICT"
+    // 11.61 requires at least one <alter routine characteristic> and the RESTRICT behavior
+    parseFails "ALTER FUNCTION f LANGUAGE SQL"
+    parseFails "ALTER FUNCTION f RESTRICT"
 
 [<Fact>]
 let ``ALTER ROUTINE verification`` () =
@@ -1528,7 +1546,7 @@ let ``ALTER ROUTINE verification`` () =
         Assert.Equal(Identifier "ADD", routine.Name.Kind)
     | res -> Assert.Fail(sprintf "Expected AlterRoutine, got %A" res)
 
-    match parse "ALTER PROCEDURE p NO SQL" with
+    match parse "ALTER PROCEDURE p NO SQL RESTRICT" with
     | AlterRoutine { Routine = routine
                      Characteristics = [ SqlDataAccess NoSql ] } ->
         Assert.Equal(Some RoutineType.Procedure, routine.RoutineType)
@@ -1536,7 +1554,7 @@ let ``ALTER ROUTINE verification`` () =
     | res -> Assert.Fail(sprintf "Expected AlterRoutine NO SQL, got %A" res)
 
     // <routine type> with a <data type list> and FOR <schema-resolved user-defined type name>
-    match parse "ALTER METHOD m (INT) FOR my_type NO SQL" with
+    match parse "ALTER METHOD m (INT) FOR my_type NO SQL RESTRICT" with
     | AlterRoutine { Routine = routine } ->
         Assert.Equal(Some(RoutineType.Method None), routine.RoutineType)
         Assert.Equal(Identifier "M", routine.Name.Kind)
