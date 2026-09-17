@@ -638,8 +638,10 @@ and TableSourceKind =
     | PtfTable of Expression * Expression option * Expression list option
     | DataChangeDelta of ResultOption * StatementKind * Expression option * Expression list option
     // 7.6 <table or query name>
+    // 7.6 <row pattern recognition clause and name> — the optional input name group
+    // ([ AS ] <correlation name> [ ( <derived column list> ) ]) IS the first argument;
+    // there is no separate table name.
     | MatchRecognize of
-        Expression *
         (Expression * Expression list option) option *
         RowPatternRecognition *
         (Expression * Expression list option) option
@@ -1792,7 +1794,8 @@ and RevokePrivilegeStatement =
 and DeclareCursorStatement =
     { Name: Expression
       Properties: CursorProperties
-      Specification: Query }
+      Specification: Query
+      Updatability: LockingClause option }
 
 // 14.2 <cursor sensitivity> ::= SENSITIVE | INSENSITIVE | ASENSITIVE
 and CursorSensitivity =

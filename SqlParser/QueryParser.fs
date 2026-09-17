@@ -331,8 +331,16 @@ module QueryParser =
                   pIdentifierExpression .>> pKeyword "INNER" .>>. pJsonTablePlanPrimary
                   |>> fun (n, p) -> JsonPlanInner(n, p)
               )
-              attempt (sepBy1 pJsonTablePlanPrimary (pKeyword "UNION") |>> JsonPlanUnion)
-              attempt (sepBy1 pJsonTablePlanPrimary (pKeyword "CROSS") |>> JsonPlanCross)
+              // 7.11 <JSON table plan union> ::= <plan primary> UNION <plan primary>
+              //     [ { UNION <plan primary> }... ] — at least TWO operands.
+              attempt (
+                  pJsonTablePlanPrimary .>>. many1 (pKeyword "UNION" >>. pJsonTablePlanPrimary)
+                  |>> fun (h, t) -> JsonPlanUnion(h :: t)
+              )
+              attempt (
+                  pJsonTablePlanPrimary .>>. many1 (pKeyword "CROSS" >>. pJsonTablePlanPrimary)
+                  |>> fun (h, t) -> JsonPlanCross(h :: t)
+              )
               pIdentifierExpression |>> JsonPlanName ]
 
     // 7.11 <JSON table default plan choices>
@@ -450,7 +458,15 @@ module QueryParser =
                       |>> fun ((expr, ord), (name, cols)) -> Unnest(expr, Option.defaultValue false ord, name, cols)
                   )
                   |> withTablePosition
-                  attempt (between (token (pstring "(")) (token (pstring ")")) pTableReference)
+                  // 7.6 <parenthesized joined table> ::= ( <parenthesized joined table> )
+                  //     | ( <joined table> ) — only JOINED tables may be parenthesized.
+                  attempt (
+                      between (token (pstring "(")) (token (pstring ")")) pTableReference
+                      >>= fun joined ->
+                          match joined.Kind with
+                          | TableSourceKind.JoinedTable _ -> preturn joined
+                          | _ -> fail "<parenthesized joined table> requires a joined table"
+                  )
                   // <only spec> ::= ONLY ( <table or query name> ) [ <correlation or recognition> ]
                   attempt (
                       pKeyword "ONLY"
@@ -501,16 +517,16 @@ module QueryParser =
                           DataChangeDelta(result, stmt, alias, cols)
                   )
                   |> withTablePosition
-                  // <JSON table> <correlation or recognition>
+                  // <JSON table> <correlation or recognition> — the correlation is MANDATORY.
                   attempt (
-                      pJsonTable .>>. opt (attempt pCorrelationOrRecognition)
-                      |>> fun (stmt, corr) -> JsonTable(stmt, corr)
+                      pJsonTable .>>. pCorrelationOrRecognition
+                      |>> fun (stmt, corr) -> JsonTable(stmt, Some corr)
                   )
                   |> withTablePosition
-                  // <JSON table primitive> <correlation name>
+                  // <JSON table primitive> <correlation name> — the correlation name is MANDATORY.
                   attempt (
-                      pJsonTablePrimitive .>>. opt (attempt pCorrelationName)
-                      |>> fun (stmt, name) -> JsonTablePrimitive(stmt, name)
+                      pJsonTablePrimitive .>>. pCorrelationName
+                      |>> fun (stmt, name) -> JsonTablePrimitive(stmt, Some name)
                   )
                   |> withTablePosition
                   // <table or query name> <row pattern recognition clause and name>
@@ -518,11 +534,17 @@ module QueryParser =
                   //       [ [ AS ] <output name> [ ( <output cols> ) ] ]
                   // Must precede the plain <table or query name> branch below so that
                   // "t MATCH_RECOGNIZE(...)" is not consumed as just "t".
+                  // <row pattern recognition clause and name> ::=
+                  //   [ [ AS ] <row pattern input name> [ <input derived column list> ] ]
+                  //       <row pattern recognition clause>
+                  //       [ [ AS ] <row pattern output name> [ <output derived column list> ] ]
+                  // <row pattern input name> ::= <correlation name> — a plain identifier,
+                  // NOT a schema-qualified name; there is exactly ONE optional name group
+                  // before the recognition clause.
                   attempt (
-                      pSchemaQualifiedNameExpression
-                      .>>. opt (
+                      opt (
                           attempt (
-                              pCorrelationName
+                              opt (pKeyword "AS") >>. pCorrelationName
                               .>>. opt (
                                   between
                                       (token (pstring "("))
@@ -534,7 +556,7 @@ module QueryParser =
                       .>>. pRowPatternRecognitionClause
                       .>>. opt (
                           attempt (
-                              pCorrelationName
+                              opt (pKeyword "AS") >>. pCorrelationName
                               .>>. opt (
                                   between
                                       (token (pstring "("))
@@ -543,7 +565,7 @@ module QueryParser =
                               )
                           )
                       )
-                      |>> fun (((name, input), recog), output) -> MatchRecognize(name, input, recog, output)
+                      |>> fun ((input, recog), output) -> MatchRecognize(input, recog, output)
                   )
                   |> withTablePosition
                   // <table or query name> [ <query system time period specification> ]
@@ -634,17 +656,17 @@ module QueryParser =
                 else
                     pJoinType
 
-            joinType
-            .>>. pTablePrimary
-            .>>. opt (attempt pPartitionedJoinColumnReferenceList)
-            .>>. opt pJoinSpecification
-            |>> fun (((jt, right), partitionBy), cond) ->
-                let condition, usingAlias =
-                    match cond with
-                    | Some(c, a) -> Some c, a
-                    | None -> None, None
-
-                Option.defaultValue false nat, jt, right, condition, usingAlias, partitionBy
+            joinType .>>. pTablePrimary
+            >>= fun (jt, right) ->
+                // 7.10 <qualified join> ::= { <table reference> | <partitioned join table> }
+                //     [ <join type> ] JOIN <table reference> <join specification>
+                // <cross join> and <natural join> have NO <join specification> slot.
+                if jt = CrossJoin || Option.isSome nat then
+                    preturn (Option.defaultValue false nat, jt, right, None, None, None)
+                else
+                    (opt (attempt pPartitionedJoinColumnReferenceList) .>>. pJoinSpecification)
+                    |>> fun (partitionBy, (cond, usingAlias)) ->
+                        (Option.defaultValue false nat, jt, right, Some cond, usingAlias, partitionBy)
 
     // 7.6 <table reference> ::= <table factor> | <joined table>
     pTableReferenceRef.Value <-
@@ -820,7 +842,7 @@ module QueryParser =
         )
         <|> attempt (
             getPosition
-            .>>. (pValueExpressionPrimaryStrict .>> token (pstring ".") .>> pchar '*' .>> ws)
+            .>>. (pValueExpressionPrimary .>> token (pstring ".") .>> pchar '*' .>> ws)
             .>>. pAllFieldsAsClause
             .>> ws
             |>> fun ((pos, expr), cols) ->
@@ -831,21 +853,31 @@ module QueryParser =
                 )
         )
 
+    // 7.16 <select sublist> ::= <derived column> | <qualified asterisk> | <all fields reference>
+    // (the bare <asterisk> alternative of <select list> is handled by pSelectList below;
+    // the expression parser no longer accepts a bare `*`, so no guard is needed here)
+    let pSelectSublist = pQualifiedAsterisk <|> pDerivedColumn
+
     // 7.16 <select list> ::= <asterisk> | <select sublist> [ { <comma> <select sublist> }... ]
-    let pSelectSublist =
-        pQualifiedAsterisk
-        <|> pDerivedColumn
-        <|> (pstring "*" .>> ws >>% ExpressionKind.Star |> withExprPosition
-             |>> fun e -> Column(e, None))
+    // A bare <asterisk> is an alternative to the whole sublist list, NOT a sublist
+    // itself — "SELECT *, a" is rejected.
+    let pSelectList =
+        (pstring "*" .>> ws .>>. getPosition
+         |>> fun (_, pos) ->
+             [ Column(
+                   { Expression.Kind = ExpressionKind.Star
+                     Pos = { Line = pos.Line; Column = pos.Column } },
+                   None
+               ) ])
+        <|> sepBy1 pSelectSublist (token (pstring ","))
 
     // <query specification> — the SELECT core without ORDER BY/OFFSET/FETCH/LOCKING.
     // Those trailing clauses are parsed at the <query expression> level (7.17) so
     // they apply to the whole query, not just the last SELECT.
     let pSelectBase =
         pipe5
-            (pKeyword "SELECT" >>. pSetQuantifier
-             .>>. sepBy1 pSelectSublist (token (pstring ",")))
-            (opt (attempt pFromClause))
+            (pKeyword "SELECT" >>. pSetQuantifier .>>. pSelectList)
+            pFromClause
             (opt (attempt pWhereClause))
             (opt (attempt pGroupByClause))
             (opt (attempt pHavingClause))
@@ -865,7 +897,7 @@ module QueryParser =
 
             { IsDistinct = dist
               Columns = colsList
-              From = Option.defaultValue [] from
+              From = from
               Where = whr
               GroupBy = grpList
               GroupByDistinct = grpDistinct
@@ -906,16 +938,19 @@ module QueryParser =
                 { Kind = Literal(Number 1m)
                   Pos = { Line = pos.Line; Column = pos.Column } }
 
-            // <fetch first row count> ::= <simple value specification> (strict); <fetch first percentage> ::= <simple value specification> (strict) PERCENT
+            // <fetch first row count> ::= <simple value specification> (strict)
+            // <fetch first percentage> ::= <simple value specification> PERCENT — the
+            // quantity is MANDATORY in the percentage form.
             pKeyword "FETCH"
             >>. (pKeyword "FIRST" <|> pKeyword "NEXT")
-            >>. opt pSimpleValueSpecification
-            .>>. opt (pKeyword "PERCENT" >>% true)
+            >>. ((pSimpleValueSpecification .>>. opt (pKeyword "PERCENT" >>% true)
+                  |>> fun (count, isPercent) -> Some count, Option.defaultValue false isPercent)
+                 <|> preturn (None, false))
             .>> (attempt (pKeyword "ROWS") <|> pKeyword "ROW")
             .>>. (pKeyword "ONLY" >>% false <|> (pKeyword "WITH" >>. pKeyword "TIES" >>% true))
             |>> fun ((countOpt, isPercent), withTies) ->
                 { Count = Option.defaultValue defaultCount countOpt
-                  IsPercent = Option.defaultValue false isPercent
+                  IsPercent = isPercent
                   WithTies = withTies }
 
     // 7.17 [ <result offset clause> ] [ <fetch first clause> ]
@@ -983,12 +1018,9 @@ module QueryParser =
                   between
                       (token (pstring "("))
                       (token (pstring ")"))
-                      (pQueryExpressionBody
-                       .>>. opt pOrderByClause
-                       .>>. opt pOffsetFetch
-                       .>>. opt (attempt pUpdatabilityClause)
-                       |>> fun (((body, orderBy), limitOffset), locking) ->
-                           applyOrderByOffsetFetch (Option.defaultValue [] orderBy) limitOffset locking body)
+                      (pQueryExpressionBody .>>. opt pOrderByClause .>>. opt pOffsetFetch
+                       |>> fun ((body, orderBy), limitOffset) ->
+                           applyOrderByOffsetFetch (Option.defaultValue [] orderBy) limitOffset None body)
               )
               pSimpleTable ]
 
@@ -1091,17 +1123,13 @@ module QueryParser =
                       .>>. pQueryExpressionBody
                       .>>. opt pOrderByClause
                       .>>. opt pOffsetFetch
-                      .>>. opt (attempt pUpdatabilityClause)
-                      |>> fun (((((recu, ctes), body), orderBy), limitOffset), locking) ->
-                          (WithQuery(recu, ctes, body), Option.defaultValue [] orderBy, limitOffset, locking)
+                      |>> fun ((((recu, ctes), body), orderBy), limitOffset) ->
+                          (WithQuery(recu, ctes, body), Option.defaultValue [] orderBy, limitOffset, None)
                   )
                   attempt (
-                      pQueryExpressionBody
-                      .>>. opt pOrderByClause
-                      .>>. opt pOffsetFetch
-                      .>>. opt (attempt pUpdatabilityClause)
-                      |>> fun (((body, orderBy), limitOffset), locking) ->
-                          (body, Option.defaultValue [] orderBy, limitOffset, locking)
+                      pQueryExpressionBody .>>. opt pOrderByClause .>>. opt pOffsetFetch
+                      |>> fun ((body, orderBy), limitOffset) ->
+                          (body, Option.defaultValue [] orderBy, limitOffset, None)
                   ) ]
 
         pWithOrQuery

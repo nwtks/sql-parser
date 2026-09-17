@@ -4,8 +4,13 @@ open Xunit
 open SqlParser
 
 // 22.1 <direct SQL statement> requires a trailing <semicolon>.
+// Routine bodies in this file use "SELECT 1" / "SELECT 2"; 7.16 <table expression>
+// requires a <from clause>, so the body statements get one appended here.
 let parse (sql: string) =
-    match SqlParser.parse (sql.TrimEnd() + ";") with
+    let s =
+        sql.TrimEnd().Replace("SELECT 1", "SELECT 1 FROM t").Replace("SELECT 2;", "SELECT 2 FROM t;")
+
+    match SqlParser.parse (s + ";") with
     | Ok res -> res.Kind
     | Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
 
@@ -150,6 +155,10 @@ let ``referential triggered action verification`` () =
             Assert.Equal(Some ReferentialAction.NoAction, r.OnUpdate)
         | None -> Assert.Fail "Expected a column-level REFERENCES"
     | res -> Assert.Fail(sprintf "Expected delete-then-update rules, got %A" res)
+
+    // 11.8 — at most ONE <update rule> and ONE <delete rule>; duplicates are rejected.
+    parseFails "CREATE TABLE t (a INT REFERENCES p ON UPDATE CASCADE ON UPDATE SET NULL)"
+    parseFails "CREATE TABLE t (a INT REFERENCES p ON DELETE NO ACTION ON DELETE RESTRICT)"
 
 [<Fact>]
 let ``Column-level constraints verification`` () =
@@ -859,6 +868,24 @@ let ``CREATE DOMAIN verification`` () =
 let ``CREATE DOMAIN requires a data type`` () = parseFails "CREATE DOMAIN d"
 
 [<Fact>]
+let ``CREATE DOMAIN type is a predefined type (11.34)`` () =
+    // A UDT name is NOT a <predefined type>.
+    parseFails "CREATE DOMAIN d my_udt"
+
+[<Fact>]
+let ``CREATE TYPE representation is a predefined or collection type (11.51)`` () =
+    // A bare UDT name is NOT a <predefined type>; `<udt> ARRAY` IS a <collection type>.
+    parseFails "CREATE TYPE t AS my_udt"
+
+    match parse "CREATE TYPE t AS my_udt ARRAY" with
+    | CreateType { Representation = Some(TypeRepresentation.Predefined(ArrayType(UserDefinedType _, None))) } -> ()
+    | res -> Assert.Fail(sprintf "Expected collection representation, got %A" res)
+
+    match parse "CREATE TYPE t AS INT" with
+    | CreateType { Representation = Some(TypeRepresentation.Predefined Integer) } -> ()
+    | res -> Assert.Fail(sprintf "Expected predefined representation, got %A" res)
+
+[<Fact>]
 let ``ALTER DOMAIN verification`` () =
     match parse "ALTER DOMAIN d SET DEFAULT 10" with
     | AlterDomain({ Kind = Identifier "D" }, DomainAlteration.SetDefault _) -> ()
@@ -966,6 +993,10 @@ let ``CREATE TRIGGER BEFORE INSERT verification`` () =
                                  When = None
                                  Statement = SingleStatement(Insert _) } } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateTrigger BEFORE INSERT, got %A" res)
+
+[<Fact>]
+let ``CREATE TRIGGER REFERENCING requires at least one transition table (11.49)`` () =
+    parseFails "CREATE TRIGGER trg AFTER INSERT ON t REFERENCING FOR EACH ROW DELETE FROM t"
 
 [<Fact>]
 let ``CREATE TRIGGER INSTEAD OF with transition tables verification`` () =
@@ -1828,6 +1859,26 @@ let ``ALTER SEQUENCE verification`` () =
     match parse "ALTER SEQUENCE order_seq INCREMENT BY 5 MAXVALUE 1000" with
     | AlterSequence({ Kind = Identifier "ORDER_SEQ" }, [ IncrementBy 5m; MaxValue(Some 1000m) ]) -> ()
     | res -> Assert.Fail(sprintf "Expected AlterSequence INCREMENT, got %A" res)
+
+[<Fact>]
+let ``Sequence generator options do not leak across rules (11.72 / 11.73)`` () =
+    // 11.72 <sequence generator option> has no RESTART
+    parseFails "CREATE SEQUENCE s RESTART"
+    // 11.73 <alter sequence generator option> has no AS / START WITH
+    parseFails "ALTER SEQUENCE s AS INT"
+    parseFails "ALTER SEQUENCE s START WITH 5"
+    // 11.72 <common sequence generator option> (identity) has no AS / RESTART
+    parseFails "CREATE TABLE t (id INT GENERATED ALWAYS AS IDENTITY (RESTART))"
+    parseFails "CREATE TABLE t (id INT GENERATED ALWAYS AS IDENTITY (AS INT))"
+
+    // positive: each rule accepts its own option set
+    match parse "CREATE SEQUENCE s AS INT" with
+    | CreateSequence(_, [ DataTypeOption _ ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateSequence AS INT, got %A" res)
+
+    match parse "ALTER SEQUENCE s RESTART" with
+    | AlterSequence({ Kind = Identifier "S" }, [ Restart None ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected AlterSequence RESTART, got %A" res)
 
 [<Fact>]
 let ``CREATE INDEX is rejected (not in SQL-2016)`` () =

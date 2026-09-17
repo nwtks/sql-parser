@@ -6,18 +6,15 @@ open SqlParser.ExpressionParser
 open SqlParser.SchemaParser
 
 module AccessControlParser =
-    // 12.3 <grantor> ::= CURRENT_USER | CURRENT_ROLE
-    // (an <authorization identifier> is also accepted in the <grantor> position — see
-    //  docs/trade-off.md; the keywords are reserved words, so pIdentifierExpression fails on
-    //  them and the keyword alternatives are reachable)
+    // 12.3 <grantor> ::= CURRENT_USER | CURRENT_ROLE — a closed keyword set; an
+    // <authorization identifier> is NOT a <grantor>.
     let pGrantor =
-        pIdentifierExpression |>> Grantor.AuthorizationId
-        <|> (pKeyword "CURRENT_USER" >>% Grantor.CurrentUser)
+        pKeyword "CURRENT_USER" >>% Grantor.CurrentUser
         <|> (pKeyword "CURRENT_ROLE" >>% Grantor.CurrentRole)
 
     // 12.3 <grantee> ::= PUBLIC | <authorization identifier>
     let pGrantee =
-        (pKeyword "PUBLIC" >>% Grantee.Public)
+        pKeyword "PUBLIC" >>% Grantee.Public
         <|> (pIdentifierExpression |>> Grantee.AuthorizationId)
 
     // 12.3 <privileges> ::= ALL PRIVILEGES | <action> [ { <comma> <action> }... ]
@@ -88,11 +85,11 @@ module AccessControlParser =
         choice
             [ attempt (
                   pRoutineType .>>. pSchemaQualifiedNameExpression
-                  |>> fun (rt, name) -> (None, Some rt, name)
+                  |>> fun (rt, name) -> None, Some rt, name
               )
               attempt (
                   opt pKind .>>. pSchemaQualifiedNameExpression
-                  |>> fun (kind, name) -> (kind, None, name)
+                  |>> fun (kind, name) -> kind, None, name
               ) ]
 
     // 12.2 <grant privilege statement> ::= GRANT <privileges> TO <grantee> [ { , <grantee> }... ]

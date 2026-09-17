@@ -4,8 +4,50 @@ open Xunit
 open SqlParser
 
 // 22.1 <direct SQL statement> requires a trailing <semicolon>.
+// 7.16 <table expression> requires a <from clause>: bare expressions are wrapped
+// in "SELECT ... FROM t", and SELECT statements without a top-level FROM get one
+// appended (a FROM inside parentheses does not count).
+let private hasOuterFrom (s: string) =
+    let isIdentChar c =
+        System.Char.IsLetterOrDigit c || c = '_'
+
+    let rec go depth i =
+        if i >= s.Length then
+            false
+        elif s.[i] = '(' then
+            go (depth + 1) (i + 1)
+        elif s.[i] = ')' then
+            go (depth - 1) (i + 1)
+        elif
+            depth = 0
+            && i + 4 <= s.Length
+            && s.Substring(i, 4).ToUpperInvariant() = "FROM"
+            && (i = 0 || s.[i - 1] = ' ')
+            && (i + 4 = s.Length || not (isIdentChar s.[i + 4]))
+        then
+            true
+        else
+            go depth (i + 1)
+
+    go 0 0
+
 let parseExpr (sql: string) =
-    match SqlParser.parse (sql.TrimEnd() + ";") with
+    let s = sql.TrimEnd()
+    let upper = s.ToUpperInvariant()
+
+    let stmt =
+        if upper.StartsWith("SELECT") then
+            if hasOuterFrom s then s else s + " FROM t"
+        elif
+            upper.StartsWith("WITH")
+            || upper.StartsWith("VALUES")
+            || upper.StartsWith("TABLE")
+        then
+            s
+        else
+            "SELECT " + s + " FROM t"
+
+    match SqlParser.parse (stmt + ";") with
     | Ok { Kind = Select(SelectQuery s) } -> s.Columns.[0] |> fun (Column(e, _)) -> e
     | Ok res -> failwithf "Expected Select, got %A" res
     | Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
@@ -51,9 +93,15 @@ let ``ANY and SOME stay usable as routine names`` () =
 
 [<Fact>]
 let ``PERIOD value expression verification`` () =
-    match parse "SELECT PERIOD (s, e)" with
-    | PeriodValue({ Kind = Identifier "S" }, { Kind = Identifier "E" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected PeriodValue, got %A" res)
+    // 8.20 — PERIOD ( ... ) is a <period predicand>, valid only inside a
+    // <period predicate>; it cannot leak as a standalone atom.
+    parseFails "SELECT PERIOD (s, e)"
+
+    match parse "SELECT PERIOD (s, e) EQUALS PERIOD (t, u)" with
+    | PeriodPredicate(PeriodEquals,
+                      { Kind = PeriodValue({ Kind = Identifier "S" }, { Kind = Identifier "E" }) },
+                      { Kind = PeriodValue({ Kind = Identifier "T" }, { Kind = Identifier "U" }) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected PeriodEquals, got %A" res)
 
 [<Fact>]
 let ``BETWEEN verification`` () =
@@ -64,6 +112,34 @@ let ``BETWEEN verification`` () =
                              { Kind = Literal(Number 1m) },
                              { Kind = Literal(Number 10m) }) -> ()
     | res -> Assert.Fail(sprintf "Expected Between, got %A" res)
+
+[<Fact>]
+let ``Predicate part-2 operands are row value predicands (8.x)`` () =
+    // A TOP-LEVEL boolean-producing expression is not a <row value predicand>.
+    parseFails "SELECT 1 BETWEEN 1 = 1 AND 2"
+    parseFails "SELECT 'a' LIKE 'b' = 'c'"
+    parseFails "SELECT 1 IN (1 = 2)"
+    parseFails "SELECT x IS DISTINCT FROM 1 = 2"
+    parseFails "SELECT x OVERLAPS 1 = 2"
+    parseFails "SELECT x MEMBER OF 1 = 2"
+    parseFails "SELECT x LIKE_REGEX 'a' FLAG 'i' = 'j'"
+
+    // NOTE: the check is on the top-level Kind, and the AST does not keep a
+    // parenthesized node — so a parenthesized boolean expression is rejected too
+    // (slightly stricter than the grammar; see docs/trade-off.md).
+    parseFails "SELECT x BETWEEN (1 = 1) AND 2"
+
+[<Fact>]
+let ``When operands are row value predicands (6.12)`` () =
+    parseFails "SELECT CASE x WHEN 1 AND 2 THEN 1 END"
+
+    // A parenthesized boolean form is rejected too (the AST drops the parens).
+    parseFails "SELECT CASE x WHEN (1 = 1) THEN 1 ELSE 0 END"
+
+    // A non-boolean parenthesized operand stays legal.
+    match parse "SELECT CASE x WHEN (1 + 2) THEN 1 ELSE 0 END" with
+    | Case(Some { Kind = Identifier "X" }, _, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected simple CASE, got %A" res)
 
 [<Fact>]
 let ``IN list verification`` () =
@@ -105,11 +181,11 @@ let ``IS TRUE FALSE UNKNOWN verification`` () =
 
 [<Fact>]
 let ``IS DISTINCT FROM predicate verification`` () =
-    match parse "SELECT x IS DISTINCT FROM y" with
+    match parse "SELECT x IS DISTINCT FROM y FROM t" with
     | IsDistinctFrom({ Kind = Identifier "X" }, false, { Kind = Identifier "Y" }) -> ()
     | res -> Assert.Fail(sprintf "Expected IsDistinctFrom, got %A" res)
 
-    match parse "SELECT x IS NOT DISTINCT FROM y" with
+    match parse "SELECT x IS NOT DISTINCT FROM y FROM t" with
     | IsDistinctFrom({ Kind = Identifier "X" }, true, { Kind = Identifier "Y" }) -> ()
     | res -> Assert.Fail(sprintf "Expected IsDistinctFrom NOT, got %A" res)
 

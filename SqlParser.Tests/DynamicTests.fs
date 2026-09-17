@@ -62,21 +62,24 @@ let ``SET DESCRIPTOR VALUE verification`` () =
 
 [<Fact>]
 let ``COPY DESCRIPTOR verification`` () =
-    match parseStatement "COPY d1 TO d2" with
+    // 20.6 — the target descriptor name is a <PTF descriptor name> (PTF <simple value spec>).
+    parseStatementFails "COPY d1 TO d2"
+
+    match parseStatement "COPY d1 TO PTF ?" with
     | CopyDescriptor { Source = { Kind = Identifier "D1" }
                        SourceItem = None
                        Options = None
-                       Target = { Kind = Identifier "D2" }
+                       Target = { Kind = Parameter "?" }
                        TargetItem = None } -> ()
     | res -> Assert.Fail(sprintf "Expected CopyDescriptor, got %A" res)
 
 [<Fact>]
 let ``COPY DESCRIPTOR VALUE verification`` () =
-    match parseStatement "COPY d1 VALUE 1 (NAME, TYPE) TO d2 VALUE 2" with
+    match parseStatement "COPY d1 VALUE 1 (NAME, TYPE) TO PTF ? VALUE 2" with
     | CopyDescriptor { Source = { Kind = Identifier "D1" }
                        SourceItem = Some { Kind = Literal(Number 1m) }
                        Options = Some [ "NAME"; "TYPE" ]
-                       Target = { Kind = Identifier "D2" }
+                       Target = { Kind = Parameter "?" }
                        TargetItem = Some { Kind = Literal(Number 2m) } } -> ()
     | res -> Assert.Fail(sprintf "Expected CopyDescriptor VALUE, got %A" res)
 

@@ -30,17 +30,17 @@ let ``ORDER BY NULLS verification`` () =
         | Select(SelectQuery s) -> s.OrderBy.[0]
         | res -> failwithf "Expected Select, got %A" res
 
-    match parseOrder "SELECT id ORDER BY id DESC NULLS FIRST" with
+    match parseOrder "SELECT id FROM t ORDER BY id DESC NULLS FIRST" with
     | { Kind = Identifier "ID" }, false, Some NullsFirst -> ()
     | res -> Assert.Fail(sprintf "Expected id DESC NULLS FIRST, got %A" res)
 
-    match parseOrder "SELECT id ORDER BY name NULLS LAST" with
+    match parseOrder "SELECT id FROM t ORDER BY name NULLS LAST" with
     | { Kind = Identifier "NAME" }, true, Some NullsLast -> ()
     | res -> Assert.Fail(sprintf "Expected name ASC NULLS LAST, got %A" res)
 
 [<Fact>]
 let ``Window functions verification`` () =
-    match parse "SELECT SUM(salary) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)" with
+    match parse "SELECT SUM(salary) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM t" with
     | Select(SelectQuery s) ->
         match s.Columns.[0] with
         | Column({ Kind = WindowFunction { Function = { Kind = Identifier "SUM" }
@@ -56,7 +56,7 @@ let ``Window functions verification`` () =
         | res -> Assert.Fail(sprintf "Expected WindowFunction, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
-    match parse "SELECT AVG(price) OVER (ORDER BY dt RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING)" with
+    match parse "SELECT AVG(price) OVER (ORDER BY dt RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t" with
     | Select(SelectQuery s) ->
         match s.Columns.[0] with
         | Column({ Kind = WindowFunction { Function = { Kind = Identifier "AVG" }
@@ -77,7 +77,7 @@ let ``MATCH_RECOGNIZE row pattern quantifiers verification`` () =
     match parse "SELECT * FROM t MATCH_RECOGNIZE (PATTERN (A{2,3} B{2}) DEFINE A AS a > 0, B AS b > 0)" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = MatchRecognize(_, _, recog, _) } ] ->
+        | [ { Kind = MatchRecognize(_, recog, _) } ] ->
             match recog.Common.Pattern.Terms with
             | [ { Factors = [ factorA; factorB ] } ] ->
                 match factorA.Primary, factorA.Quantifier with
@@ -103,7 +103,7 @@ let ``MATCH_RECOGNIZE plus and question quantifiers verification`` () =
     with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = MatchRecognize(_, _, recog, _) } ] ->
+        | [ { Kind = MatchRecognize(_, recog, _) } ] ->
             match recog.Common.Pattern.Terms with
             | [ { Factors = [ a; b; c; d ] } ] ->
                 Assert.Equal(Some(RowPatternQuantifier.Plus false), a.Quantifier)
@@ -119,7 +119,7 @@ let ``MATCH_RECOGNIZE row pattern anchors verification`` () =
     match parse "SELECT * FROM t MATCH_RECOGNIZE (PATTERN (^ A $) DEFINE A AS a > 0)" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = MatchRecognize(_, _, recog, _) } ] ->
+        | [ { Kind = MatchRecognize(_, recog, _) } ] ->
             match recog.Common.Pattern.Terms with
             | [ { Factors = [ startFactor; aFactor; endFactor ] } ] ->
                 Assert.Equal(RowPatternAnchorStart, startFactor.Primary)
@@ -138,7 +138,7 @@ let ``MATCH_RECOGNIZE row pattern alternation verification`` () =
     match parse "SELECT * FROM t MATCH_RECOGNIZE (PATTERN (A | B) DEFINE A AS a > 0, B AS b > 0)" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = MatchRecognize(_, _, recog, _) } ] ->
+        | [ { Kind = MatchRecognize(_, recog, _) } ] ->
             match recog.Common.Pattern.Terms with
             | [ { Factors = [ factorA ] }; { Factors = [ factorB ] } ] ->
                 match factorA.Primary, factorB.Primary with
@@ -153,7 +153,7 @@ let ``MATCH_RECOGNIZE row pattern exclusion verification`` () =
     match parse "SELECT * FROM t MATCH_RECOGNIZE (PATTERN (A {- B -}) DEFINE A AS a > 0, B AS b > 0)" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = MatchRecognize(_, _, recog, _) } ] ->
+        | [ { Kind = MatchRecognize(_, recog, _) } ] ->
             match recog.Common.Pattern.Terms with
             | [ { Factors = [ factorA; excludeFactor ] } ] ->
                 match factorA.Primary with
@@ -170,7 +170,7 @@ let ``MATCH_RECOGNIZE row pattern exclusion verification`` () =
 
 [<Fact>]
 let ``WITH SEARCH clause verification`` () =
-    match parse "WITH RECURSIVE t(n) AS (SELECT 1) SEARCH DEPTH FIRST BY n SET ord SELECT * FROM t" with
+    match parse "WITH RECURSIVE t(n) AS (SELECT 1 FROM u) SEARCH DEPTH FIRST BY n SET ord SELECT * FROM t" with
     | WithStatement(true, [ cte ], _) ->
         match cte.SearchClause with
         | Some { IsDepthFirst = true
@@ -179,7 +179,7 @@ let ``WITH SEARCH clause verification`` () =
         | res -> Assert.Fail(sprintf "Expected WITH SEARCH DEPTH, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
-    match parse "WITH t AS (SELECT 1) SEARCH BREADTH FIRST BY n SET ord SELECT * FROM t" with
+    match parse "WITH t AS (SELECT 1 FROM u) SEARCH BREADTH FIRST BY n SET ord SELECT * FROM t" with
     | WithStatement(false, [ cte ], _) ->
         match cte.SearchClause with
         | Some { IsDepthFirst = false } -> ()
@@ -188,7 +188,9 @@ let ``WITH SEARCH clause verification`` () =
 
 [<Fact>]
 let ``WITH CYCLE clause verification`` () =
-    match parse "WITH RECURSIVE t(n) AS (SELECT 1) CYCLE n SET is_cycle TO 1 DEFAULT 0 USING path SELECT * FROM t" with
+    match
+        parse "WITH RECURSIVE t(n) AS (SELECT 1 FROM u) CYCLE n SET is_cycle TO 1 DEFAULT 0 USING path SELECT * FROM t"
+    with
     | WithStatement(true, [ cte ], _) ->
         match cte.CycleClause with
         | Some { CycleColumns = [ { Kind = Identifier "N" } ]
@@ -210,10 +212,18 @@ let ``interval term accepts a numeric factor on the right of an operator (6.37)`
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
-let ``interval term rejects an interval factor on the right of an operator (6.37)`` () =
-    // <factor> (6.29) has no [ <interval qualifier> ] suffix, unlike <interval factor>.
-    parseFails "SELECT * FROM t FOR SYSTEM_TIME AS OF CURRENT_DATE + INTERVAL '1' DAY * ? DAY"
-    parseFails "SELECT * FROM t FOR SYSTEM_TIME AS OF CURRENT_DATE + INTERVAL '1' DAY * x DAY"
+let ``interval term accepts an interval factor on the right of an operator (6.37)`` () =
+    // The 4th alternative <term> <asterisk> <interval factor> admits a qualifier on the
+    // right (<interval primary> ::= <value expression primary> [ <interval qualifier> ]).
+    // Interval- vs numeric-valued operands are syntactically indistinguishable, so the
+    // distinction is semantic (see docs/trade-off.md).
+    match parse "SELECT * FROM t FOR SYSTEM_TIME AS OF CURRENT_DATE + INTERVAL '1' DAY * ? DAY" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = SystemTime(_, SystemTimeSpec.AsOf { Kind = BinaryOp(Add, _, { Kind = BinaryOp(Multiply, _, _) }) }) } ] ->
+            ()
+        | res -> Assert.Fail(sprintf "Expected an interval term with an interval factor, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``Table value constructor as query verification`` () =
@@ -346,12 +356,11 @@ let ``MATCH_RECOGNIZE verification`` () =
     with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = MatchRecognize(name, input, recog, output) } ] ->
-            match name with
-            | { Kind = Identifier "T" } -> ()
-            | res -> Assert.Fail(sprintf "Expected table T, got %A" res)
+        | [ { Kind = MatchRecognize(input, recog, output) } ] ->
+            match input with
+            | Some({ Kind = Identifier "T" }, None) -> ()
+            | res -> Assert.Fail(sprintf "Expected input name T, got %A" res)
 
-            Assert.Equal(None, input)
             Assert.Equal(None, output)
 
             match recog.PartitionBy with
@@ -396,7 +405,7 @@ let ``MATCH_RECOGNIZE full clauses verification`` () =
     with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = MatchRecognize(_, None, recog, None) } ] ->
+        | [ { Kind = MatchRecognize(Some({ Kind = Identifier "T" }, None), recog, None) } ] ->
             match recog.Common with
             | { AfterMatch = Some SkipToNextRow
                 InitialOrSeek = Some true
@@ -424,22 +433,20 @@ let ``MATCH_RECOGNIZE full clauses verification`` () =
 [<Fact>]
 let ``MATCH_RECOGNIZE input output names verification`` () =
     // OUT is a reserved word, so the output name must be a non-reserved identifier.
-    match parse "SELECT * FROM t AS inp MATCH_RECOGNIZE (PATTERN (A) DEFINE A AS a > 0) AS out_t" with
+    // <row pattern input name> is a <correlation name> — "t" IS the input name;
+    // a separate "t AS inp" table+alias pair is not part of the grammar.
+    match parse "SELECT * FROM t MATCH_RECOGNIZE (PATTERN (A) DEFINE A AS a > 0) AS out_t" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = MatchRecognize(name, input, _, output) } ] ->
-            match name with
-            | { Kind = Identifier "T" } -> ()
-            | res -> Assert.Fail(sprintf "Expected table T, got %A" res)
-
+        | [ { Kind = MatchRecognize(input, _, output) } ] ->
             match input with
             | Some(inp, cols) ->
                 match inp with
-                | { Kind = Identifier "INP" } -> ()
-                | res -> Assert.Fail(sprintf "Expected input name INP, got %A" res)
+                | { Kind = Identifier "T" } -> ()
+                | res -> Assert.Fail(sprintf "Expected input name T, got %A" res)
 
                 Assert.Equal(None, cols)
-            | res -> Assert.Fail(sprintf "Expected input name, got %A" res)
+            | res -> Assert.Fail(sprintf "Expected input name T, got %A" res)
 
             match output with
             | Some(out, cols) ->
@@ -458,10 +465,10 @@ let ``MATCH_RECOGNIZE missing DEFINE is rejected`` () =
 
 [<Fact>]
 let ``JSON_TABLE formatted column verification`` () =
-    match parse "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (c VARCHAR(100) FORMAT JSON WITH WRAPPER))" with
+    match parse "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (c VARCHAR(100) FORMAT JSON WITH WRAPPER)) AS jt" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = JsonTable(stmt, None) } ] ->
+        | [ { Kind = JsonTable(stmt, Some _) } ] ->
             match stmt.Columns with
             | [ JsonFormatted { Name = { Kind = Identifier "C" }
                                 DataType = Varchar(Some 100)
@@ -501,11 +508,12 @@ let ``JSON_TABLE column kinds are not interchangeable with JSON_TABLE_PRIMITIVE`
 [<Fact>]
 let ``JSON_TABLE nested columns verification`` () =
     match
-        parse "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT, NESTED PATH '$.items' AS it COLUMNS (b VARCHAR(10))))"
+        parse
+            "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT, NESTED PATH '$.items' AS it COLUMNS (b VARCHAR(10)))) AS jt"
     with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = JsonTable(stmt, None) } ] ->
+        | [ { Kind = JsonTable(stmt, Some _) } ] ->
             match stmt.Columns with
             | [ JsonRegular { Name = { Kind = Identifier "A" }
                               DataType = Integer
@@ -528,10 +536,10 @@ let ``JSON_TABLE nested columns verification`` () =
 
 [<Fact>]
 let ``JSON_TABLE plan clause verification`` () =
-    match parse "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN (p OUTER q))" with
+    match parse "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN (p OUTER q)) AS jt" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = JsonTable(stmt, None) } ] ->
+        | [ { Kind = JsonTable(stmt, Some _) } ] ->
             match stmt.Plan with
             | Some(JsonPlanOuter(name, JsonPlanPrimaryName qname)) ->
                 match name with
@@ -545,10 +553,10 @@ let ``JSON_TABLE plan clause verification`` () =
         | res -> Assert.Fail(sprintf "Expected JsonTable, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
-    match parse "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN DEFAULT (INNER, UNION))" with
+    match parse "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN DEFAULT (INNER, UNION)) AS jt" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = JsonTable(stmt, None) } ] ->
+        | [ { Kind = JsonTable(stmt, Some _) } ] ->
             match stmt.Plan with
             | Some(JsonPlanDefault { InnerOuter = Some "INNER"
                                      UnionCross = Some "UNION" }) -> ()
@@ -562,37 +570,39 @@ let ``JSON_TABLE plan primary forms verification`` () =
         match parse sql with
         | Select(SelectQuery s) ->
             match s.From with
-            | [ { Kind = JsonTable(stmt, None) } ] -> stmt.Plan
+            | [ { Kind = JsonTable(stmt, Some _) } ] -> stmt.Plan
             | res -> failwithf "Expected JsonTable, got %A" res
         | res -> failwithf "Expected Select, got %A" res
 
-    match planOf "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN (p INNER q))" with
+    match planOf "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN (p INNER q)) AS jt" with
     | Some(JsonPlanInner(_, JsonPlanPrimaryName _)) -> ()
     | res -> Assert.Fail(sprintf "Expected JsonPlanInner, got %A" res)
 
-    match planOf "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN (p UNION q))" with
+    match planOf "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN (p UNION q)) AS jt" with
     | Some(JsonPlanUnion [ JsonPlanPrimaryName _; JsonPlanPrimaryName _ ]) -> ()
     | res -> Assert.Fail(sprintf "Expected JsonPlanUnion, got %A" res)
 
-    match planOf "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN (p))" with
-    | Some(JsonPlanUnion [ JsonPlanPrimaryName _ ]) -> ()
+    // <JSON table plan> ::= <JSON table path name> | ... — a single path name is a
+    // valid plan (a one-element UNION is NOT).
+    match planOf "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN (p)) AS jt" with
+    | Some(JsonPlanName _) -> ()
     | res -> Assert.Fail(sprintf "Expected a single-name plan, got %A" res)
 
-    match planOf "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN ((p OUTER q)))" with
-    | Some(JsonPlanUnion [ JsonPlanPrimaryGroup(JsonPlanOuter(_, _)) ]) -> ()
-    | res -> Assert.Fail(sprintf "Expected JsonPlanPrimaryGroup, got %A" res)
+    // A parenthesized plan is a <plan primary>, not a <plan> — PLAN takes a plan,
+    // so PLAN ((p OUTER q)) is rejected.
+    parseFails "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN ((p OUTER q)))"
 
-    match planOf "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN DEFAULT (UNION, INNER))" with
+    match planOf "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN DEFAULT (UNION, INNER)) AS jt" with
     | Some(JsonPlanDefault { InnerOuter = Some "INNER"
                              UnionCross = Some "UNION" }) -> ()
     | res -> Assert.Fail(sprintf "Expected reversed JsonPlanDefault, got %A" res)
 
 [<Fact>]
 let ``JSON_TABLE error behavior verification`` () =
-    match parse "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) EMPTY ON ERROR)" with
+    match parse "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) EMPTY ON ERROR) AS jt" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = JsonTable({ OnError = Some JsonTableEmpty }, None) } ] -> ()
+        | [ { Kind = JsonTable({ OnError = Some JsonTableEmpty }, Some _) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected JsonTableEmpty, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
@@ -642,11 +652,16 @@ let ``JSON_TABLE missing columns is rejected`` () =
 [<Fact>]
 let ``JSON_TABLE_PRIMITIVE verification`` () =
     match
-        parse "SELECT * FROM JSON_TABLE_PRIMITIVE(doc, '$' COLUMNS (id FOR ORDINALITY, v FOR CHAINING) ERROR ON ERROR)"
+        parse
+            "SELECT * FROM JSON_TABLE_PRIMITIVE(doc, '$' COLUMNS (id FOR ORDINALITY, v FOR CHAINING) ERROR ON ERROR) AS jtp"
     with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = JsonTablePrimitive(stmt, None) } ] ->
+        | [ { Kind = JsonTablePrimitive(stmt, Some name) } ] ->
+            match name with
+            | { Kind = Identifier "JTP" } -> ()
+            | res -> Assert.Fail(sprintf "Expected alias JTP, got %A" res)
+
             match stmt.Columns with
             | [ JsonOrdinality { Kind = Identifier "ID" }; JsonChaining { Kind = Identifier "V" } ] -> ()
             | res -> Assert.Fail(sprintf "Expected primitive columns, got %A" res)
@@ -812,7 +827,7 @@ let ``VALUES as Table Source verification`` () =
 
 [<Fact>]
 let ``Subquery with Column Aliases verification`` () =
-    match parse "SELECT a, b FROM (SELECT 1, 2) AS t(a, b)" with
+    match parse "SELECT a, b FROM (SELECT 1, 2 FROM u) AS t(a, b)" with
     | Select(SelectQuery s) ->
         match s.From with
         | [ { Kind = Subquery(_,
@@ -823,7 +838,7 @@ let ``Subquery with Column Aliases verification`` () =
 
 [<Fact>]
 let ``Subquery with WITH clause verification`` () =
-    match parse "SELECT * FROM (WITH cte AS (SELECT 1 AS val) SELECT * FROM cte) AS t" with
+    match parse "SELECT * FROM (WITH cte AS (SELECT 1 AS val FROM u) SELECT * FROM cte) AS t" with
     | Select(SelectQuery q) ->
         match q.From with
         | [ { Kind = Subquery(WithQuery(false, [ { Name = { Kind = Identifier "CTE" } } ], _),
@@ -1063,7 +1078,7 @@ let ``All fields reference verification`` () =
         | res -> Assert.Fail(sprintf "Expected AllFieldsReference for f(x).*, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
-    // 7.16 <all fields reference> uses pValueExpressionPrimaryStrict: the primary is a
+    // 7.16 <all fields reference> uses pValueExpressionPrimary: the primary is a
     // grammar-shaped <value expression primary>, so predicates and the '*' wildcard are
     // rejected before the '.*'.
     parseFails "SELECT EXISTS (SELECT 1).* FROM t"
@@ -1167,6 +1182,57 @@ let ``FETCH percent and WITH TIES verification`` () =
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
+let ``Join specification rules (7.10)`` () =
+    // <qualified join> requires a <join specification>
+    parseFails "SELECT * FROM a JOIN b"
+    parseFails "SELECT * FROM a LEFT JOIN b"
+    // <cross join> / <natural join> have NO <join specification> slot
+    parseFails "SELECT * FROM a CROSS JOIN b ON a.x = b.x"
+    parseFails "SELECT * FROM a NATURAL JOIN b USING (x)"
+
+    // positive
+    match parse "SELECT * FROM a JOIN b ON a.x = b.x" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = JoinedTable _ } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected JoinedTable, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
+let ``Derived tables require a correlation (7.6)`` () =
+    parseFails "SELECT * FROM (SELECT 1 FROM t)"
+    parseFails "SELECT * FROM LATERAL (SELECT 1 FROM t)"
+    parseFails "SELECT * FROM UNNEST (x)"
+    parseFails "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT))"
+
+    // positive
+    match parse "SELECT * FROM (SELECT 1 FROM t) AS d" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = Subquery(_, { Kind = Identifier "D" }, _) } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected Subquery with alias, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
+let ``Only joined tables may be parenthesized (7.6)`` () = parseFails "SELECT * FROM (t)"
+
+[<Fact>]
+let ``A bare asterisk is not a select sublist (7.16)`` () =
+    parseFails "SELECT *, a FROM t"
+    parseFails "SELECT a, * FROM t"
+
+[<Fact>]
+let ``FETCH FIRST PERCENT requires a quantity (7.17)`` () =
+    parseFails "SELECT * FROM t FETCH FIRST PERCENT ROWS ONLY"
+
+[<Fact>]
+let ``A schema qualified name has at most three parts (5.4)`` () = parseFails "SELECT * FROM a.b.c.d"
+
+[<Fact>]
+let ``JSON table plans need at least two operands (7.11)`` () =
+    parseFails "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN (p UNION)) AS jt"
+
+[<Fact>]
 let ``UNION CORRESPONDING verification`` () =
     match parse "SELECT a FROM t1 UNION CORRESPONDING BY (a) SELECT a FROM t2" with
     | Select(SetOperation(_, op, _)) ->
@@ -1179,22 +1245,14 @@ let ``UNION CORRESPONDING verification`` () =
 
 [<Fact>]
 let ``Locking clause verification`` () =
-    match parse "SELECT * FROM users FOR UPDATE" with
-    | Select(SelectQuery s) -> Assert.Equal(Some(ForUpdate None), s.Locking)
-    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
-
-    match parse "SELECT * FROM users FOR READ ONLY" with
-    | Select(SelectQuery s) -> Assert.Equal(Some ForReadOnly, s.Locking)
-    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+    // 7.17 <query expression> has NO <updatability clause> slot — FOR UPDATE /
+    // FOR READ ONLY belong to the 14.3 <cursor specification> only.
+    parseFails "SELECT * FROM users FOR UPDATE"
+    parseFails "SELECT * FROM users FOR READ ONLY"
 
 [<Fact>]
 let ``Updatability clause OF column list verification`` () =
-    match parse "SELECT * FROM users FOR UPDATE OF a, b" with
-    | Select(SelectQuery s) ->
-        match s.Locking with
-        | Some(ForUpdate(Some [ { Kind = Identifier "A" }; { Kind = Identifier "B" } ])) -> ()
-        | other -> Assert.Fail(sprintf "Expected FOR UPDATE OF a, b, got %A" other)
-    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+    parseFails "SELECT * FROM users FOR UPDATE OF a, b"
 
 [<Fact>]
 let ``FOR SHARE is rejected (not in SQL-2016)`` () =
@@ -1232,7 +1290,7 @@ let ``Window partition with non-column reference is rejected`` () =
 
 [<Fact>]
 let ``Parenthesized query primary with ORDER BY verification`` () =
-    match parse "(SELECT 1 ORDER BY 1) UNION SELECT 2" with
+    match parse "(SELECT 1 FROM t ORDER BY 1) UNION SELECT 2 FROM t" with
     | Select(SetOperation(SelectQuery { OrderBy = [ { Kind = Literal(Number 1m) }, true, None ] },
                           { Kind = Union },
                           SelectQuery _)) -> ()
@@ -1241,32 +1299,32 @@ let ``Parenthesized query primary with ORDER BY verification`` () =
 [<Fact>]
 let ``Set operations verification`` () =
     let tests =
-        [ "SELECT 1 UNION SELECT 2",
+        [ "SELECT 1 FROM t UNION SELECT 2 FROM t",
           { Kind = Union
             IsAll = false
             IsDistinct = false
             Corresponding = None }
-          "SELECT 1 UNION ALL SELECT 2",
+          "SELECT 1 FROM t UNION ALL SELECT 2 FROM t",
           { Kind = Union
             IsAll = true
             IsDistinct = false
             Corresponding = None }
-          "SELECT 1 INTERSECT SELECT 2",
+          "SELECT 1 FROM t INTERSECT SELECT 2 FROM t",
           { Kind = Intersect
             IsAll = false
             IsDistinct = false
             Corresponding = None }
-          "SELECT 1 INTERSECT ALL SELECT 2",
+          "SELECT 1 FROM t INTERSECT ALL SELECT 2 FROM t",
           { Kind = Intersect
             IsAll = true
             IsDistinct = false
             Corresponding = None }
-          "SELECT 1 EXCEPT SELECT 2",
+          "SELECT 1 FROM t EXCEPT SELECT 2 FROM t",
           { Kind = Except
             IsAll = false
             IsDistinct = false
             Corresponding = None }
-          "SELECT 1 EXCEPT ALL SELECT 2",
+          "SELECT 1 FROM t EXCEPT ALL SELECT 2 FROM t",
           { Kind = Except
             IsAll = true
             IsDistinct = false
@@ -1279,7 +1337,7 @@ let ``Set operations verification`` () =
 
 [<Fact>]
 let ``INTERSECT binds tighter than UNION`` () =
-    match parse "SELECT 1 UNION SELECT 2 INTERSECT SELECT 3" with
+    match parse "SELECT 1 FROM t UNION SELECT 2 FROM t INTERSECT SELECT 3 FROM t" with
     | Select(SetOperation(SelectQuery _,
                           { Kind = Union },
                           SetOperation(SelectQuery _, { Kind = Intersect }, SelectQuery _))) -> ()
@@ -1287,7 +1345,7 @@ let ``INTERSECT binds tighter than UNION`` () =
 
 [<Fact>]
 let ``ORDER BY applies to whole set operation`` () =
-    match parse "SELECT 1 UNION SELECT 2 ORDER BY 1" with
+    match parse "SELECT 1 FROM t UNION SELECT 2 FROM t ORDER BY 1" with
     | Select(QueryExpression(SetOperation(SelectQuery _, _, SelectQuery _),
                              [ { Kind = Literal(Number 1m) }, _, _ ],
                              None,
@@ -1296,17 +1354,15 @@ let ``ORDER BY applies to whole set operation`` () =
 
 [<Fact>]
 let ``ORDER BY OFFSET FETCH and locking on a WITH statement verification`` () =
-    match
-        parse "WITH cte AS (SELECT 1) SELECT * FROM cte ORDER BY 1 OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY FOR READ ONLY"
-    with
+    match parse "WITH cte AS (SELECT 1 FROM t) SELECT * FROM cte ORDER BY 1 OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY" with
     | WithStatement(false, [ _ ], Select(SelectQuery s)) ->
         match s.OrderBy, s.Fetch, s.Locking with
-        | [ ({ Kind = Literal(Number 1m) }, _, _) ], Some { WithTies = false }, Some ForReadOnly -> ()
+        | [ ({ Kind = Literal(Number 1m) }, _, _) ], Some { WithTies = false }, None -> ()
         | res -> Assert.Fail(sprintf "Expected ORDER BY/OFFSET/FETCH/locking, got %A" res)
     | res -> Assert.Fail(sprintf "Expected WithStatement, got %A" res)
 
 [<Fact>]
 let ``OFFSET and FETCH on a set operation verification`` () =
-    match parse "SELECT 1 UNION SELECT 2 OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY" with
+    match parse "SELECT 1 FROM t UNION SELECT 2 FROM t OFFSET 1 ROWS FETCH NEXT 1 ROWS ONLY" with
     | Select(QueryExpression(SetOperation(_, _, _), _, Some(Some _, Some _), None)) -> ()
     | res -> Assert.Fail(sprintf "Expected QueryExpression over set operation, got %A" res)

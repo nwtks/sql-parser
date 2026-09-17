@@ -13,6 +13,17 @@ open SqlParser.ExpressionParser
 // 8.23 atoms bundled into one). The local definitions shadow the opened forward refs of the
 // same name — the `Ref` cells are the same objects.
 module PredicateParser =
+    // 8.20 <period predicate> operators (OVERLAPS is covered by the existing Overlaps case).
+    // Module-level because pPredicatePrimary needs a lookahead of it.
+    let pPeriodPredicateOperator =
+        choice
+            [ pKeyword "EQUALS" >>% PeriodEquals
+              pKeyword "CONTAINS" >>% PeriodContains
+              pKeyword "PRECEDES" >>% PeriodPrecedes
+              pKeyword "SUCCEEDS" >>% PeriodSucceeds
+              attempt (pKeyword "IMMEDIATELY" >>. pKeyword "PRECEDES" >>% PeriodImmediatelyPrecedes)
+              attempt (pKeyword "IMMEDIATELY" >>. pKeyword "SUCCEEDS" >>% PeriodImmediatelySucceeds) ]
+
     // 8.20 <period predicand> ::= <period reference> | PERIOD ( <start> , <end> )
     let pPeriodPredicand =
         pKeyword "PERIOD"
@@ -25,30 +36,33 @@ module PredicateParser =
     //   <overlaps predicate>, <like predicate>, <similar predicate>, plus <collate clause>.
     // The 8.19/8.20 sub-parsers are local because this is their only consumer.
     let pPredicate pExpr =
+        // A predicate part-2 operand is a <row value predicand>: a TOP-LEVEL
+        // boolean-producing expression (comparison, AND/OR/NOT, or another predicate)
+        // is rejected. NOTE: the AST does not keep a parenthesized node, so a
+        // parenthesized boolean expression is rejected too — slightly stricter than
+        // the grammar (see docs/trade-off.md).
+        let pOperand =
+            pExpr
+            >>= fun e ->
+                if isBooleanTopLevel e then
+                    fail "a predicate part-2 operand must be a <row value predicand>"
+                else
+                    preturn e
+
         // 8.19 <user-defined type specification> ::= <user-defined type name> | ONLY <user-defined type name>
         let pUserDefinedTypeSpecification =
             choice
                 [ pKeyword "ONLY" >>. pSchemaQualifiedNameExpression |>> Exclusive
                   pSchemaQualifiedNameExpression |>> Inclusive ]
 
-        // 8.20 <period predicate> operators (OVERLAPS is covered by the existing Overlaps case)
-        let pPeriodPredicateOperator =
-            choice
-                [ pKeyword "EQUALS" >>% PeriodEquals
-                  pKeyword "CONTAINS" >>% PeriodContains
-                  pKeyword "PRECEDES" >>% PeriodPrecedes
-                  pKeyword "SUCCEEDS" >>% PeriodSucceeds
-                  attempt (pKeyword "IMMEDIATELY" >>. pKeyword "PRECEDES" >>% PeriodImmediatelyPrecedes)
-                  attempt (pKeyword "IMMEDIATELY" >>. pKeyword "SUCCEEDS" >>% PeriodImmediatelySucceeds) ]
-
         choice
             [ // 8.3 <between predicate> ::= <row value predicand> [ NOT ] BETWEEN [ ASYMMETRIC | SYMMETRIC ] <row value predicand> AND <row value predicand>
               attempt (
                   opt (pKeyword "NOT") .>> pKeyword "BETWEEN"
                   .>>. opt (pKeyword "ASYMMETRIC" <|> pKeyword "SYMMETRIC")
-                  .>>. pExpr
+                  .>>. pOperand
                   .>> pKeyword "AND"
-                  .>>. pExpr
+                  .>>. pOperand
                   |>> fun (((isNot, sym), start), endBound) ->
                       fun e ->
                           { Expression.Kind =
@@ -62,7 +76,7 @@ module PredicateParser =
                       (token (pstring "("))
                       (token (pstring ")"))
                       (attempt pQuery |>> Choice1Of2
-                       <|> (sepBy1 pExpr (token (pstring ",")) |>> Choice2Of2))
+                       <|> (sepBy1 pOperand (token (pstring ",")) |>> Choice2Of2))
                   |>> fun (isNot, res) ->
                       fun e ->
                           let kind =
@@ -93,7 +107,7 @@ module PredicateParser =
                   pKeyword "IS" >>. opt (pKeyword "NOT")
                   .>> pKeyword "DISTINCT"
                   .>> pKeyword "FROM"
-                  .>>. pExpr
+                  .>>. pOperand
                   |>> fun (isNot, r) ->
                       fun l ->
                           { Expression.Kind = IsDistinctFrom(l, Option.isSome isNot, r)
@@ -101,7 +115,7 @@ module PredicateParser =
               )
               // 8.14 <overlaps predicate> ::= <row value predicand 1> OVERLAPS <row value predicand 2>
               attempt (
-                  pKeyword "OVERLAPS" >>. pExpr
+                  pKeyword "OVERLAPS" >>. pOperand
                   |>> fun r ->
                       fun l ->
                           { Expression.Kind = Overlaps(l, r)
@@ -110,8 +124,8 @@ module PredicateParser =
               // 8.5 <like predicate> ::= <character string value expression> [ NOT ] LIKE <character string pattern> [ ESCAPE <escape character> ]
               attempt (
                   opt (pKeyword "NOT") .>> pKeyword "LIKE"
-                  .>>. pExpr
-                  .>>. opt (pKeyword "ESCAPE" >>. pExpr)
+                  .>>. pOperand
+                  .>>. opt (pKeyword "ESCAPE" >>. pOperand)
                   |>> fun ((isNot, pattern), escape) ->
                       fun l ->
                           { Expression.Kind = Like(l, Option.isSome isNot, pattern, escape)
@@ -182,8 +196,8 @@ module PredicateParser =
               //     [ FLAG <XQuery option flag> ]
               attempt (
                   opt (pKeyword "NOT") .>> pKeyword "LIKE_REGEX"
-                  .>>. pExpr
-                  .>>. opt (pKeyword "FLAG" >>. pExpr)
+                  .>>. pOperand
+                  .>>. opt (pKeyword "FLAG" >>. pOperand)
                   |>> fun ((isNot, pattern), flag) ->
                       fun e ->
                           { Expression.Kind = RegexLike(e, Option.isSome isNot, pattern, flag)
@@ -206,7 +220,7 @@ module PredicateParser =
               )
               // 8.16 <member predicate> ::= [ NOT ] MEMBER [ OF ] <multiset value expression>
               attempt (
-                  opt (pKeyword "NOT") .>> pKeyword "MEMBER" .>> opt (pKeyword "OF") .>>. pExpr
+                  opt (pKeyword "NOT") .>> pKeyword "MEMBER" .>> opt (pKeyword "OF") .>>. pOperand
                   |>> fun (isNot, multiset) ->
                       fun e ->
                           { Expression.Kind = MemberOf(e, Option.isSome isNot, multiset)
@@ -215,7 +229,7 @@ module PredicateParser =
               // 8.17 <submultiset predicate> ::= [ NOT ] SUBMULTISET [ OF ] <multiset value expression>
               attempt (
                   opt (pKeyword "NOT") .>> pKeyword "SUBMULTISET" .>> opt (pKeyword "OF")
-                  .>>. pExpr
+                  .>>. pOperand
                   |>> fun (isNot, multiset) ->
                       fun e ->
                           { Expression.Kind = SubmultisetOf(e, Option.isSome isNot, multiset)
@@ -230,12 +244,25 @@ module PredicateParser =
                             Pos = e.Pos }
               )
               // 8.20 <period predicate> ::= <period predicate operator> <period predicand>
+              // EQUALS / PRECEDES / SUCCEEDS / IMMEDIATELY ... require a <period predicand>
+              // on the right; only CONTAINS admits a <point in time> (<datetime value
+              // expression>). The LEFT operand's kind is not re-checked here — the postfix
+              // is applied to any primary (see docs/trade-off.md).
               attempt (
-                  pPeriodPredicateOperator .>>. (attempt pPeriodPredicand <|> pExpr)
-                  |>> fun (kind, right) ->
-                      fun left ->
-                          { Expression.Kind = PeriodPredicate(kind, left, right)
-                            Pos = left.Pos }
+                  pPeriodPredicateOperator
+                  >>= fun kind ->
+                      (if kind = PeriodContains then
+                           // CONTAINS admits a <point in time> (<datetime value expression>).
+                           attempt pPeriodPredicand <|> pOperand |>> fun right -> kind, right
+                       else
+                           // EQUALS / PRECEDES / SUCCEEDS / IMMEDIATELY ... require a
+                           // <period predicand>: PERIOD ( ... ) or a <period reference>
+                           // (a plain name).
+                           attempt pPeriodPredicand <|> pIdentifierExpression |>> fun right -> kind, right)
+                      |>> fun (kind, right) ->
+                          fun left ->
+                              { Expression.Kind = PeriodPredicate(kind, left, right)
+                                Pos = left.Pos }
               ) ]
 
     // 8.10 <exists predicate> ::= EXISTS ( <subquery> )
@@ -295,4 +322,7 @@ module PredicateParser =
               attempt pExistsPredicate
               attempt pUniquePredicate
               attempt pJsonExistsPredicate
-              attempt pPeriodPredicand ]
+              // 8.20 — PERIOD ( <start>, <end> ) is a <period predicand>, which exists
+              // only inside a <period predicate>: require a period-predicate operator
+              // to follow, so it cannot leak as a standalone atom.
+              attempt (pPeriodPredicand .>> lookAhead pPeriodPredicateOperator) ]

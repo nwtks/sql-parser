@@ -13,9 +13,9 @@ module ExpressionParser =
     let pNonBooleanValueExpression, pValueExpressionNoBooleanRef =
         createParserForwardedToRef<Expression, unit> ()
 
-    // 6.29 <numeric value expression> — forward ref (wired after pValueExpressionPrimaryStrict is defined
+    // 6.29 <numeric value expression> — forward ref (wired after pValueExpressionPrimary is defined
     // to break the cycle: pValueExpressionPrimaryImpl → pArrayElementReference → pNumericValueExpression
-    // → pValueExpressionPrimaryStrict → pValueExpressionPrimaryImpl).
+    // → pValueExpressionPrimary → pValueExpressionPrimaryImpl).
     let pNumericValueExpression, pNumericValueExpressionRef =
         createParserForwardedToRef<Expression, unit> ()
 
@@ -205,13 +205,12 @@ module ExpressionParser =
     // Shared by <reference type> (6.1), <column option list> (11.3) and
     // <add column scope clause> (11.17); it lives here because ExpressionParser.fs is
     // compiled before SchemaParser.fs.
-    let pScopeClause: Parser<Expression, unit> =
-        pKeyword "SCOPE" >>. pSchemaQualifiedNameExpression
+    let pScopeClause = pKeyword "SCOPE" >>. pSchemaQualifiedNameExpression
 
     // 6.1 <data type> — element type parser: all types EXCEPT collection types (to avoid
     // left recursion). The recursive REF / row-field positions use the `pDataType`
     // forward ref, so this parser can be defined before `pCollectionType`.
-    let pDataTypeElement: Parser<DataType, unit> =
+    let pDataTypeElement =
         choice
             [ attempt pCharacterStringType
               attempt pNationalCharacterStringType
@@ -250,26 +249,51 @@ module ExpressionParser =
                                 Pos = { Line = pos.Line; Column = pos.Column } }
               ) ]
 
+    // 6.1 <predefined type> — the built-in alternatives of <data type>: no
+    // <reference type> and no <path-resolved user-defined type name>. Used by the
+    // slots the grammar restricts to <predefined type> (11.34 <domain definition>,
+    // 11.51 <representation> / <user-defined representation>).
+    let pPredefinedType =
+        choice
+            [ attempt pCharacterStringType
+              attempt pNationalCharacterStringType
+              attempt pBinaryStringType
+              attempt pNumericType
+              attempt pApproximateNumericType
+              pKeyword "BOOLEAN" >>% Boolean
+              attempt pDateTimeType
+              attempt pIntervalType
+              attempt pRowType ]
+
     // 6.1 <collection type> ::= <array type> | <multiset type> — <array type> ::= <data type> ARRAY [ [ <maximum cardinality> ] ] — <multiset type> ::= <data type> MULTISET
     // The suffixes are applied left-to-right and may nest (`INT ARRAY ARRAY` =
     // `ArrayType(ArrayType(Integer, None), None)`), because <data type> on the left of
     // ARRAY/MULTISET may itself be a collection type.
+    let pArraySuffix =
+        pKeyword "ARRAY"
+        .>>. opt (between (token (pstring "[")) (token (pstring "]")) pUnsignedInteger)
+        |>> fun (_, len) -> fun t -> ArrayType(t, Option.map int len)
+
+    let pMultisetSuffix = pKeyword "MULTISET" >>% fun t -> MultisetType t
+
+    let pCollectionSuffixes =
+        many (choice [ pArraySuffix; pMultisetSuffix ])
+        |>> fun suffixes t -> List.fold (fun acc f -> f acc) t suffixes
+
     let pCollectionType =
-        let pArraySuffix =
-            pKeyword "ARRAY"
-            .>>. opt (between (token (pstring "[")) (token (pstring "]")) pUnsignedInteger)
-            |>> fun (_, len) -> fun t -> ArrayType(t, Option.map int len)
+        pDataTypeElement .>>. pCollectionSuffixes |>> fun (t, fold) -> fold t
 
-        let pMultisetSuffix: Parser<DataType -> DataType, unit> =
-            pKeyword "MULTISET" >>% (fun t -> MultisetType t)
-
-        pDataTypeElement .>>. many (choice [ pArraySuffix; pMultisetSuffix ])
+    // 6.1 <collection type> requiring at least ONE suffix — used by the 11.51
+    // <representation> slot, where a bare UDT name is NOT a <predefined type> but
+    // `<udt> ARRAY` still is a valid <collection type>.
+    let pCollectionTypeStrict =
+        pDataTypeElement .>>. many1 (choice [ pArraySuffix; pMultisetSuffix ])
         |>> fun (t, suffixes) -> List.fold (fun acc f -> f acc) t suffixes
 
     pDataTypeRef.Value <- choice [ attempt pCollectionType; pDataTypeElement ]
 
     // 6.4 <dynamic parameter specification> ::= <question mark>
-    let pQuestionMark: Parser<char, unit> = pchar '?' .>> ws
+    let pQuestionMark = pchar '?' .>> ws
 
     // Literals are handled separately by pLiteralExpression above.
     // 6.4 <general value specification> — parameter forms (`?` dynamic parameter, `:name` host parameter) plus the keyword forms (CURRENT_USER, SESSION_USER, ...).
@@ -305,7 +329,7 @@ module ExpressionParser =
     let pSimpleValueSpecification =
         choice
             [ pLiteralExpression
-              (pSignedNumericLiteral |>> Number |>> Literal |> withExprPosition)
+              pSignedNumericLiteral |>> Number |>> Literal |> withExprPosition
               pQuestionMark >>% "?" <|> pHostParameter |>> Parameter |> withExprPosition ]
 
     // 6.4 <value specification> ::= <literal> | <general value specification>
@@ -366,18 +390,19 @@ module ExpressionParser =
     let pSimpleTargetSpecification =
         choice
             [ pColumnReferenceExpression
-              (getPosition .>>. (pQuestionMark >>% "?" <|> pHostParameter)
-               |>> fun (pos, name) ->
-                   { Expression.Kind = Parameter name
-                     Pos = { Line = pos.Line; Column = pos.Column } }) ]
+              getPosition .>>. (pQuestionMark >>% "?" <|> pHostParameter)
+              |>> fun (pos, name) ->
+                  { Expression.Kind = Parameter name
+                    Pos = { Line = pos.Line; Column = pos.Column } } ]
 
     // 6.9 <grouping operation> ::= GROUPING ( <column reference> [ , <column reference> ]... )
+    // Plain column references — no <collate clause> slot.
     let pGroupingOperation =
         pKeyword "GROUPING"
         >>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (sepBy1 pColumnReferenceWithCollate (token (pstring ",")))
+                (sepBy1 pColumnReferenceExpression (token (pstring ",")))
         |>> Grouping
         |> withExprPosition
 
@@ -700,15 +725,58 @@ module ExpressionParser =
             )
         |> withExprPosition
 
-    // 6.12 <case abbreviation> ::= COALESCE ( <value expression> [ { , <value expression> }... ] )
+    // 6.12 <case abbreviation> ::= COALESCE ( <value expression> { <comma> <value expression> }... )
+    // At least TWO arguments.
     let pCoalesceExpr =
         pKeyword "COALESCE"
-        >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ",")))
+        >>. between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (pExpression .>>. many1 (token (pstring ",") >>. pExpression)
+                 |>> fun (first, rest) -> first :: rest)
         |>> fun exprs -> Case(None, exprs |> List.map (fun e -> { Kind = IsNull(e, true); Pos = e.Pos }, e), None)
         |> withExprPosition
 
     // 6.12 <case expression> ::= CASE <case operand> <simple when clause>...
     //     | CASE <searched when clause>... [ ELSE <result> ] END
+    // A <when operand> is a <row value predicand> or a predicate part 2 — a TOP-LEVEL
+    // boolean-producing expression (comparison, AND/OR/NOT, another predicate) is
+    // rejected; a parenthesized form is a <value expression primary> and stays legal.
+    let isBooleanTopLevel (e: Expression) =
+        match e.Kind with
+        | UnaryOp(op, _) when op = UnaryOperator.Not -> true
+        | BinaryOp(op, _, _) ->
+            op = BinaryOperator.And
+            || op = BinaryOperator.Or
+            || op = BinaryOperator.Equal
+            || op = BinaryOperator.NotEqual
+            || op = BinaryOperator.LessThan
+            || op = BinaryOperator.LessThanOrEqual
+            || op = BinaryOperator.GreaterThan
+            || op = BinaryOperator.GreaterThanOrEqual
+        | IsNull _
+        | IsBoolean _
+        | ExpressionKind.Between _
+        | InList _
+        | InSubquery _
+        | Like _
+        | SimilarTo _
+        | RegexLike _
+        | QuantifiedComparison _
+        | Exists _
+        | ExpressionKind.Unique _
+        | IsNormalized _
+        | Match _
+        | Overlaps _
+        | IsDistinctFrom _
+        | MemberOf _
+        | SubmultisetOf _
+        | IsSet _
+        | IsOfType _
+        | PeriodPredicate _
+        | IsJson _ -> true
+        | _ -> false
+
     let pCaseExpression =
         getPosition
         >>= fun pos ->
@@ -718,8 +786,17 @@ module ExpressionParser =
                      >>% { Kind = Literal Null
                            Pos = { Line = pos.Line; Column = pos.Column } })
 
+            let pWhenOperand =
+                pExpression
+                >>= fun e ->
+                    if isBooleanTopLevel e then
+                        fail "a <when operand> must be a <row value predicand> (6.12)"
+                    else
+                        preturn e
+
             let pSimpleWhenClause =
-                pKeyword "WHEN" >>. sepBy1 pExpression (token (pstring ",")) .>> pKeyword "THEN"
+                pKeyword "WHEN" >>. sepBy1 pWhenOperand (token (pstring ","))
+                .>> pKeyword "THEN"
                 .>>. pResultExpr
 
             let pSearchedWhenClause =
@@ -818,13 +895,12 @@ module ExpressionParser =
         |>> fun (typ, args) -> NewSpecification(typ, args)
         |> withExprPosition
 
-    // 6.20 <attribute or method reference> / 6.21 <dereference operation> / 6.22 <method reference>
-    //   <value expression primary> <dereference operator> <qualified identifier> [ <SQL argument list> ]
-    // The dereference operator is the right arrow. It is matched here (inside the term parser) so
-    // that the '-' operator of the precedence parser never sees it.
+    // 6.21 <dereference operation> ::= <value expression primary> <dereference operator>
+    //     <qualified identifier> [ <SQL argument list> ]
+    // <qualified identifier> ::= <identifier> — a SINGLE identifier, not a
+    // schema-qualified name.
     let pDereferenceReference =
-        token (pstring "->") >>. pSchemaQualifiedNameExpression
-        .>>. opt pSqlArgumentList
+        token (pstring "->") >>. pIdentifierExpression .>>. opt pSqlArgumentList
         |>> fun (name, args) ->
             fun r ->
                 { Expression.Kind = Dereference(r, name, args)
@@ -1007,13 +1083,16 @@ module ExpressionParser =
 
     // 6.30 <position expression> ::= POSITION ( <character value expression> IN
     //     <character value expression> [ USING <char length units> ] )
+    // Operands are <character value expression>s (non-boolean). The <binary position
+    // expression> form has no USING slot, but the two operand kinds are syntactically
+    // indistinguishable, so one parser serves both (see docs/trade-off.md).
     let pPositionExpression =
         pKeyword "POSITION"
         >>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (pExpression .>> pKeyword "IN"
-                 .>>. pExpression
+                (pNonBooleanValueExpression .>> pKeyword "IN"
+                 .>>. pNonBooleanValueExpression
                  .>>. opt (pKeyword "USING" >>. pCharLengthUnitsExpr))
         |>> (fun ((target, source), unit) -> ExpressionKind.Position(target, source, unit))
         |> withExprPosition
@@ -1045,7 +1124,7 @@ module ExpressionParser =
     let pNumericValueFunction =
         let pUnary name ctor =
             pKeyword name
-            >>. between (token (pstring "(")) (token (pstring ")")) pExpression
+            >>. between (token (pstring "(")) (token (pstring ")")) pNumericValueExpression
             |>> fun e -> NumericValueFunction(ctor, [ e ])
 
         let pBinary name ctor =
@@ -1053,7 +1132,7 @@ module ExpressionParser =
             >>. between
                     (token (pstring "("))
                     (token (pstring ")"))
-                    (pExpression .>> token (pstring ",") .>>. pExpression)
+                    (pNumericValueExpression .>> token (pstring ",") .>>. pNumericValueExpression)
             |>> fun (a, b) -> NumericValueFunction(ctor, [ a; b ])
 
         choice
@@ -1087,10 +1166,11 @@ module ExpressionParser =
               >>. between
                       (token (pstring "("))
                       (token (pstring ")"))
-                      (pExpression .>> token (pstring ",") .>>. pExpression .>> token (pstring ",")
-                       .>>. pExpression
+                      (pNumericValueExpression .>> token (pstring ",") .>>. pNumericValueExpression
                        .>> token (pstring ",")
-                       .>>. pExpression)
+                       .>>. pNumericValueExpression
+                       .>> token (pstring ",")
+                       .>>. pNumericValueExpression)
               |>> fun (((a, b), c), d) -> NumericValueFunction(NumericFunction.WidthBucket, [ a; b; c; d ])
               // 6.30 <match number function> ::= MATCH_NUMBER ( )
               pKeyword "MATCH_NUMBER"
@@ -1176,14 +1256,15 @@ module ExpressionParser =
         |> withExprPosition
 
     // 6.32 <character substring function> ::= SUBSTRING ( <character value expression> FROM <start position> [ FOR <string length> ] [ USING <char length units> ] )
+    // <start position> / <string length> are <numeric value expression>s.
     let pCharacterSubstringFunction =
         pKeyword "SUBSTRING"
         >>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (pExpression .>> pKeyword "FROM"
-                 .>>. pExpression
-                 .>>. opt (pKeyword "FOR" >>. pExpression)
+                (pNonBooleanValueExpression .>> pKeyword "FROM"
+                 .>>. pNumericValueExpression
+                 .>>. opt (pKeyword "FOR" >>. pNumericValueExpression)
                  .>>. opt (pKeyword "USING" >>. pCharLengthUnits))
         |>> fun (((src, start), len), units) -> Substring(src, start, len, units)
         |> withExprPosition
@@ -1194,9 +1275,11 @@ module ExpressionParser =
         >>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (pExpression .>> pKeyword "PLACING" .>>. pExpression .>> pKeyword "FROM"
-                 .>>. pExpression
-                 .>>. opt (pKeyword "FOR" >>. pExpression))
+                (pNonBooleanValueExpression .>> pKeyword "PLACING"
+                 .>>. pNonBooleanValueExpression
+                 .>> pKeyword "FROM"
+                 .>>. pNumericValueExpression
+                 .>>. opt (pKeyword "FOR" >>. pNumericValueExpression))
         |>> fun (((src, placing), start), len) -> Overlay(src, placing, start, len)
         |> withExprPosition
 
@@ -1457,11 +1540,13 @@ module ExpressionParser =
 
     // 6.42 <array value constructor> ::= ARRAY <array value constructor by enumeration>
     //     | ARRAY <array value constructor by query>
+    // <array element list> ::= <array element> [ { , <array element> }... ] — at least
+    // ONE element; the empty form is only a 6.5 <empty specification>.
     let pArrayValueConstructor =
         pKeyword "ARRAY"
         >>. choice
                 [ attempt (
-                      between (token pLeftBracket) (token pRightBracket) (sepBy pExpression (token (pstring ",")))
+                      between (token pLeftBracket) (token pRightBracket) (sepBy1 pExpression (token (pstring ",")))
                       |>> ArrayConstructor
                   )
                   attempt (between (token (pstring "(")) (token (pstring ")")) pQuery |>> ArrayQuery) ]
@@ -1476,11 +1561,12 @@ module ExpressionParser =
 
     // 6.45 <multiset value constructor> ::= MULTISET <multiset value constructor by enumeration>
     //     | MULTISET <multiset value constructor by query>
+    // <multiset element list> requires at least ONE element.
     let pMultisetValueConstructor =
         pKeyword "MULTISET"
         >>. choice
                 [ attempt (
-                      between (token pLeftBracket) (token pRightBracket) (sepBy pExpression (token (pstring ",")))
+                      between (token pLeftBracket) (token pRightBracket) (sepBy1 pExpression (token (pstring ",")))
                       |>> MultisetConstructor
                   )
                   attempt (between (token (pstring "(")) (token (pstring ")")) pQuery |>> MultisetQuery) ]
@@ -1513,12 +1599,21 @@ module ExpressionParser =
         |> withExprPosition
 
     let pRoutineInvocation =
+        // 10.9 <aggregate function> ::= COUNT ( <asterisk> ) | ... — the bare `*` is an
+        // argument ONLY of COUNT; every other function takes <value expression>s.
+        // (The `*` is NOT a <value expression primary>, so it is parsed here directly.)
+        let pStarArg =
+            pstring "*" .>> ws .>>. getPosition
+            |>> fun (_, pos) ->
+                [ { Expression.Kind = ExpressionKind.Star
+                    Pos = { Line = pos.Line; Column = pos.Column } } ]
+
         let pArgs =
             between
                 (token (pstring "("))
                 (token (pstring ")"))
                 (opt (pKeyword "DISTINCT" >>% true <|> (pKeyword "ALL" >>% false))
-                 .>>. sepBy pExpression (token (pstring ",")))
+                 .>>. (attempt pStarArg <|> sepBy pExpression (token (pstring ","))))
 
         let pFilter =
             pKeyword "FILTER"
@@ -1542,10 +1637,13 @@ module ExpressionParser =
 
         nameExpr
         .>>. pArgs
-        .>>. opt pWindowNameOrSpecification
-        .>>. opt pFilter
+        // 10.9 clause order: <args> [ <within group specification> ] [ <filter clause> ]
+        // then 6.10 OVER — WITHIN GROUP comes immediately after the argument list,
+        // FILTER after it, OVER last.
         .>>. opt pWithinGroup
-        >>= fun ((((name, (dist, args)), window), filter), withinGroup) ->
+        .>>. opt pFilter
+        .>>. opt pWindowNameOrSpecification
+        >>= fun ((((name, (dist, args)), withinGroup), filter), window) ->
             // 6.10 and 10.9 make the suffix mandatory for some reserved function keywords: those
             // names are whitelisted, so without this check `ROW_NUMBER()` or `LISTAGG(x, ',')` would
             // degrade to a plain <routine invocation>.
@@ -1557,27 +1655,147 @@ module ExpressionParser =
             if Set.contains functionName windowOnlyFunctionNames && Option.isNone window then
                 fail (sprintf "%s requires an OVER clause (6.10 <window function>)." functionName)
             elif
-                Set.contains functionName overOrWithinGroupFunctionNames
-                && Option.isNone window
-                && Option.isNone withinGroup
-            then
-                fail (sprintf "%s requires an OVER or WITHIN GROUP clause (6.10 / 10.9)." functionName)
-            elif
                 Set.contains functionName withinGroupOnlyFunctionNames
                 && Option.isNone withinGroup
             then
                 fail (sprintf "%s requires a WITHIN GROUP clause (10.9)." functionName)
             else
-                match window with
-                | Some w ->
-                    preturn (
-                        WindowFunction
-                            { Function = name
-                              Args = args
-                              IsDistinct = Option.defaultValue false dist
-                              Window = w }
-                    )
-                | None -> preturn (FunctionCall(name, Option.defaultValue false dist, args, None, filter, withinGroup))
+                // 10.9 — WITHIN GROUP is only valid for <ordered set function>s and
+                // OVER only for <window function type>s; FILTER only for <set function>s.
+                let isRank = Set.contains functionName rankFunctionNames
+                let isAggregate = Set.contains functionName aggregateFunctionNames
+
+                let isOrderedSet =
+                    isRank
+                    || Set.contains functionName inverseDistributionFunctionNames
+                    || functionName = "LISTAGG"
+
+                if Option.isSome withinGroup && not isOrderedSet then
+                    fail (sprintf "%s does not take a WITHIN GROUP clause (10.9)." functionName)
+                elif
+                    Option.isSome window
+                    && not (isRank || isAggregate || Set.contains functionName windowOnlyFunctionNames)
+                then
+                    fail (sprintf "%s does not take an OVER clause (6.10 <window function type>)." functionName)
+                elif
+                    Option.isSome filter
+                    && not (isAggregate || isOrderedSet || functionName = "ARRAY_AGG")
+                then
+                    fail (sprintf "%s does not take a FILTER clause (10.9 <set function>)." functionName)
+                else
+                    // Arity / argument-shape checks (6.10, 10.9).
+                    let argKinds = args |> List.map (fun a -> a.Kind)
+
+                    let failArity what =
+                        fail (sprintf "%s expects %s." functionName what)
+
+                    let isSimpleValueSpec k =
+                        match k with
+                        | Literal _
+                        | Parameter _ -> true
+                        | _ -> false
+
+                    // 10.9 — the bare `*` argument is only `COUNT ( <asterisk> )`.
+                    let hasStarArg = args |> List.exists (fun a -> a.Kind = ExpressionKind.Star)
+
+                    if hasStarArg && functionName <> "COUNT" then
+                        failArity "no <asterisk> argument (10.9 <aggregate function>)"
+                    elif
+                        hasStarArg
+                        && match args with
+                           | [ _ ] -> false
+                           | _ -> true
+                    then
+                        failArity "exactly one <asterisk> argument (10.9 <aggregate function>)"
+                    elif isRank && Option.isSome window && not args.IsEmpty then
+                        failArity "no arguments in the OVER form (6.10 <rank function type>)"
+                    elif isRank && Option.isSome withinGroup && args.IsEmpty then
+                        failArity
+                            "at least one argument in the WITHIN GROUP form (10.9 <hypothetical set function value expression list>)"
+                    elif functionName = "ROW_NUMBER" && not args.IsEmpty then
+                        failArity "no arguments (6.10 <window function type>)"
+                    elif
+                        functionName = "NTILE"
+                        && match args with
+                           | [ { Kind = k } ] when isSimpleValueSpec k -> false
+                           | _ -> true
+                    then
+                        failArity "exactly one <simple value specification> (6.10 <ntile function>)"
+                    elif
+                        (functionName = "LEAD" || functionName = "LAG")
+                        && match args with
+                           | [ _ ] -> false
+                           | [ _; { Kind = Literal(Number _) } ] -> false
+                           | [ _; { Kind = Literal(Number _) }; _ ] -> false
+                           | _ -> true
+                    then
+                        failArity
+                            "1 to 3 arguments with an <exact numeric literal> offset (6.10 <lead or lag function>)"
+                    elif
+                        (functionName = "FIRST_VALUE" || functionName = "LAST_VALUE")
+                        && match args with
+                           | [ _ ] -> false
+                           | _ -> true
+                    then
+                        failArity "exactly one argument (6.10 <first or last value function>)"
+                    elif
+                        functionName = "NTH_VALUE"
+                        && match args with
+                           | [ _; { Kind = k } ] when isSimpleValueSpec k -> false
+                           | _ -> true
+                    then
+                        failArity "exactly two arguments (6.10 <nth value function>)"
+                    elif
+                        isAggregate
+                        && functionName <> "ARRAY_AGG"
+                        && match args with
+                           | [ _ ] -> false
+                           | _ -> true
+                    then
+                        failArity "exactly one argument (10.9 <general set function>)"
+                    elif
+                        Set.contains functionName binarySetFunctionNames
+                        && match args with
+                           | [ _; _ ] -> false
+                           | _ -> true
+                    then
+                        failArity "exactly two arguments (10.9 <binary set function>)"
+                    elif
+                        Set.contains functionName inverseDistributionFunctionNames
+                        && match args with
+                           | [ _ ] -> false
+                           | _ -> true
+                    then
+                        failArity "exactly one argument (10.9 <inverse distribution function>)"
+                    elif
+                        functionName = "LISTAGG"
+                        && match args with
+                           | [ _; { Kind = Literal(String _) } ] -> false
+                           | _ -> true
+                    then
+                        failArity
+                            "a <character value expression> and a <character string literal> separator (10.9 <listagg set function>)"
+                    elif
+                        functionName = "ARRAY_AGG"
+                        && match args with
+                           | [ _ ] -> false
+                           | _ -> true
+                    then
+                        failArity "exactly one argument (10.9 <array aggregate function>)"
+                    else
+                        match window with
+                        | Some w ->
+                            preturn (
+                                WindowFunction
+                                    { Function = name
+                                      Args = args
+                                      IsDistinct = Option.defaultValue false dist
+                                      Window = w }
+                            )
+                        | None ->
+                            preturn (
+                                FunctionCall(name, Option.defaultValue false dist, args, None, filter, withinGroup)
+                            )
         |> withExprPosition
 
     // 10.11 <JSON object aggregate> ::= JSON_OBJECTAGG ( <JSON name and value>
@@ -1629,12 +1847,15 @@ module ExpressionParser =
 
     // — the atomic building block of every <value expression>, used as the term parser of the operator-precedence parser below.
     // 6.3 <value expression primary> — the atomic building block of every <value expression>
-    // The full form includes two grammar-exceeding approximations: the §8 predicate atoms
+    // The full form includes one grammar-exceeding approximation: the §8 predicate atoms
     // (pPredicatePrimary, needed so ANY/SOME/ALL (subquery) beats the pRoutineInvocation
-    // whitelist and EXISTS/UNIQUE/PERIOD/JSON_EXISTS parse) and the 7.16 <asterisk>
-    // wildcard (needed by SELECT item lists). Contexts that require the grammar's
-    // <value expression primary> shape — the 6.35/6.37 datetime & interval chain — use
-    // pValueExpressionPrimaryStrict, which excludes both (see docs/trade-off.md).
+    // whitelist and EXISTS/UNIQUE/PERIOD/JSON_EXISTS parse). The 7.16 <asterisk> wildcard
+    // is NOT a <value expression primary> and is NOT accepted here — `COUNT ( * )` is its
+    // own 10.9 alternative, handled inside pRoutineInvocation's argument list, and the
+    // select-list / qualified-asterisk forms are parsed by QueryParser. Contexts that
+    // require the grammar's <value expression primary> shape — the 6.35/6.37 datetime &
+    // interval chain — use pValueExpressionPrimary, which excludes the predicate
+    // atoms (see docs/trade-off.md).
     let pValueExpressionPrimaryImpl (withPredicates: bool) =
         // 6.3 <scalar subquery> ::= ( <subquery> )
         // Local because pValueExpressionPrimaryImpl is its only consumer.
@@ -1649,9 +1870,6 @@ module ExpressionParser =
             >>. between (token (pstring "(")) (token (pstring ")")) (opt pExpression)
             |>> Classifier
             |> withExprPosition
-
-        // 7.16 <asterisk> ::= * — also used as <value expression primary> wildcard
-        let pStarExpr = pstring "*" .>> ws >>% ExpressionKind.Star |> withExprPosition
 
         choice
             [ attempt pCastSpecification
@@ -1704,8 +1922,6 @@ module ExpressionParser =
               attempt pScalarSubquery
               attempt pLiteralExpression
               attempt pGeneralValueSpecification
-              if withPredicates then
-                  attempt pStarExpr
               attempt pGeneralizedInvocation
               attempt pDatetimeDifference
               attempt pExplicitRowValueConstructor
@@ -1716,18 +1932,18 @@ module ExpressionParser =
         .>>. many (attempt pDereferenceReference <|> attempt pMethodOrFieldReference)
         |>> fun (e, refs) -> List.fold (fun acc f -> f acc) e refs
 
-    let pValueExpressionPrimary = pValueExpressionPrimaryImpl true
+    let pValueExpressionPrimaryWithPredicates = pValueExpressionPrimaryImpl true
 
-    let pValueExpressionPrimaryStrict = pValueExpressionPrimaryImpl false
+    let pValueExpressionPrimary = pValueExpressionPrimaryImpl false
 
     // 6.37 <interval primary> ::= <value expression primary> [ <interval qualifier> ]
     //     | <interval value function>
     // A qualifier-less <interval primary> is represented by its <value expression primary>,
     // so wrapping only happens when an <interval qualifier> is actually present.
-    // The strict primary is used: predicates and the '*' wildcard are not
+    // The grammar's primary is used: predicates and the '*' wildcard are not
     // <value expression primary>s and are rejected in interval context.
     let pIntervalPrimary =
-        pValueExpressionPrimaryStrict .>>. opt (attempt pIntervalQualifier)
+        pValueExpressionPrimary .>>. opt (attempt pIntervalQualifier)
         |>> fun (e, qualifier) ->
             match qualifier with
             | Some qual ->
@@ -1768,13 +1984,14 @@ module ExpressionParser =
     //     | <interval term> <asterisk> <factor>
     //     | <interval term> <solidus> <factor>
     //     | <term> <asterisk> <interval factor>
-    // The '*'/'/' right operand is the grammar's <factor> (6.29), i.e. [ <sign> ]
-    // <numeric primary>. <numeric primary> is approximated by <value expression primary>
-    // (it already subsumes <numeric value function>, while <interval value function> is
-    // syntactically identical to it — see pNumericValueFunction). Unlike <interval factor>,
-    // <factor> has no [ <interval qualifier> ] suffix, so `INTERVAL '1' DAY * ? DAY` is
-    // rejected. The 4th alternative is still covered: <value expression primary> accepts an
-    // interval literal on the right of `*`.
+    // The '*'/'/' right operand is either the grammar's <factor> (6.29: [ <sign> ]
+    // <numeric primary>, no qualifier) or an <interval factor> ([ <sign> ]
+    // <interval primary>, optional qualifier). <numeric primary> is approximated by
+    // <value expression primary> (it already subsumes <numeric value function>, while
+    // <interval value function> is syntactically identical to it — see
+    // pNumericValueFunction). Since <interval primary> = <value expression primary>
+    // [ <interval qualifier> ], one parser (pIntervalFactor) serves both right-hand
+    // forms: with a qualifier it is the 4th alternative, without it the 2nd/3rd.
     let pIntervalTerm =
         let pMul =
             attempt (pchar '*' .>> ws)
@@ -1792,11 +2009,7 @@ module ExpressionParser =
             opt (attempt pIntervalSign) .>>. pIntervalPrimary
             |>> fun (sign, e) -> pIntervalSigned sign e
 
-        let pNumericFactor =
-            opt (attempt pIntervalSign) .>>. pValueExpressionPrimaryStrict
-            |>> fun (sign, e) -> pIntervalSigned sign e
-
-        pIntervalFactor .>>. many (attempt (pMul <|> pDiv .>>. pNumericFactor))
+        pIntervalFactor .>>. many (attempt (pMul <|> pDiv .>>. pIntervalFactor))
         |>> fun (first, rest) -> rest |> List.fold (fun acc (op, operand) -> op acc operand) first
 
     // 6.37 <interval value expression> ::= <interval term>
@@ -1830,10 +2043,10 @@ module ExpressionParser =
     //   <datetime factor> ::= <datetime primary> [ <time zone> ]
     //   <datetime primary> ::= <value expression primary> | <datetime value function>
     // (<datetime value function> is one of the pValueExpressionPrimary alternatives.)
-    // The strict primary is used: predicates and the '*' wildcard are not
+    // The grammar's primary is used: predicates and the '*' wildcard are not
     // <value expression primary>s and are rejected in datetime context.
     let pDatetimeTerm =
-        pValueExpressionPrimaryStrict .>>. opt (attempt pTimeZoneSuffix)
+        pValueExpressionPrimary .>>. opt (attempt pTimeZoneSuffix)
         |>> fun (e, timeZone) ->
             match timeZone with
             | Some applyTimeZone -> applyTimeZone e
@@ -1878,12 +2091,12 @@ module ExpressionParser =
             many (
                 attempt (
                     pKeyword "MULTISET" >>. pKeyword "INTERSECT" >>. pModifier
-                    .>>. pValueExpressionPrimaryStrict
+                    .>>. pValueExpressionPrimary
                 )
             )
 
         let pTerm =
-            pValueExpressionPrimaryStrict .>>. pIntersectChain
+            pValueExpressionPrimary .>>. pIntersectChain
             |>> fun (first, rest) ->
                 rest
                 |> List.fold
@@ -1905,15 +2118,15 @@ module ExpressionParser =
                   Pos = lhs.Pos }
 
     // 6.43/6.44 — the self-contained <multiset value expression> used by the 6.44 SET ( ... )
-    // The base is a <multiset primary>, so the strict primary is used.
+    // The base is a <multiset primary>, so the grammar's primary is used.
     pMultisetValueExpressionRef.Value <-
-        pValueExpressionPrimaryStrict .>>. many (attempt pMultisetSetOperatorSuffix)
+        pValueExpressionPrimary .>>. many (attempt pMultisetSetOperatorSuffix)
         |>> fun (first, rest) -> rest |> List.fold (fun acc f -> f acc) first
 
     // 6.28 <value expression> / 6.29 <numeric value expression> / 6.31 <string value expression>
     // Operator-precedence parser for <value expression> (terms, factors, concatenation, comparison)
     let opp = new OperatorPrecedenceParser<Expression, unit, unit>()
-    opp.TermParser <- pValueExpressionPrimary
+    opp.TermParser <- pValueExpressionPrimaryWithPredicates
 
     let addInfix op precedence assoc mapping =
         opp.AddOperator(InfixOperator(op, ws, precedence, assoc, fun x y -> { Kind = mapping x y; Pos = x.Pos }))
@@ -1939,7 +2152,7 @@ module ExpressionParser =
     // 8.9 <quantified comparison predicate> — rewrites <comp op> <quantifier> <table subquery> on the right
     // Kept here (not in PredicateParser.fs): these are operators of `opp`, which §6 owns. The
     // right-hand <quantifier> <table subquery> term is built by PredicateParser.pQuantifiedSubqueryTerm
-    // (surfaced through the pPredicatePrimary forward ref used by pValueExpressionPrimary).
+    // (surfaced through the pPredicatePrimary forward ref used by pValueExpressionPrimaryWithPredicates).
     let comparisonOp op x (y: Expression) =
         match y.Kind with
         | QuantifiedSubquery(quant, q) -> QuantifiedComparison(op, quant, x, q)
@@ -1964,7 +2177,7 @@ module ExpressionParser =
     // OVERLAY start position / length, TRIM_ARRAY count, POSITION start position,
     // WIDTH_BUCKET bounds/count).
     let oppNumeric = new OperatorPrecedenceParser<Expression, unit, unit>()
-    oppNumeric.TermParser <- pValueExpressionPrimaryStrict
+    oppNumeric.TermParser <- pValueExpressionPrimary
 
     let addInfixNum op precedence assoc mapping =
         oppNumeric.AddOperator(InfixOperator(op, ws, precedence, assoc, fun x y -> { Kind = mapping x y; Pos = x.Pos }))
@@ -1980,7 +2193,7 @@ module ExpressionParser =
     addInfixNum "-" 6 Associativity.Left (fun x y -> BinaryOp(Subtract, x, y))
 
     // Wire up the numeric value expression forward ref (breaks the cycle: pValueExpressionPrimaryImpl
-    // → pArrayElementReference → pNumericValueExpression → pValueExpressionPrimaryStrict → pValueExpressionPrimaryImpl).
+    // → pArrayElementReference → pNumericValueExpression → pValueExpressionPrimary → pValueExpressionPrimaryImpl).
     pNumericValueExpressionRef.Value <- oppNumeric.ExpressionParser
 
     // 6.39 <boolean test> ::= <boolean primary> IS [ NOT ] { TRUE | FALSE | UNKNOWN } — combined here with

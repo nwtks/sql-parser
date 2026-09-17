@@ -4,8 +4,50 @@ open Xunit
 open SqlParser
 
 // 22.1 <direct SQL statement> requires a trailing <semicolon>.
+// 7.16 <table expression> requires a <from clause>: bare expressions are wrapped
+// in "SELECT ... FROM t", and SELECT statements without a top-level FROM get one
+// appended (a FROM inside parentheses does not count).
+let private hasOuterFrom (s: string) =
+    let isIdentChar c =
+        System.Char.IsLetterOrDigit c || c = '_'
+
+    let rec go depth i =
+        if i >= s.Length then
+            false
+        elif s.[i] = '(' then
+            go (depth + 1) (i + 1)
+        elif s.[i] = ')' then
+            go (depth - 1) (i + 1)
+        elif
+            depth = 0
+            && i + 4 <= s.Length
+            && s.Substring(i, 4).ToUpperInvariant() = "FROM"
+            && (i = 0 || s.[i - 1] = ' ')
+            && (i + 4 = s.Length || not (isIdentChar s.[i + 4]))
+        then
+            true
+        else
+            go depth (i + 1)
+
+    go 0 0
+
 let parseExpr (sql: string) =
-    match SqlParser.parse (sql.TrimEnd() + ";") with
+    let s = sql.TrimEnd()
+    let upper = s.ToUpperInvariant()
+
+    let stmt =
+        if upper.StartsWith("SELECT") then
+            if hasOuterFrom s then s else s + " FROM t"
+        elif
+            upper.StartsWith("WITH")
+            || upper.StartsWith("VALUES")
+            || upper.StartsWith("TABLE")
+        then
+            s
+        else
+            "SELECT " + s + " FROM t"
+
+    match SqlParser.parse (stmt + ";") with
     | Ok { Kind = Select(SelectQuery s) } -> s.Columns.[0] |> fun (Column(e, _)) -> e
     | Ok res -> failwithf "Expected Select, got %A" res
     | Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
@@ -159,6 +201,61 @@ let ``General value specification keyword forms verification`` () =
     match parse "SELECT COLLATION FOR ('abc')" with
     | CollationFor { Kind = Literal(String "abc") } -> ()
     | res -> Assert.Fail(sprintf "Expected CollationFor, got %A" res)
+
+[<Fact>]
+let ``Routine invocation arity and suffix restrictions (6.10 / 10.9)`` () =
+    // 10.9 — the bare `*` argument is only COUNT ( <asterisk> )
+    parseFails "SELECT SUM(*)"
+    parseFails "SELECT COUNT(*, x)"
+    parseFails "SELECT my_func(*)"
+
+    // positive: COUNT(*) parses
+    match parse "SELECT COUNT(*)" with
+    | FunctionCall({ Kind = Identifier "COUNT" }, _, [ { Kind = ExpressionKind.Star } ], _, _, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected COUNT(*), got %A" res)
+
+    // <rank function type> takes empty parens in the OVER form
+    parseFails "SELECT RANK(1) OVER (ORDER BY x)"
+    // <general set function> takes exactly one argument
+    parseFails "SELECT SUM(a, b)"
+    parseFails "SELECT COUNT(*, x)"
+    // <binary set function> takes exactly two arguments
+    parseFails "SELECT COVAR_POP(a)"
+    // <nth value function> takes exactly two arguments
+    parseFails "SELECT NTH_VALUE(x) OVER ()"
+    // <lead or lag function> offset is an <exact numeric literal>
+    parseFails "SELECT LEAD(x, 1 + 2) OVER ()"
+    // <listagg separator> is a <character string literal>
+    parseFails "SELECT LISTAGG(x, y) WITHIN GROUP (ORDER BY 1)"
+    // <inverse distribution function> takes exactly one argument
+    parseFails "SELECT PERCENTILE_CONT(1, 2) WITHIN GROUP (ORDER BY x)"
+    // OVER / FILTER / WITHIN GROUP are not <routine invocation> suffixes
+    parseFails "SELECT my_func(x) OVER (PARTITION BY y)"
+    parseFails "SELECT my_func(x) FILTER (WHERE p)"
+    parseFails "SELECT my_func(x) WITHIN GROUP (ORDER BY x)"
+    // clause order: WITHIN GROUP immediately after the args, then FILTER, then OVER
+    parseFails "SELECT SUM(x) OVER (PARTITION BY y) FILTER (WHERE p)"
+    parseFails "SELECT RANK() FILTER (WHERE p) WITHIN GROUP (ORDER BY x)"
+    // positive: the spec order parses
+    match parse "SELECT SUM(x) FILTER (WHERE p) OVER (PARTITION BY y)" with
+    | WindowFunction _ -> ()
+    | res -> Assert.Fail(sprintf "Expected WindowFunction, got %A" res)
+
+[<Fact>]
+let ``COALESCE requires at least two arguments (6.12)`` () = parseFails "SELECT COALESCE(1)"
+
+[<Fact>]
+let ``GROUPING takes plain column references (6.9)`` () =
+    parseFails "SELECT GROUPING(a COLLATE c)"
+
+[<Fact>]
+let ``Dereference right-hand side is a single identifier (6.21)`` () = parseFails "SELECT x -> s.t"
+
+[<Fact>]
+let ``Numeric argument slots reject boolean expressions (6.30 / 6.32)`` () =
+    parseFails "SELECT ABS(1 = 2)"
+    parseFails "SELECT SUBSTRING(s FROM 1 = 2 FOR 3)"
+    parseFails "SELECT OVERLAY(s PLACING p FROM 1 = 2)"
 
 [<Fact>]
 let ``DEFAULT as a general expression is rejected`` () = parseFails "SELECT DEFAULT"
@@ -927,13 +1024,10 @@ let ``ARRAY value constructor verification`` () =
 
 [<Fact>]
 let ``Empty collection specification verification`` () =
-    match parse "SELECT ARRAY[]" with
-    | ArrayConstructor [] -> ()
-    | res -> Assert.Fail(sprintf "Expected ArrayConstructor [], got %A" res)
-
-    match parse "SELECT MULTISET[]" with
-    | MultisetConstructor [] -> ()
-    | res -> Assert.Fail(sprintf "Expected MultisetConstructor [], got %A" res)
+    // 6.42/6.45 — the enumeration forms require at least one element; the empty
+    // forms are only 6.5 <empty specification>s.
+    parseFails "SELECT ARRAY[]"
+    parseFails "SELECT MULTISET[]"
 
     match parse "SELECT ARRAY[1]" with
     | ArrayConstructor [ { Kind = Literal(Number 1m) } ] -> ()
@@ -1104,7 +1198,7 @@ let ``AT TIME ZONE and AT LOCAL verification`` () =
     | AtTimeZone({ Kind = Identifier "X" }, TimeZoneSpecifier.TimeZoneOffset { Kind = Literal(Interval _) }) -> ()
     | res -> Assert.Fail(sprintf "Expected AT TIME ZONE interval, got %A" res)
 
-    // 6.37 <interval primary> uses pValueExpressionPrimaryStrict: §8 predicate atoms
+    // 6.37 <interval primary> uses pValueExpressionPrimary: §8 predicate atoms
     // and the 7.16 '*' wildcard are not <value expression primary>s.
     parseFails "SELECT x AT TIME ZONE EXISTS (SELECT 1)"
     parseFails "SELECT x AT TIME ZONE *"
@@ -1131,7 +1225,7 @@ let ``MULTISET set operations verification`` () =
                            { Kind = MultisetSetOperation(MultisetIntersect, None, _, _) }) -> ()
     | res -> Assert.Fail(sprintf "Expected INTERSECT to bind tighter, got %A" res)
 
-    // 6.43 <multiset primary> uses pValueExpressionPrimaryStrict: the right operand is a
+    // 6.43 <multiset primary> uses pValueExpressionPrimary: the right operand is a
     // grammar-shaped <value expression primary>, so predicates and the '*' wildcard are
     // rejected there.
     parseFails "SELECT m1 MULTISET UNION *"

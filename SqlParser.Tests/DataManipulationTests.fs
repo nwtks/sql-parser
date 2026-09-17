@@ -84,11 +84,9 @@ let ``DECLARE CURSOR with all cursor properties verification`` () =
 [<Fact>]
 let ``DECLARE CURSOR with updatability clause verification`` () =
     match parseStatement "DECLARE cur CURSOR FOR SELECT a FROM t FOR UPDATE OF a" with
-    | DeclareCursor { Specification = SelectQuery s } ->
-        match s.Locking with
-        | Some(ForUpdate(Some [ { Kind = Identifier "A" } ])) -> ()
-        | other -> Assert.Fail(sprintf "Expected FOR UPDATE OF a, got %A" other)
-    | res -> Assert.Fail(sprintf "Expected DeclareCursor, got %A" res)
+    | DeclareCursor { Specification = SelectQuery _
+                      Updatability = Some(ForUpdate(Some [ { Kind = Identifier "A" } ])) } -> ()
+    | res -> Assert.Fail(sprintf "Expected FOR UPDATE OF a, got %A" res)
 
 [<Fact>]
 let ``DECLARE CURSOR without CURSOR keyword is rejected`` () =
@@ -173,7 +171,7 @@ let ``FETCH RELATIVE verification`` () =
 [<Fact>]
 let ``DECLARE cursor name is a local qualified name`` () =
     // 5.4 <local qualified name> admits only the MODULE qualifier.
-    parseStatement "DECLARE MODULE.c CURSOR FOR SELECT 1" |> ignore
+    parseStatement "DECLARE MODULE.c CURSOR FOR SELECT 1 FROM t" |> ignore
     parseStatementFails "DECLARE a.b CURSOR FOR SELECT 1"
 
 [<Fact>]

@@ -166,14 +166,15 @@ dialects:
   datetime-valued operands are syntactically indistinguishable, so non-interval
   arithmetic (`1 + 2`) still parses — the distinction is semantic. The 6.35/6.37
   chain (and `<interval primary>`, `<datetime term>`) uses
-  `pValueExpressionPrimaryStrict`, which excludes the two grammar-exceeding
-  approximations of `pValueExpressionPrimary` — the §8 predicate atoms
-  (`pPredicatePrimary`) and the 7.16 `*` wildcard — so predicates/star are
-  rejected inside interval and datetime operands. The same strict primary is used
-  by the 6.43 multiset sites (`<multiset primary>` in `pMultisetSetOperatorSuffix`
-  and `pMultisetValueExpressionRef`) and the 7.16 `<all fields reference>`; only
-  `opp.TermParser` keeps the full form, since it needs the predicate atoms for the
-  quantified-comparison rewrite and the `*` wildcard for select item lists.
+  `pValueExpressionPrimary`, which excludes the two grammar-exceeding
+  approximations that `pValueExpressionPrimaryWithPredicates` adds — the §8
+  predicate atoms (`pPredicatePrimary`) and the 7.16 `*` wildcard — so
+  predicates/star are rejected inside interval and datetime operands. The same
+  grammar-shaped primary is used by the 6.43 multiset sites (`<multiset primary>`
+  in `pMultisetSetOperatorSuffix` and `pMultisetValueExpressionRef`) and the 7.16
+  `<all fields reference>`; only `opp.TermParser` keeps the full form
+  (`pValueExpressionPrimaryWithPredicates`), since it needs the predicate atoms
+  for the quantified-comparison rewrite and the `*` wildcard for select item lists.
 - **Row value constructors and JSON.** 7.1's `<explicit row value constructor>` is
   an expression case (the parenthesized form needs ≥ 2 elements, so `(a)` still
   means the plain parenthesized expression). JSON paths are plain `string`s and the
@@ -303,3 +304,124 @@ compound tokens `{-`/`-}` (used by the 7.9 row pattern parser). `<percent>` and
 embedded XQuery-regex (8.6) and SQL/JSON path (9.38/9.39) languages, whose text is
 kept opaque, or in no production at all. A parser for them would be unreachable
 code that suggests the parser understands syntax it deliberately treats as text.
+
+## Spec-compliance strictness sweep (2026-09-17)
+
+A full audit against `sql-2016-grammar.txt` closed the over-permissive (accepts-invalid)
+gaps below. Each is a breaking change: SQL that previously parsed is now rejected.
+
+- **7.10** — a `<qualified join>` requires a `<join specification>`; `<cross join>` and
+  `<natural join>` reject one. `FROM a JOIN b` and `FROM a CROSS JOIN b ON ...` are rejected.
+- **7.6** — `<derived table>`, `<lateral derived table>`, `<collection derived table>`,
+  `<JSON table>` and `<JSON table primitive>` require their `<correlation or recognition>` /
+  `<correlation name>`; only `<PTF derived table>`, `<only spec>` and `<data change delta
+  table>` bracket it. Only `<joined table>`s may be parenthesized (`FROM (t)` is rejected).
+  `<row pattern input name>` is a `<correlation name>` — no schema-qualified input name and
+  no second name group before the recognition clause.
+- **7.16** — `<table expression>` requires a `<from clause>` (`SELECT 1` is rejected);
+  a bare `<asterisk>` is an alternative to the whole `<select list>`, not a sublist
+  (`SELECT *, a` is rejected).
+- **7.17** — `<query expression>` has no `<updatability clause>` slot; `FOR UPDATE` /
+  `FOR READ ONLY` belong to the 14.3 `<cursor specification>` only (the `DeclareCursor`
+  AST now carries `Updatability`). `<fetch first percentage>` requires its quantity.
+- **7.11** — `<JSON table plan union>` / `<plan cross>` need at least two operands; a
+  single path name is a `<JSON table plan>` (`JsonPlanName`), a parenthesized plan is a
+  `<plan primary>` and cannot stand alone as `PLAN ((p OUTER q))`.
+- **6.10 / 10.9** — `pRoutineInvocation` validates arity and argument shapes per function
+  family (`RANK()` empty in the OVER form, `SUM(a,b)` rejected, `LEAD` offset must be an
+  `<exact numeric literal>`, `LISTAGG` separator must be a `<character string literal>`,
+  …), restricts `OVER` to `<window function type>`s, `WITHIN GROUP` to `<ordered set
+  function>`s and `FILTER` to `<set function>`s, and enforces the clause order
+  `args → WITHIN GROUP → FILTER → OVER`.
+- **6.9 / 6.21** — `GROUPING` takes plain `<column reference>`s (no `COLLATE`); the
+  dereference right-hand side is a single `<qualified identifier>`.
+- **6.12 / 6.42 / 6.45** — `COALESCE` needs ≥ 2 arguments; `ARRAY[]` / `MULTISET[]`
+  enumerations need ≥ 1 element (the empty forms are only `<empty specification>`s).
+- **6.30 / 6.32** — numeric argument slots (`ABS`, `MOD`, trig, `WIDTH_BUCKET`,
+  `SUBSTRING ... FROM/FOR`, `OVERLAY ... FROM/FOR`, `POSITION` operands, length
+  expressions) use `<numeric value expression>` / non-boolean parsers, so
+  `ABS(1 = 2)` is rejected.
+- **8.20** — `PERIOD ( ... )` is a `<period predicand>`: it must be followed by a
+  period-predicate operator (lookahead), so it cannot leak as a standalone atom;
+  `EQUALS`/`PRECEDES`/`SUCCEEDS`/`IMMEDIATELY ...` require a `<period predicand>` on the
+  right (only `CONTAINS` admits a point in time).
+- **5.4** — `<schema qualified name>` allows at most three parts (catalog.schema.identifier).
+- **11.8** — `<referential triggered action>` admits at most one `<update rule>` and one
+  `<delete rule>`, in either order.
+- **11.72 / 11.73 / 11.4** — the sequence-generator option sets no longer leak:
+  `CREATE SEQUENCE` has no `RESTART`, `ALTER SEQUENCE` has no `AS`/`START WITH`, and the
+  `<identity column specification>` has neither.
+- **11.49** — `REFERENCING` requires at least one `<transition table or variable>`.
+- **20.6** — the `COPY ... TO` target is a `<PTF descriptor name>` (`PTF <simple value
+  specification>`).
+
+**Remaining deliberate deviations (documented, not fixed):**
+
+- Predicate part-2 operands (`BETWEEN`/`IN`/`LIKE`/... right-hand sides), `<when operand>`s
+  and the left operand of a period predicate still accept full comparison-capable
+  expressions — the precedence-parser architecture applies predicates as postfix to the
+  full `opp` expression, and a separate `<row value predicand>`-level parser would be a
+  structural refactor.
+- `NULL` is accepted as an ordinary value expression (`SELECT 1 + NULL`); the grammar's
+  `<literal>` has no `NULL` alternative, but rejecting it would be hostile.
+- The `<binary position expression>` form admits `USING <char length units>` — binary and
+  character operands are syntactically indistinguishable, so one parser serves both.
+- `GRANT ... ON <name>` without a kind keyword is parsed as a table grant even when the
+  name is meant for another object kind (syntactically unavoidable).
+
+## Spec-compliance follow-up (2026-09-18)
+
+Four of the remaining deliberate deviations were closed:
+
+- **12.3** — `<grantor>` is now the closed keyword set `CURRENT_USER | CURRENT_ROLE`; an
+  `<authorization identifier>` in the `GRANTED BY` / `WITH ADMIN` position is rejected.
+- **11.34 / 11.51** — `<domain definition>` and `<representation>` take a dedicated
+  `pPredefinedType` (the built-in alternatives of `<data type>`, no UDT name, no `REF`),
+  so `CREATE DOMAIN d my_udt` and `CREATE TYPE t AS my_udt` are rejected. A bare UDT name
+  with a collection suffix (`CREATE TYPE t AS my_udt ARRAY`) is still a valid
+  `<collection type>` (`pCollectionTypeStrict` requires ≥ 1 suffix), and
+  `REF USING <predefined type>` (11.51) uses the same parser.
+- **8.x / 6.12** — predicate part-2 operands and `<when operand>`s reject a TOP-LEVEL
+  boolean-producing expression (`isBooleanTopLevel` in `ExpressionParser.fs`):
+  `1 BETWEEN 1 = 1 AND 2`, `'a' LIKE 'b' = 'c'`, `CASE x WHEN 1 AND 2 THEN 1 END` are
+  rejected. This is an approximation, not a full `<row value predicand>` parser: the AST
+  does not keep a parenthesized node, so a parenthesized boolean expression
+  (`x BETWEEN (1 = 1) AND 2`) is rejected too — slightly stricter than the grammar.
+- **6.37** — `<interval term>`'s `*`/`/` right operand is now `pIntervalFactor`
+  (`[ <sign> ] <interval primary>`), which covers both the `<factor>` form (no qualifier)
+  and the 4th alternative's `<interval factor>` (optional qualifier):
+  `INTERVAL '1' DAY * ? DAY` now parses.
+
+Still open (syntactically indistinguishable or semantic): interval vs datetime operands,
+calendar validity, binary `POSITION ... USING`, kind-less `GRANT ON <name>`,
+`TABLE (expr)` PTF classification, `NULL` as a value expression, and the JSON path
+grammar (kept opaque by design).
+
+## The `*` wildcard is out of the expression parser (2026-09-18)
+
+`opp.TermParser` no longer accepts a bare `*` (`ExpressionKind.Star`). The 7.16
+`<asterisk>` is not a `<value expression primary>`; its three legitimate positions are
+now parsed where they belong:
+
+- `COUNT ( * )` is its own 10.9 `<aggregate function>` alternative — the bare `*` is
+  parsed directly in `pRoutineInvocation`'s argument list and rejected for every other
+  function name (`SUM(*)`, `my_func(*)` are rejected; `COUNT(*, x)` fails the arity check).
+- The select list's bare `<asterisk>` is parsed by `pSelectList` (7.16), and the
+  `<qualified asterisk>` / `<all fields reference>` forms by `pQualifiedAsterisk` —
+  the workaround guard in `pSelectSublist` is gone.
+- The row-pattern quantifier `*` (7.9) and the `*`/`/` operators (6.29/6.37) are
+  unrelated and unchanged.
+
+`pValueExpressionPrimaryImpl` now carries only ONE grammar-exceeding approximation (the
+§8 predicate atoms); `pValueExpressionPrimary` excludes it for the 6.35/6.37
+datetime & interval chain, while `pValueExpressionPrimaryWithPredicates` (the
+`opp.TermParser` form) includes it.
+
+## Renaming the value-expression primaries (2026-09-18)
+
+The spec-faithful parser is now named `pValueExpressionPrimary` (the grammar's
+6.3 rule name); the permissive form that adds the §8 predicate atoms is
+`pValueExpressionPrimaryWithPredicates` (the `opp.TermParser` form). The old
+`pValueExpressionPrimaryStrict` name was misleading — "strict" suggested a
+deviation, when it was in fact the conforming parser. Pure rename, no behavior
+change.

@@ -583,12 +583,12 @@ module Lexer =
     // invariant culture so the host locale cannot reinterpret '.' (de-DE reads "1.5" as 15).
     let private invariantCulture = System.Globalization.CultureInfo.InvariantCulture
 
-    let private toUnsignedInteger (s: string) : Parser<uint64, unit> =
+    let private toUnsignedInteger (s: string) =
         match System.UInt64.TryParse(s, System.Globalization.NumberStyles.None, invariantCulture) with
         | true, v -> preturn v
         | _ -> fail "unsigned integer is out of range."
 
-    let private toDecimal (s: string) : Parser<decimal, unit> =
+    let private toDecimal (s: string) =
         match System.Decimal.TryParse(s, System.Globalization.NumberStyles.AllowDecimalPoint, invariantCulture) with
         | true, v -> preturn v
         | _ -> fail "numeric literal is out of range."
@@ -608,13 +608,13 @@ module Lexer =
     // No trailing <separator>: pApproximateNumericLiteral reuses this as its <mantissa>, and a
     // <mantissa> must not be separated from its E <exponent> by white space (5.3 tokenisation).
     let private pExactNumericLiteralRaw =
-        (attempt (
+        attempt (
             pipe2 (many1Chars digit) (opt (pchar '.' >>. manyChars digit)) (fun p f ->
                 match f with
                 | Some fStr when fStr <> "" -> p + "." + fStr
                 | _ -> p)
-         )
-         <|> (pchar '.' >>. many1Chars digit |>> fun f -> "0." + f))
+        )
+        <|> (pchar '.' >>. many1Chars digit |>> fun f -> "0." + f)
         >>= toDecimal
 
     // 5.3 <exact numeric literal> — the tokenised form (consumes the trailing <separator>).
@@ -668,7 +668,7 @@ module Lexer =
     // so `1E`, `1E5x` and `0x10` are rejected instead of being re-read as a number plus an alias.
     let pUnsignedNumericLiteral =
         attempt (
-            (attempt pApproximateNumericLiteralRaw <|> pExactNumericLiteralRaw)
+            attempt pApproximateNumericLiteralRaw <|> pExactNumericLiteralRaw
             .>>? notFollowedBy (asciiLetter <|> digit <|> pchar '_')
         )
         .>> ws
@@ -784,10 +784,10 @@ module Lexer =
     // 5.3 <time zone interval> ::= <sign> <hours value> <colon> <minutes value>
     // The displacement is bounded by +-14:00.
     let pTimeZoneInterval =
-        ((pchar '+' >>% 1 <|> (pchar '-' >>% -1))
-         .>>. (pUnsignedIntegerAsInt .>> pchar ':' .>>. pUnsignedIntegerAsInt))
+        pchar '+' >>% 1 <|> (pchar '-' >>% -1)
+        .>>. (pUnsignedIntegerAsInt .>> pchar ':' .>>. pUnsignedIntegerAsInt)
         >>= fun (sign, (h, m)) ->
-            if h > 14 || m > 59 || (h = 14 && m > 0) then
+            if h > 14 || m > 59 || h = 14 && m > 0 then
                 fail "invalid time zone interval"
             else
                 preturn { Sign = sign; Hours = h; Minutes = m }
@@ -895,7 +895,7 @@ module Lexer =
     // 10.1 <interval qualifier> ::= <start field> TO <end field> | <single datetime field>
     let pIntervalQualifier =
         let pRange =
-            (pStartField .>> pKeyword "TO" .>>. pEndField)
+            pStartField .>> pKeyword "TO" .>>. pEndField
             >>= fun ((startF, startPrec), (endF, endPrec)) ->
                 // 10.1 — only the restricted start/end combinations are valid, so `YEAR TO DAY`
                 // and friends are rejected at the qualifier rather than by the value pattern.
@@ -1049,13 +1049,7 @@ module Lexer =
           "REGR_AVGY"
           "REGR_SXX"
           "REGR_SYY"
-          "REGR_SXY"
-          "RANK"
-          "DENSE_RANK"
-          "PERCENT_RANK"
-          "CUME_DIST"
-          "LISTAGG"
-          "ARRAY_AGG" ]
+          "REGR_SXY" ]
 
     let aggregateFunctionNames = Set.ofList aggregateFunctionKeywords
 
@@ -1070,16 +1064,31 @@ module Lexer =
               "LAST_VALUE"
               "NTH_VALUE" ]
 
-    // 10.9 <hypothetical set function> / <inverse distribution function> — an OVER or a
-    // WITHIN GROUP clause is required (the same keyword may be spelled either way).
-    let overOrWithinGroupFunctionNames =
+    // 6.10 <rank function type> — RANK | DENSE_RANK | PERCENT_RANK | CUME_DIST.
+    // Used both as a <window function type> (empty parens + OVER) and as a
+    // <hypothetical set function> (>= 1 arguments + WITHIN GROUP).
+    let rankFunctionNames =
+        Set.ofList [ "RANK"; "DENSE_RANK"; "PERCENT_RANK"; "CUME_DIST" ]
+
+    // 10.9 <inverse distribution function type> — WITHIN GROUP is required.
+    let inverseDistributionFunctionNames =
+        Set.ofList [ "PERCENTILE_CONT"; "PERCENTILE_DISC" ]
+
+    // 10.9 <binary set function type> — exactly two arguments.
+    let binarySetFunctionNames =
         Set.ofList
-            [ "RANK"
-              "DENSE_RANK"
-              "PERCENT_RANK"
-              "CUME_DIST"
-              "PERCENTILE_CONT"
-              "PERCENTILE_DISC" ]
+            [ "COVAR_POP"
+              "COVAR_SAMP"
+              "CORR"
+              "REGR_SLOPE"
+              "REGR_INTERCEPT"
+              "REGR_COUNT"
+              "REGR_R2"
+              "REGR_AVGX"
+              "REGR_AVGY"
+              "REGR_SXX"
+              "REGR_SYY"
+              "REGR_SXY" ]
 
     // 10.9 <listagg set function> — WITHIN GROUP is required.
     let withinGroupOnlyFunctionNames = Set.ofList [ "LISTAGG" ]
@@ -1102,6 +1111,15 @@ module Lexer =
           // <inverse distribution function type>
           "PERCENTILE_CONT"
           "PERCENTILE_DISC"
+          // <hypothetical set function> rank names (not <general set function> types)
+          "RANK"
+          "DENSE_RANK"
+          "PERCENT_RANK"
+          "CUME_DIST"
+          // <listagg set function>
+          "LISTAGG"
+          // <array aggregate function>
+          "ARRAY_AGG"
           // <window function type>
           "ROW_NUMBER"
           "NTILE"
@@ -1133,9 +1151,14 @@ module Lexer =
     // <schema name> ::= [ <catalog name> <period> ] <unqualified schema name>
     // <qualified identifier> ::= <identifier>
     // Returns the parts in order: [ <catalog name>; <schema name>; <qualified identifier> ]
+    // At most THREE parts (catalog.schema.identifier) — a 4th dot-part is rejected.
     let pSchemaQualifiedName =
         pIdentifier .>>. many (token (pstring ".") >>. pIdentifier)
-        |>> fun (first, rest) -> first :: rest
+        >>= fun (first, rest) ->
+            if List.length rest > 2 then
+                fail "<schema qualified name> allows at most three parts"
+            else
+                preturn (first :: rest)
 
     // 5.4 <host parameter name> ::= <colon> <identifier>
     let pHostParameter = pchar ':' >>. pIdentifier |>> (fun name -> ":" + name) .>> ws

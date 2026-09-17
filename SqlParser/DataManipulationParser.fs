@@ -42,15 +42,18 @@ module DataManipulationParser =
 
     // 14.1 <declare cursor> ::= DECLARE <cursor name> <cursor properties> FOR <cursor specification>
     // 14.3 <cursor specification> ::= <query expression> [ <updatability clause> ]
-    // (pQuery already absorbs the trailing [ <updatability clause> ])
+    // The <updatability clause> belongs to the <cursor specification>, NOT to the
+    // <query expression> (7.17 has no such slot).
     let pDeclareCursor =
         pKeyword "DECLARE" >>. pLocalQualifiedNameExpression .>>. pCursorProperties
         .>> pKeyword "FOR"
         .>>. pQuery
-        |>> fun ((name, properties), specification) ->
+        .>>. opt (attempt pUpdatabilityClause)
+        |>> fun (((name, properties), specification), updatability) ->
             { Name = name
               Properties = properties
-              Specification = specification }
+              Specification = specification
+              Updatability = updatability }
             |> DeclareCursor
 
     // 20.11 <input using clause> / 20.12 <output using clause> — shared by

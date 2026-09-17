@@ -127,7 +127,12 @@ module DynamicParser =
               pKeyword "TYPE" >>% [ "TYPE" ]
               pKeyword "DATA" >>% [ "DATA" ] ]
 
-    // 20.6 <copy descriptor statement> ::= COPY <source> TO <target> | COPY <source> VALUE <n> ( <options> ) TO <target> VALUE <n>
+    // 20.6 <copy descriptor statement> ::= COPY <source descriptor name> TO <target descriptor name>
+    //     | COPY <source descriptor name> VALUE <item number 1> ( <options> ) TO <target descriptor name> VALUE <item number 2>
+    // <source descriptor name> ::= <descriptor name> (a plain name);
+    // <target descriptor name> ::= <PTF descriptor name> ::= PTF <simple value specification>.
+    let pTargetDescriptorName = pKeyword "PTF" >>. pSimpleValueSpecification
+
     let pCopyDescriptorStatement =
         pKeyword "COPY" >>. pIdentifierExpression
         >>= fun source ->
@@ -136,7 +141,7 @@ module DynamicParser =
                 >>= fun srcItem ->
                     between (token (pstring "(")) (token (pstring ")")) pCopyDescriptorOptions
                     >>= fun opts ->
-                        pKeyword "TO" >>. pIdentifierExpression
+                        pKeyword "TO" >>. pTargetDescriptorName
                         >>= fun target ->
                             pKeyword "VALUE" >>. pSimpleValueSpecification
                             |>> fun tgtItem ->
@@ -147,7 +152,7 @@ module DynamicParser =
                                       Target = target
                                       TargetItem = Some tgtItem }
             )
-            <|> (pKeyword "TO" >>. pIdentifierExpression
+            <|> (pKeyword "TO" >>. pTargetDescriptorName
                  |>> fun target ->
                      CopyDescriptor
                          { Source = source

@@ -87,11 +87,9 @@ let ``GRANTED BY grantor verification`` () =
     | GrantObject { Grantor = Some Grantor.CurrentRole } -> ()
     | res -> Assert.Fail(sprintf "Expected GRANTED BY CURRENT_ROLE, got %A" res)
 
-    // Over-permissive extension: an <authorization identifier> is also accepted in the
-    // <grantor> position (see docs/trade-off.md).
-    match parse "GRANT SELECT ON t1 TO alice GRANTED BY admin_role" with
-    | GrantObject { Grantor = Some(Grantor.AuthorizationId { Kind = Identifier "ADMIN_ROLE" }) } -> ()
-    | res -> Assert.Fail(sprintf "Expected GRANTED BY authorization identifier, got %A" res)
+    // 12.3 <grantor> ::= CURRENT_USER | CURRENT_ROLE — a closed keyword set; an
+    // <authorization identifier> is rejected.
+    parseFails "GRANT SELECT ON t1 TO alice GRANTED BY admin_role"
 
     // 12.5 <grant role statement> — GRANTED BY <grantor>
     match parse "GRANT role_a TO alice GRANTED BY CURRENT_USER" with

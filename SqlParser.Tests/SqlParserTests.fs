@@ -23,7 +23,7 @@ let ``Multiple statements parsing verification`` () =
 
 [<Fact>]
 let ``Direct SQL statement verification`` () =
-    match SqlParser.parse "SELECT 1;" with
+    match SqlParser.parse "SELECT 1 FROM t;" with
     | Ok { Kind = Select _ } -> ()
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
@@ -35,7 +35,7 @@ let ``Direct SQL statement with a schema statement verification`` () =
 
 [<Fact>]
 let ``Direct SQL statement with trailing whitespace verification`` () =
-    match SqlParser.parse "SELECT 1;  " with
+    match SqlParser.parse "SELECT 1 FROM t;  " with
     | Ok { Kind = Select _ } -> ()
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
@@ -66,7 +66,7 @@ let ``Direct SQL statement accepts the direct SQL data families`` () =
     | Ok { Kind = DeclareTemporaryTable _ } -> ()
     | res -> Assert.Fail(sprintf "Expected DeclareTemporaryTable, got %A" res)
 
-    match SqlParser.parse "WITH cte AS (SELECT 1) SELECT * FROM cte;" with
+    match SqlParser.parse "WITH cte AS (SELECT 1 FROM t) SELECT * FROM cte;" with
     | Ok { Kind = WithStatement _ } -> ()
     | res -> Assert.Fail(sprintf "Expected WithStatement, got %A" res)
 

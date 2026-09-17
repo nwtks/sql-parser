@@ -82,7 +82,7 @@ let ``SET TIME ZONE rejects comparison and boolean expressions 19.4 verification
 
 [<Fact>]
 let ``SET TIME ZONE rejects predicates and star 6.37 verification`` () =
-    // pIntervalPrimary uses pValueExpressionPrimaryStrict: §8 predicate atoms and
+    // pIntervalPrimary uses pValueExpressionPrimary: §8 predicate atoms and
     // the 7.16 '*' wildcard are not <value expression primary>s.
     parseFails "SET TIME ZONE EXISTS (SELECT 1)"
     parseFails "SET TIME ZONE *"

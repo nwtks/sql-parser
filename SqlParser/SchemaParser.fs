@@ -136,7 +136,7 @@ module SchemaParser =
     // It is passed in as a parameter (wired in SqlParser.fs, which also defines the
     // CREATE SCHEMA parser that consumes these elements) so no forward reference is needed.
     // 11.1 <schema definition> ::= CREATE SCHEMA <schema name clause> [ <schema character set or path> ] [ <schema element>... ]
-    let pCreateSchemaStatement (pSchemaElement: Parser<StatementKind, unit>) =
+    let pCreateSchemaStatement pSchemaElement =
         let pNameClause =
             choice
                 [ attempt (
@@ -193,18 +193,43 @@ module SchemaParser =
                   attempt (pKeyword "RESTRICT" >>% ReferentialAction.Restrict)
                   attempt (pKeyword "NO" >>. pKeyword "ACTION" >>% ReferentialAction.NoAction) ]
 
-        many (
+        // 11.8 <referential triggered action> ::= [ <update rule> ] [ <delete rule> ]
+        //     | [ <delete rule> ] [ <update rule> ] — at most ONE of each, in either order.
+        let pRule =
             choice
                 [ attempt (
                       pKeyword "ON" >>. pKeyword "UPDATE" >>. pReferentialAction
-                      |>> fun a -> Some a, None
+                      |>> fun a -> Choice1Of2 a
                   )
                   attempt (
                       pKeyword "ON" >>. pKeyword "DELETE" >>. pReferentialAction
-                      |>> fun a -> None, Some a
+                      |>> fun a -> Choice2Of2 a
                   ) ]
-        )
-        |>> fun acts -> List.tryPick fst acts, List.tryPick snd acts
+
+        opt pRule
+        >>= fun first ->
+            opt pRule
+            >>= fun second ->
+                match first, second with
+                | Some(Choice1Of2 _), Some(Choice1Of2 _)
+                | Some(Choice2Of2 _), Some(Choice2Of2 _) ->
+                    fail "duplicate ON UPDATE / ON DELETE rule (11.8 <referential triggered action>)"
+                | _ ->
+                    let onUpd =
+                        [ first; second ]
+                        |> List.choose (function
+                            | Some(Choice1Of2 a) -> Some a
+                            | _ -> None)
+                        |> List.tryHead
+
+                    let onDel =
+                        [ first; second ]
+                        |> List.choose (function
+                            | Some(Choice2Of2 a) -> Some a
+                            | _ -> None)
+                        |> List.tryHead
+
+                    preturn (onUpd, onDel)
 
     // 11.4 <column constraint definition> ::=
     //     [ <constraint name definition> ] <column constraint> [ <constraint characteristics> ]
@@ -307,14 +332,23 @@ module SchemaParser =
         pKeyword "RESTART" >>. opt (pKeyword "WITH" >>. pSignedNumericLiteral)
         |>> Restart
 
-    // 11.72 <sequence generator option> — shared by CREATE/ALTER SEQUENCE and
-    // the <identity column specification> (11.4).
+    // 11.72 <sequence generator option> ::= <sequence generator data type option>
+    //     | <common sequence generator options>
+    // 11.72 <common sequence generator option> ::= <sequence generator start with option>
+    //     | <basic sequence generator option>
+    // CREATE SEQUENCE admits AS / START WITH / basic options but NOT RESTART.
     let pSequenceGeneratorOption =
         choice
             [ attempt (pKeyword "AS" >>. pDataType |>> DataTypeOption)
               attempt pSequenceGeneratorStartWithOption
-              attempt pBasicSequenceGeneratorOption
-              attempt pAlterSequenceGeneratorRestartOption ]
+              attempt pBasicSequenceGeneratorOption ]
+
+    // 11.72 <common sequence generator option> — the <identity column specification>
+    // admits START WITH and basic options but NOT AS / RESTART.
+    let pCommonSequenceGeneratorOption =
+        choice
+            [ attempt pSequenceGeneratorStartWithOption
+              attempt pBasicSequenceGeneratorOption ]
 
     // 11.4 <identity column specification> ::= GENERATED { ALWAYS | BY DEFAULT }
     //     AS IDENTITY [ ( <common sequence generator options> ) ]
@@ -323,7 +357,7 @@ module SchemaParser =
         >>. (pKeyword "ALWAYS" >>% true <|> (pKeyword "BY" >>. pKeyword "DEFAULT" >>% false))
         .>> pKeyword "AS"
         .>> pKeyword "IDENTITY"
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (many1 pSequenceGeneratorOption))
+        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (many1 pCommonSequenceGeneratorOption))
         |>> fun (isAlways, opts) ->
             { IsAlways = isAlways
               Options = Option.defaultValue [] opts }
@@ -885,11 +919,13 @@ module SchemaParser =
               Check = check
               Characteristics = chars }
 
-    // 11.34 <domain definition> ::= CREATE DOMAIN <domain name> [ AS ] <data type> [ <default clause> ] [ <domain constraint>... ] [ <collate clause> ]
+    // 11.34 <domain definition> ::= CREATE DOMAIN <domain name> [ AS ] <predefined type>
+    //     [ <default clause> ] [ <domain constraint>... ] [ <collate clause> ]
+    // The type slot is a <predefined type> — a UDT name is NOT a domain type.
     let pDomainDefinition =
         pKeyword "CREATE" >>. pKeyword "DOMAIN" >>. pSchemaQualifiedNameExpression
         .>>. opt (pKeyword "AS")
-        .>>. pDataType
+        .>>. pPredefinedType
         .>>. opt pDefaultClause
         .>>. many pDomainConstraint
         .>>. opt (pKeyword "COLLATE" >>. pSchemaQualifiedNameExpression)
@@ -1050,7 +1086,13 @@ module SchemaParser =
         .>>. pTriggerActionTime
         .>>. pTriggerEvent
         .>>. (pKeyword "ON" >>. pSchemaQualifiedNameExpression)
-        .>>. opt (pKeyword "REFERENCING" >>. many pTransitionTableOrVariable)
+        .>>. opt (
+            pKeyword "REFERENCING"
+            >>= fun _ ->
+                // 11.49 <transition table or variable list> ::= <transition table or variable>...
+                // — at least ONE entry; a bare REFERENCING is rejected.
+                many1 pTransitionTableOrVariable
+        )
         .>>. pTriggeredAction
         |>> fun (((((name, actionTime), event), table), transitions), action) ->
             CreateTrigger
@@ -1189,7 +1231,10 @@ module SchemaParser =
             between (token (pstring "(")) (token (pstring ")")) (sepBy1 pAttributeDefinition (token (pstring ",")))
 
         choice
-            [ attempt (pDataType |>> TypeRepresentation.Predefined)
+            [ // <collection type> requires at least one ARRAY/MULTISET suffix, so a bare
+              // UDT name falls through to the member list.
+              attempt (pCollectionTypeStrict |>> TypeRepresentation.Predefined)
+              attempt (pPredefinedType |>> TypeRepresentation.Predefined)
               attempt (pMemberList |>> TypeRepresentation.MemberList) ]
 
     // 11.51 <user-defined type option> ::= <instantiable clause> | <finality> | <reference type specification> | <cast to ref> | <cast to type> | <cast to distinct> | <cast to source>
@@ -1202,7 +1247,7 @@ module SchemaParser =
               attempt (pKeyword "FINAL" >>% TypeOption.Final true)
               attempt (pKeyword "NOT" >>. pKeyword "FINAL" >>% TypeOption.Final false)
               // 11.51 <reference type specification> — <user-defined representation> ::= REF USING <predefined type>
-              attempt (pKeyword "REF" >>. pKeyword "USING" >>. pDataType |>> TypeOption.RefUsing)
+              attempt (pKeyword "REF" >>. pKeyword "USING" >>. pPredefinedType |>> TypeOption.RefUsing)
               // 11.51 <derived representation> ::= REF FROM <list of attributes>
               attempt (
                   pKeyword "REF"
@@ -1559,7 +1604,7 @@ module SchemaParser =
         | SavepointLevel _ -> "SavepointLevel"
         | ExternalName _ -> "ExternalName"
 
-    let private rejectDuplicateCharacteristics chars : Parser<RoutineCharacteristic list, unit> =
+    let private rejectDuplicateCharacteristics chars =
         let dup =
             chars
             |> List.groupBy routineCharacteristicCategory
@@ -1594,7 +1639,7 @@ module SchemaParser =
 
     // ISO 9075-2 11.60 SR: <parameter style clause> may appear in <routine characteristics> and
     // again in <external body reference>, but a routine has at most one parameter style.
-    let private validateRoutine (routine: CreateRoutine) : Parser<CreateRoutine, unit> =
+    let private validateRoutine (routine: CreateRoutine) =
         let inCharacteristics =
             routine.Characteristics
             |> List.exists (function
@@ -1953,8 +1998,16 @@ module SchemaParser =
         .>>. many pSequenceGeneratorOption
         |>> fun (name, opts) -> CreateSequence(name, opts)
 
+    // 11.73 <alter sequence generator option> ::= <alter sequence generator restart option>
+    //     | <basic sequence generator option> — ALTER SEQUENCE admits RESTART and basic
+    //     options but NOT AS / START WITH.
+    let pAlterSequenceOption =
+        choice
+            [ attempt pAlterSequenceGeneratorRestartOption
+              attempt pBasicSequenceGeneratorOption ]
+
     // 11.73 <alter sequence generator statement> ::= ALTER SEQUENCE <name> <options>
     let pAlterSequenceStatement =
         pKeyword "ALTER" >>. pKeyword "SEQUENCE" >>. pSchemaQualifiedNameExpression
-        .>>. many1 pSequenceGeneratorOption
+        .>>. many1 pAlterSequenceOption
         |>> fun (name, opts) -> AlterSequence(name, opts)
