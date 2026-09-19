@@ -406,6 +406,14 @@ let ``Nested collection types are parsed`` () =
     | CreateTable { Columns = [ { DataType = ArrayType(MultisetType Integer, Some 3) } ] } -> ()
     | res -> Assert.Fail(sprintf "Expected ArrayType of MultisetType, got %A" res)
 
+    // 6.1 <array type>: the cardinality brackets admit the ??( / ??) trigraphs (5.1).
+    match parse "CREATE TABLE t (c INT ARRAY ??(5 ??))" with
+    | CreateTable { Columns = [ { DataType = ArrayType(Integer, Some 5) } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected trigraph array cardinality, got %A" res)
+
+    // <maximum cardinality> is an <unsigned integer> narrowed to int — out of range fails.
+    parseFails "CREATE TABLE t (c INT ARRAY [2147483648])"
+
 [<Fact>]
 let ``CREATE TABLE verification`` () =
     match parse "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100) NOT NULL)" with
@@ -820,6 +828,9 @@ let ``CREATE VIEW verification`` () =
                    IsRecursive = true
                    Query = SelectQuery _ } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateRecursiveView, got %A" res)
+
+    // 11.32 SR-4: CREATE RECURSIVE VIEW requires a <view column list>.
+    parseFails "CREATE RECURSIVE VIEW my_view AS SELECT x FROM t1"
 
 [<Fact>]
 let ``CREATE VIEW with column list verification`` () =
@@ -1305,8 +1316,12 @@ let ``CREATE PROCEDURE with rights clause verification`` () =
 [<Fact>]
 let ``CREATE PROCEDURE with EXTERNAL body verification`` () =
     match parse "CREATE PROCEDURE p () EXTERNAL NAME ext_proc" with
-    | CreateProcedure { Body = ExternalRoutine { Name = Some { Kind = Identifier "EXT_PROC" } } } -> ()
+    | CreateProcedure { Body = ExternalRoutine { Name = Some(Choice2Of2 { Kind = Identifier "EXT_PROC" }) } } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateProcedure EXTERNAL NAME, got %A" res)
+
+    match parse "CREATE PROCEDURE p () EXTERNAL NAME 'mylib.myfn'" with
+    | CreateProcedure { Body = ExternalRoutine { Name = Some(Choice1Of2 "mylib.myfn") } } -> ()
+    | res -> Assert.Fail(sprintf "Expected CreateProcedure EXTERNAL NAME string, got %A" res)
 
     match parse "CREATE PROCEDURE p () EXTERNAL" with
     | CreateProcedure { Body = ExternalRoutine { Name = None } } -> ()
@@ -1683,6 +1698,18 @@ let ``CREATE TRANSFORM verification`` () =
                           Elements = [ TransformElement.ToSql _; TransformElement.FromSql _ ] } ]) -> ()
     | res -> Assert.Fail(sprintf "Expected CreateTransform, got %A" res)
 
+    // 11.67 <transform element list> ::= <transform element> [ <comma> <transform element> ]
+    // — at most one TO SQL and one FROM SQL element.
+    parseFails "CREATE TRANSFORM FOR t g (TO SQL WITH f, TO SQL WITH h)"
+    parseFails "CREATE TRANSFORM FOR t g (TO SQL WITH f, FROM SQL WITH g, TO SQL WITH h)"
+
+    // 11.67 <transform definition>: groups are SPACE-separated repetitions — no comma.
+    match parse "CREATE TRANSFORM FOR t g1 (TO SQL WITH f) g2 (FROM SQL WITH g)" with
+    | CreateTransform(_, [ { Name = { Kind = Identifier "G1" } }; { Name = { Kind = Identifier "G2" } } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected two space-separated groups, got %A" res)
+
+    parseFails "CREATE TRANSFORM FOR t g1 (TO SQL WITH f), g2 (FROM SQL WITH g)"
+
     match parse "CREATE TRANSFORMS FOR t g (FROM SQL WITH f)" with
     | CreateTransform({ Kind = Identifier "T" }, [ { Elements = [ TransformElement.FromSql _ ] } ]) -> ()
     | res -> Assert.Fail(sprintf "Expected CreateTransform TRANSFORMS, got %A" res)
@@ -1698,15 +1725,20 @@ let ``ALTER TRANSFORM verification`` () =
         | a -> Assert.Fail(sprintf "Expected AddTransformElements, got %A" a)
 
         match dropAction with
-        | TransformAlteration.DropTransformElements([ TransformKind.ToSqlKind; TransformKind.FromSqlKind ], true) -> ()
+        | TransformAlteration.DropTransformElements(TransformKind.ToSqlKind, Some TransformKind.FromSqlKind, true) -> ()
         | a -> Assert.Fail(sprintf "Expected DropTransformElements, got %A" a)
     | res -> Assert.Fail(sprintf "Expected AlterTransform, got %A" res)
 
     match parse "ALTER TRANSFORMS FOR t g (DROP (TO SQL RESTRICT))" with
     | AlterTransform({ Kind = Identifier "T" },
-                     [ { Actions = [ TransformAlteration.DropTransformElements([ TransformKind.ToSqlKind ], false) ] } ]) ->
+                     [ { Actions = [ TransformAlteration.DropTransformElements(TransformKind.ToSqlKind, None, false) ] } ]) ->
         ()
     | res -> Assert.Fail(sprintf "Expected AlterTransform TRANSFORMS, got %A" res)
+
+    // 11.70 <drop transform element list>: at most two kinds (one per direction).
+    parseFails "ALTER TRANSFORM FOR t g (DROP (TO SQL, FROM SQL, TO SQL RESTRICT))"
+    // 11.69/11.70: the <drop behavior> belongs INSIDE the parens.
+    parseFails "ALTER TRANSFORM FOR t g (DROP (TO SQL)) CASCADE"
 
 [<Fact>]
 let ``DROP statements verification`` () =

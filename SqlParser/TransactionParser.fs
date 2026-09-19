@@ -28,7 +28,8 @@ module TransactionParser =
                   |>> DiagnosticsSize
               ) ]
 
-    // 17.3 <transaction characteristics> ::= <transaction mode> [ { <comma> <transaction mode> }... ]
+    // 17.3 <transaction characteristics> ::= [ <transaction mode> [ { <comma> <transaction mode> }... ] ]
+    // The characteristics themselves are optional: bare `SET TRANSACTION` is valid.
     let pTransactionCharacteristics = sepBy1 pTransactionMode (token (pstring ","))
 
     // 17.1 <start transaction statement> ::= START TRANSACTION [ <transaction characteristics> ]
@@ -39,8 +40,8 @@ module TransactionParser =
     // 17.2 <set transaction statement> ::= SET [ LOCAL ] TRANSACTION <transaction characteristics>
     let pSetTransactionStatement =
         pKeyword "SET" >>. opt (pKeyword "LOCAL") .>> pKeyword "TRANSACTION"
-        .>>. pTransactionCharacteristics
-        |>> fun (isLocal, modes) -> SetTransaction(Option.isSome isLocal, modes)
+        .>>. opt pTransactionCharacteristics
+        |>> fun (isLocal, modes) -> SetTransaction(Option.isSome isLocal, Option.defaultValue [] modes)
 
     // 17.4 <set constraints mode statement> ::= SET CONSTRAINTS <constraint name list> { DEFERRED | IMMEDIATE }
     // <constraint name list> ::= ALL | <constraint name>  [ { <comma>  <constraint name>  }... ]

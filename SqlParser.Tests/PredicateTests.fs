@@ -421,16 +421,25 @@ let ``IS OF type predicate verification`` () =
 [<Fact>]
 let ``IS JSON predicate verification`` () =
     match parse "SELECT x IS JSON" with
-    | IsJson({ Kind = Identifier "X" }, false, None, None) -> ()
+    | IsJson({ Kind = Identifier "X" }, None, false, None, None) -> ()
     | res -> Assert.Fail(sprintf "Expected IsJson, got %A" res)
 
     match parse "SELECT x IS NOT JSON VALUE WITH UNIQUE KEYS" with
-    | IsJson({ Kind = Identifier "X" }, true, Some JsonTypeValue, Some true) -> ()
+    | IsJson({ Kind = Identifier "X" }, None, true, Some JsonTypeValue, Some true) -> ()
     | res -> Assert.Fail(sprintf "Expected IsJson VALUE, got %A" res)
 
     match parse "SELECT x IS JSON ARRAY WITHOUT UNIQUE" with
-    | IsJson({ Kind = Identifier "X" }, false, Some JsonTypeArray, Some false) -> ()
+    | IsJson({ Kind = Identifier "X" }, None, false, Some JsonTypeArray, Some false) -> ()
     | res -> Assert.Fail(sprintf "Expected IsJson ARRAY, got %A" res)
+
+    // 8.22 <JSON predicate> ::= <string value expression> [ <JSON input clause> ] IS ...
+    match parse "SELECT x FORMAT JSON IS JSON" with
+    | IsJson({ Kind = Identifier "X" }, Some(JsonEncoding None), false, None, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsJson with input clause, got %A" res)
+
+    match parse "SELECT x FORMAT JSON ENCODING UTF16 IS NOT JSON SCALAR" with
+    | IsJson({ Kind = Identifier "X" }, Some(JsonEncoding(Some Utf16)), true, Some JsonTypeScalar, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsJson UTF16, got %A" res)
 
 [<Fact>]
 let ``LIKE_REGEX predicate verification`` () =
@@ -495,6 +504,11 @@ let ``Period predicate verification`` () =
                       { Kind = PeriodValue({ Kind = Identifier "S" }, { Kind = Identifier "E" }) }) -> ()
     | res -> Assert.Fail(sprintf "Expected PeriodContains, got %A" res)
 
+    // 8.20 — the slots are <datetime value expression>s, so the 6.35 chains stay legal.
+    match parse "SELECT p1 CONTAINS PERIOD (s + INTERVAL '1' DAY, e)" with
+    | PeriodPredicate(PeriodContains, { Kind = Identifier "P1" }, { Kind = PeriodValue _ }) -> ()
+    | res -> Assert.Fail(sprintf "Expected PeriodContains with datetime bounds, got %A" res)
+
     match parse "SELECT p1 IMMEDIATELY PRECEDES p2" with
     | PeriodPredicate(PeriodImmediatelyPrecedes, { Kind = Identifier "P1" }, { Kind = Identifier "P2" }) -> ()
     | res -> Assert.Fail(sprintf "Expected PeriodImmediatelyPrecedes, got %A" res)
@@ -508,6 +522,11 @@ let ``Period predicate verification`` () =
     parseFails "SELECT p1 FROM t WHERE 3 EQUALS PERIOD (s, e)"
     parseFails "SELECT p1 FROM t WHERE 1 + 2 PRECEDES PERIOD (s, e)"
     parseFails "SELECT p1 FROM t WHERE 1 = 2 SUCCEEDS PERIOD (s, e)"
+
+    // 8.20 <period start value>/<period end value> are <datetime value expression>s —
+    // boolean predicates and other non-datetime operators are rejected in both slots.
+    parseFails "SELECT PERIOD (s = e, f) EQUALS p FROM t"
+    parseFails "SELECT p CONTAINS PERIOD (s IS NULL, f) FROM t"
 
 [<Fact>]
 let ``EXISTS predicate verification`` () =

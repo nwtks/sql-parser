@@ -96,5 +96,5 @@ module SessionParser =
         pKeyword "SET"
         >>. (attempt (pKeyword "NO" >>. pKeyword "COLLATION" >>% None)
              <|> (pKeyword "COLLATION" >>. pValueSpecification |>> Some))
-        .>>. opt (attempt (pKeyword "FOR" >>. sepBy1 pSchemaQualifiedNameExpression (token (pstring ","))))
+        .>>. opt (attempt (pKeyword "FOR" >>. sepBy1 pCharacterSetSpecification (token (pstring ","))))
         |>> fun (collation, charsets) -> SetSessionCollation(collation, charsets)

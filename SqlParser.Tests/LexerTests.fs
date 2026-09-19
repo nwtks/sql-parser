@@ -251,6 +251,19 @@ let ``Interval sign inside quotes is parsed`` () =
         test pIntervalLiteral "INTERVAL '-1-2' YEAR TO MONTH"
     )
 
+// 5.3 <interval literal> ::= INTERVAL [ <sign> ] <interval string> <interval qualifier>
+[<Theory>]
+[<InlineData("INTERVAL -'5' DAY", true)>]
+[<InlineData("INTERVAL +'5' DAY", false)>]
+let ``Interval sign before the quoted string is parsed`` (sql: string) (expectedNeg: bool) =
+    Assert.Equal(expectedNeg, (test pIntervalLiteral sql).IsNegative)
+
+[<Fact>]
+let ``Outer and inner interval signs combine by XOR`` () =
+    // `-'−5'` — two minus signs cancel to a positive interval value.
+    Assert.False((test pIntervalLiteral "INTERVAL -'-5' DAY").IsNegative)
+    Assert.True((test pIntervalLiteral "INTERVAL -'5' DAY").IsNegative)
+
 [<Fact>]
 let ``Interval single field with leading precision is parsed`` () =
     Assert.Equal(

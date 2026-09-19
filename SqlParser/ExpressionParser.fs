@@ -319,11 +319,17 @@ module ExpressionParser =
 
     // 6.1 <datetime type> ::= DATE | TIME [ ( <time precision> ) ] [ <with or without time zone> ] | TIMESTAMP [ ( <timestamp precision> ) ] [ <with or without time zone> ]
     let pDateTimeType =
+        // 6.1 <with or without time zone> ::= WITH TIME ZONE | WITHOUT TIME ZONE
+        // Map each alternative with `>>%`: `pstringCI` returns the keyword as written in
+        // the input, so comparing the parsed string (`Some "WITH" -> true`) silently
+        // misread a lower-case `with` as WITHOUT TIME ZONE.
         let pTz =
-            opt (pKeyword "WITH" <|> pKeyword "WITHOUT" .>> pKeyword "TIME" .>> pKeyword "ZONE")
-            |>> function
-                | Some "WITH" -> true
-                | _ -> false
+            opt (
+                (pKeyword "WITH" >>% true <|> (pKeyword "WITHOUT" >>% false))
+                .>> pKeyword "TIME"
+                .>> pKeyword "ZONE"
+            )
+            |>> Option.defaultValue false
 
         choice
             [ pKeyword "DATE" >>% DateType
@@ -421,8 +427,8 @@ module ExpressionParser =
     // ARRAY/MULTISET may itself be a collection type.
     let pArraySuffix =
         pKeyword "ARRAY"
-        .>>. opt (between (token (pstring "[")) (token (pstring "]")) pUnsignedInteger)
-        |>> fun (_, len) -> fun t -> ArrayType(t, Option.map int len)
+        .>>. opt (between (token pLeftBracket) (token pRightBracket) (pUnsignedIntegerAsInt .>> pSeparator))
+        |>> fun (_, len) -> fun t -> ArrayType(t, len)
 
     let pMultisetSuffix = pKeyword "MULTISET" >>% fun t -> MultisetType t
 
@@ -2911,7 +2917,7 @@ module ExpressionParser =
                     |> List.map (function
                         | Inclusive e
                         | Exclusive e -> e))
-            | IsJson(x, _, _, _) -> [ x ]
+            | IsJson(x, _, _, _, _) -> [ x ]
             | RegexLike(x, _, p, flag) -> [ yield x; yield p; yield! Option.toList flag ]
             | Match(x, _, _, _) -> [ x ]
             | MemberOf(x, _, m) -> [ x; m ]

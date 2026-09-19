@@ -26,10 +26,14 @@ module PredicateParser =
               attempt (pKeyword "IMMEDIATELY" >>. pKeyword "PRECEDES" >>% PeriodImmediatelyPrecedes)
               attempt (pKeyword "IMMEDIATELY" >>. pKeyword "SUCCEEDS" >>% PeriodImmediatelySucceeds) ]
 
-    // 8.20 <period predicand> ::= <period reference> | PERIOD ( <start> , <end> )
+    // 8.20 <period predicand> ::= <period reference> | PERIOD ( <period start value>, <period end value> )
+    // Both slots are <datetime value expression> per the grammar, not general expressions.
     let pPeriodPredicand =
         pKeyword "PERIOD"
-        >>. between (token (pstring "(")) (token (pstring ")")) (pExpression .>> token (pstring ",") .>>. pExpression)
+        >>. between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (pDatetimeValueExpression .>> token (pstring ",") .>>. pDatetimeValueExpression)
         |>> (fun (start, finish) -> PeriodValue(start, finish))
         |> withExprPosition
 
@@ -244,11 +248,14 @@ module PredicateParser =
                           Pos = e.Pos }
             )
 
-        // 8.22 <JSON predicate> ::= IS [ NOT ] JSON [ VALUE | ARRAY | OBJECT | SCALAR ]
-        //     [ WITH | WITHOUT UNIQUE [ KEYS ] ]
+        // 8.22 <JSON predicate> ::= <string value expression> [ <JSON input clause> ]
+        //     IS [ NOT ] JSON [ <JSON predicate type constraint> ] [ <JSON key uniqueness constraint> ]
+        // The optional FORMAT slot is part of this suffix parser: pPredicate applies the
+        // whole suffix (FORMAT included) to the already-parsed part-1 operand.
         let pJsonPart2 =
             attempt (
-                pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "JSON"
+                opt pJsonInputClause
+                .>>. (pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "JSON")
                 .>>. opt (
                     pKeyword "VALUE" >>% JsonTypeValue
                     <|> (pKeyword "ARRAY" >>% JsonTypeArray)
@@ -262,9 +269,10 @@ module PredicateParser =
                         .>> opt (pKeyword "KEYS")
                     )
                 )
-                |>> fun ((isNot, typeConstraint), unique) ->
+                |>> fun (((format, isNot), typeConstraint), unique) ->
                     fun e ->
-                        { Expression.Kind = IsJson(e, Option.isSome isNot, typeConstraint, Option.flatten unique)
+                        { Expression.Kind =
+                            IsJson(e, format, Option.isSome isNot, typeConstraint, Option.flatten unique)
                           Pos = e.Pos }
             )
 

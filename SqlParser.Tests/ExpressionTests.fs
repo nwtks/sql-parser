@@ -259,6 +259,23 @@ let ``Datetime type variants are parsed`` () =
     | Cast(_, TimestampType(Some 3, true), _) -> ()
     | res -> Assert.Fail(sprintf "Expected TIMESTAMP(3) WITH TIME ZONE, got %A" res)
 
+    // `pstringCI` returns the keyword as written in the input, so the old mapping
+    // (`Some "WITH" -> true | _ -> false`) misread a lower-case `with` as WITHOUT.
+    match parse "SELECT CAST(x AS TIME with time zone)" with
+    | Cast(_, TimeType(None, true), _) -> ()
+    | res -> Assert.Fail(sprintf "Expected TIME with time zone (lower case), got %A" res)
+
+    match parse "SELECT CAST(x AS TIMESTAMP(2) With Time Zone)" with
+    | Cast(_, TimestampType(Some 2, true), _) -> ()
+    | res -> Assert.Fail(sprintf "Expected TIMESTAMP(2) With Time Zone, got %A" res)
+
+    // 6.1 <with or without time zone> is WITH TIME ZONE | WITHOUT TIME ZONE as a unit —
+    // the partial forms are not <datetime type>s.
+    parseFails "SELECT CAST(x AS TIME WITH)"
+    parseFails "SELECT CAST(x AS TIME WITHOUT)"
+    parseFails "SELECT CAST(x AS TIMESTAMP WITHOUT)"
+    parseFails "SELECT CAST(x AS TIME WITH TIME)"
+
 [<Fact>]
 let ``Interval type keeps its qualifier structure`` () =
     match parse "SELECT CAST(x AS INTERVAL YEAR TO MONTH)" with

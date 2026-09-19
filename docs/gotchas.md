@@ -136,6 +136,13 @@ in `<derived column>`). Consume only `.` in the separator, never `p` itself:
 Harmless with `>>.`/`.>>`/`>>%`, but mixing it with a `Parser<unit, _>` in an `<|>`
 is a type error — coerce with `|>> ignore` or `>>% ()`.
 
+The matched string is the keyword **as written in the input**: `pstringCI`
+matches case-insensitively but returns the input casing, so never match on it
+case-sensitively. The 6.1 `<with or without time zone>` parser mapped
+`function Some "WITH" -> true | _ -> false`, which silently read lower-case
+`with time zone` as WITHOUT TIME ZONE. Attach the result at the branch with
+`pKeyword "WITH" >>% true <|> …` instead.
+
 ## Definition order, forward references and dispatch
 
 ### Define before use, or use a forward reference

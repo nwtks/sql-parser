@@ -156,5 +156,14 @@ let ``SET NO COLLATION verification`` () =
 [<Fact>]
 let ``SET COLLATION FOR verification`` () =
     match parse "SET COLLATION 'c1' FOR cs1" with
-    | SetSessionCollation(Some { Kind = Literal(String "c1") }, Some [ { Kind = Identifier "CS1" } ]) -> ()
+    | SetSessionCollation(Some { Kind = Literal(String "c1") }, Some [ "CS1" ]) -> ()
     | res -> Assert.Fail(sprintf "Expected SetSessionCollation FOR, got %A" res)
+
+    // 19.10 <character set specification list> — a comma-separated list of
+    // <character set specification>s (10.5), each optionally schema-qualified.
+    match parse "SET NO COLLATION FOR cs1, s2.cs2" with
+    | SetSessionCollation(None, Some [ "CS1"; "S2.CS2" ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected charset list, got %A" res)
+
+    // A delimited identifier is not an <SQL language identifier>, so it is rejected here.
+    parseFails "SET COLLATION 'c1' FOR \"cs1\""

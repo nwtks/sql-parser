@@ -892,7 +892,7 @@ module SchemaParser =
         .>> pKeyword "AS"
         .>>. pQuery
         .>>. opt (attempt pWithCheckOption)
-        |>> fun ((((isRecursive, name), spec), query), checkOpt) ->
+        >>= fun ((((isRecursive, name), spec), query), checkOpt) ->
             let cols, ofType, under, viewElements =
                 match spec with
                 | Some(Choice1Of2 c) -> Some c, None, None, []
@@ -900,15 +900,22 @@ module SchemaParser =
                     None, Some typeName, subview, Option.defaultValue [] elements
                 | None -> None, None, None, []
 
-            { Name = name
-              IsRecursive = Option.defaultValue false isRecursive
-              Columns = cols
-              Query = query
-              CheckOption = checkOpt
-              OfType = ofType
-              Under = under
-              ViewElements = viewElements }
-            |> CreateView
+            // SR-4 of 11.32: if RECURSIVE is specified, a <view column list> shall be
+            // specified — enforced syntactically here.
+            if Option.defaultValue false isRecursive && Option.isNone cols then
+                fail "CREATE RECURSIVE VIEW requires a <view column list> (11.32 SR-4)"
+            else
+                preturn (
+                    { Name = name
+                      IsRecursive = Option.defaultValue false isRecursive
+                      Columns = cols
+                      Query = query
+                      CheckOption = checkOpt
+                      OfType = ofType
+                      Under = under
+                      ViewElements = viewElements }
+                    |> CreateView
+                )
 
     // 11.34 <domain constraint> ::= [ <constraint name definition> ] CHECK ( <search condition> ) [ <constraint characteristics> ]
     let pDomainConstraint =
@@ -1501,8 +1508,14 @@ module SchemaParser =
 
     // 11.60 <external body reference> ::= EXTERNAL [ NAME <external routine name> ]
     //     [ <parameter style clause> ] [ <transform group specification> ] [ <external security clause> ]
+    // <external routine name> (5.2) is <identifier> | <character string literal> — the
+    // canonical ISO form is the string literal (`EXTERNAL NAME 'mylib.myfn'`).
+    let pExternalRoutineName =
+        attempt (pCharacterStringLiteral |>> Choice1Of2)
+        <|> (pSchemaQualifiedNameExpression |>> Choice2Of2)
+
     let pExternalBodyReference =
-        pKeyword "EXTERNAL" >>. opt (pKeyword "NAME" >>. pSchemaQualifiedNameExpression)
+        pKeyword "EXTERNAL" >>. opt (pKeyword "NAME" >>. pExternalRoutineName)
         .>>. opt (attempt pParameterStyleClause)
         .>>. opt (attempt pTransformGroupSpecification)
         .>>. opt (attempt pExternalSecurityClause)
@@ -1828,7 +1841,7 @@ module SchemaParser =
         |>> fun (((source, target), fn), assignment) ->
             CreateCast(source, target, fn, Option.defaultValue false assignment)
 
-    // 11.65 <ordering category> ::= RELATIVE WITH <specific routine designator> | MAP WITH <specific routine designator> | STATE [ <data type> ]
+    // 11.65 <ordering category> ::= RELATIVE WITH <specific routine designator> | MAP WITH <specific routine designator> | STATE [ <specific name> ]
     let pOrderingCategory =
         choice
             [ attempt (
@@ -1873,13 +1886,37 @@ module SchemaParser =
              >>. pSpecificRoutineDesignator
              |>> TransformElement.FromSql)
 
-    // 11.67 <transform group> ::= <group name> ( <transform element> [ { <comma> <transform element> }... ] )
+    // 11.67 <transform element list> ::= <transform element> [ <comma> <transform element> ]
+    // — at most ONE TO SQL and ONE FROM SQL element (no duplicates).
+    let pTransformElementList =
+        sepBy1 pTransformElement (token (pstring ","))
+        >>= fun els ->
+            let isToSql =
+                function
+                | TransformElement.ToSql _ -> true
+                | _ -> false
+
+            let isFromSql =
+                function
+                | TransformElement.FromSql _ -> true
+                | _ -> false
+
+            if els |> List.filter isToSql |> List.length > 1 then
+                fail "a <transform element list> has at most one TO SQL element"
+            elif els |> List.filter isFromSql |> List.length > 1 then
+                fail "a <transform element list> has at most one FROM SQL element"
+            else
+                preturn els
+
+    // 11.67 <transform group> ::= <group name> ( <transform element list> )
     let pTransformGroup =
         pSchemaQualifiedNameExpression
-        .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pTransformElement (token (pstring ",")))
+        .>>. between (token (pstring "(")) (token (pstring ")")) pTransformElementList
         |>> fun (name, elements) -> { Name = name; Elements = elements }
 
-    // 11.67 <transform definition> ::= CREATE { TRANSFORM | TRANSFORMS } FOR <schema-resolved user-defined type name> <transform group> [ { <comma> <transform group> }... ]
+    // 11.67 <transform definition> ::= CREATE { TRANSFORM | TRANSFORMS } FOR
+    //     <schema-resolved user-defined type name> <transform group>...
+    // The groups are SPACE-separated repetitions — no comma between them.
     let pTransformDefinition =
         pKeyword "CREATE"
         >>. (pKeyword "TRANSFORM" <|> pKeyword "TRANSFORMS")
@@ -1888,7 +1925,7 @@ module SchemaParser =
         .>>. many1 pTransformGroup
         |>> fun (name, groups) -> CreateTransform(name, groups)
 
-    // 11.68 <alter transform action> ::= ADD <transform element list> | DROP ( <transform kind list> ) <drop behavior>
+    // 11.68 <alter transform action> ::= <add transform element list> | <drop transform element list>
     let pAlterTransformAction =
         // 11.70 <transform kind> ::= TO SQL | FROM SQL
         // Local because pAlterTransformAction is its only consumer.
@@ -1896,23 +1933,31 @@ module SchemaParser =
             pKeyword "TO" >>. pKeyword "SQL" >>% TransformKind.ToSqlKind
             <|> (pKeyword "FROM" >>. pKeyword "SQL" >>% TransformKind.FromSqlKind)
 
+        // 11.69 <add transform element list> ::= ADD ( <transform element list> )
         pKeyword "ADD"
-        >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pTransformElement (token (pstring ",")))
+        >>. between (token (pstring "(")) (token (pstring ")")) pTransformElementList
         |>> TransformAlteration.AddTransformElements
+        // 11.70 <drop transform element list> ::= DROP ( <transform kind>
+        //     [ <comma> <transform kind> ] <drop behavior> ) — at most two kinds, and the
+        //     <drop behavior> sits INSIDE the parens after the kinds.
         <|> (pKeyword "DROP"
              >>. between
                      (token (pstring "("))
                      (token (pstring ")"))
-                     (sepBy1 pTransformKind (token (pstring ",")) .>>. pDropBehavior)
-             |>> TransformAlteration.DropTransformElements)
+                     (pTransformKind
+                      .>>. opt (token (pstring ",") >>. pTransformKind)
+                      .>>. pDropBehavior)
+             |>> fun ((kind1, kind2), restrict) -> TransformAlteration.DropTransformElements(kind1, kind2, restrict))
 
-    // 11.68 <alter transform group> ::= <group name> ( <alter transform action> [ { <comma> <alter transform action> }... ] )
+    // 11.68 <alter transform group> ::= <group name> ( <alter transform action list> )
     let pAlterTransformGroup =
         pSchemaQualifiedNameExpression
         .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pAlterTransformAction (token (pstring ",")))
         |>> fun (name, actions) -> { Name = name; Actions = actions }
 
-    // 11.68 <alter transform statement> ::= ALTER { TRANSFORM | TRANSFORMS } FOR <schema-resolved user-defined type name> <alter transform group> [ { <comma> <alter transform group> }... ]
+    // 11.68 <alter transform statement> ::= ALTER { TRANSFORM | TRANSFORMS } FOR
+    //     <schema-resolved user-defined type name> <alter group>...
+    // The groups are SPACE-separated repetitions — no comma between them.
     let pAlterTransformStatement =
         pKeyword "ALTER"
         >>. (pKeyword "TRANSFORM" <|> pKeyword "TRANSFORMS")

@@ -506,8 +506,8 @@ and ExpressionKind =
     | PeriodPredicate of PeriodPredicateKind * Expression * Expression
     // 8.20 <period predicand> ::= <period reference> | PERIOD ( <start> , <end> )
     | PeriodValue of Expression * Expression
-    // 8.22 <JSON predicate>
-    | IsJson of Expression * bool * JsonTypeConstraint option * bool option
+    // 8.22 <JSON predicate> (format = the optional <JSON input clause> before IS)
+    | IsJson of Expression * JsonRepresentation option * bool * JsonTypeConstraint option * bool option
     // 8.23 <JSON exists predicate>
     | JsonExists of JsonApiCommon * JsonExistsErrorBehavior option
     // 10.7 <collate clause> ::= COLLATE <collation name>
@@ -1673,7 +1673,7 @@ and TransformGroupSpecification =
 // 11.60 <external body reference> ::= EXTERNAL [ NAME <external routine name> ]
 //     [ <parameter style clause> ] [ <transform group specification> ] [ <external security clause> ]
 and ExternalBodyReference =
-    { Name: Expression option
+    { Name: Choice<string, Expression> option
       ParameterStyle: string option
       TransformGroup: TransformGroupSpecification option
       ExternalSecurity: ExternalSecurity option }
@@ -1773,7 +1773,9 @@ and TransformGroup =
 // 11.68 <alter transform statement> actions
 and TransformAlteration =
     | AddTransformElements of TransformElement list
-    | DropTransformElements of TransformKind list * bool
+    // 11.70 <drop transform element list> ::= DROP ( <transform kind>
+    //     [ <comma> <transform kind> ] <drop behavior> ) — at most one kind per direction.
+    | DropTransformElements of TransformKind * TransformKind option * bool
 
 // 11.68 <alter transform group> ::= ALTER GROUP <group name> <alter transform action> [ { <comma> <alter transform action> }... ]
 and AlterTransformGroup =
@@ -2348,8 +2350,8 @@ and StatementKind =
     | SetPath of Expression
     // 19.9 <set transform group statement>
     | SetTransformGroup of Expression * Expression option
-    // 19.10 <set session collation statement>
-    | SetSessionCollation of Expression option * Expression list option
+    // 19.10 <set session collation statement> — the FOR list is <character set specification>s (strings)
+    | SetSessionCollation of Expression option * string list option
     // 20.2 <allocate descriptor statement>
     | AllocateDescriptor of Expression * Expression option
     // 20.3 <deallocate descriptor statement>

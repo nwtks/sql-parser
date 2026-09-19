@@ -34,6 +34,15 @@ let ``SET TRANSACTION verification`` () =
     | SetTransaction(true, [ Isolation ReadCommitted ]) -> ()
     | res -> Assert.Fail(sprintf "Expected SetTransaction LOCAL, got %A" res)
 
+    // 17.3 <transaction characteristics> is itself optional: bare SET TRANSACTION is valid.
+    match parse "SET TRANSACTION" with
+    | SetTransaction(false, []) -> ()
+    | res -> Assert.Fail(sprintf "Expected bare SetTransaction, got %A" res)
+
+    match parse "SET LOCAL TRANSACTION" with
+    | SetTransaction(true, []) -> ()
+    | res -> Assert.Fail(sprintf "Expected bare SetTransaction LOCAL, got %A" res)
+
 [<Fact>]
 let ``DIAGNOSTICS SIZE transaction mode verification`` () =
     match parse "START TRANSACTION DIAGNOSTICS SIZE 5" with

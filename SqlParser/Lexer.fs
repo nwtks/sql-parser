@@ -980,13 +980,18 @@ module Lexer =
         && fractionalOk
 
     // 5.3 <interval literal> ::= INTERVAL [ <sign> ] <interval string> <interval qualifier>
+    // Both <sign> slots are optional and may co-occur; the literal is negative when exactly
+    // one of them is '-'. The quoted sign stays part of <unquoted interval string> and is
+    // stripped here so ValueString holds only the <year-month|day-time literal>.
     let pIntervalLiteral =
-        pKeyword "INTERVAL" >>. ws .>>. between pQuote pQuote (manyChars (noneOf "'"))
+        pKeyword "INTERVAL" >>. opt (pchar '-' <|> pchar '+') .>> ws
+        .>>. between pQuote pQuote (manyChars (noneOf "'"))
         .>> ws
         .>>. pIntervalQualifier
         .>> ws
-        >>= fun ((_, v), q) ->
-            // The sign is part of the quoted value per the grammar
+        >>= fun ((outerSign, v), q) ->
+            let outerNeg = outerSign = Some '-'
+
             let isNeg, valueStr =
                 match v with
                 | s when s.StartsWith "-" -> true, s.Substring 1
@@ -995,7 +1000,7 @@ module Lexer =
 
             if isValidIntervalValue q valueStr then
                 preturn
-                    { IsNegative = isNeg
+                    { IsNegative = outerNeg <> isNeg
                       ValueString = valueStr
                       Qualifier = q }
             else

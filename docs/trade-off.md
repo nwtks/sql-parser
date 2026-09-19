@@ -658,6 +658,56 @@ clause that follows the other clauses still lands in that rule's own `Collation`
 `Varchar { Value = 100; Unit = None }`), and a collate clause immediately after a character
 type moved from the enclosing rule into the type.
 
+## Spec-compliance sweep round 5: clauses 5–19 (2026-09-19)
+
+A clause-by-clause sweep of the areas the earlier rounds had not audited
+(5.3 literals, 6.1 types, 8.20/8.22 predicates, 11.32/11.60/11.67–11.70,
+17.2, 19.10) found ten deviations; all are fixed (672 → 680 tests).
+
+- **6.1 `<with or without time zone>` was case-fragile.** The parsed keyword was
+  matched as a string (`function Some "WITH" -> true | _ -> false`), but
+  `pstringCI` returns the keyword *as written in the input* — `TIME with time
+  zone` parsed as `TimeType(None, false)` (WITHOUT). Both alternatives now map
+  with `>>% true` / `>>% false` inside one parenthesised alternation. The
+  partial forms (`TIME WITH`, `TIME WITHOUT`) were already rejected.
+- **5.3 `<interval literal>` admits `INTERVAL [ <sign> ] <interval string>`.**
+  The optional outer sign was missing (`INTERVAL -'5' DAY` was rejected). The
+  outer and in-string signs now combine: the literal is negative iff exactly one
+  of them is `-`, so `INTERVAL -'-5' DAY` is positive.
+- **6.1 `<array type>` `[ <maximum cardinality> ]`.** The suffix now uses the
+  5.1 `<left bracket or trigraph>` parsers (so `INT ARRAY ??(5 ??)` parses) and
+  `pUnsignedIntegerAsInt` instead of `uint64` + `Option.map int`, which wrapped
+  values above `Int32.MaxValue` negative. The cardinality also consumes a
+  trailing `<separator>`, so `ARRAY [ 5 ]` parses like `ARRAY [5]`.
+- **8.20 `<period predicand>` slots are `<datetime value expression>`s.** Was
+  `pExpression` in both slots, so boolean predicates were accepted inside the
+  bounds (`PERIOD (s = e, f)`); the slots now use `pDatetimeValueExpression`,
+  whose primaries are `<value expression primary>`s and whose operators are the
+  6.35 `+`/`-` chains — `PERIOD (s + INTERVAL '1' DAY, e)` still parses.
+- **8.22 `<JSON predicate>` has `[ <JSON input clause> ]`.** `x FORMAT JSON IS
+  JSON` now parses. **Breaking AST:** `IsJson` gained a second field
+  (`Expression * JsonRepresentation option * bool * JsonTypeConstraint option *
+  bool option`).
+- **11.32 SR-4:** `CREATE RECURSIVE VIEW` now requires a `<view column list>`.
+- **11.60 `EXTERNAL NAME` accepts the string form.** 5.2 `<external routine
+  name> ::= <identifier> | <character string literal>`, so
+  `EXTERNAL NAME 'mylib.myfn'` parses. **Breaking AST:**
+  `ExternalBodyReference.Name` is now `Choice<string, Expression> option`.
+- **11.67/11.70 transform lists.** `<transform element list>` holds at most one
+  `TO SQL` and one `FROM SQL` element, and `<drop transform element list>` at
+  most two `<transform kind>`s with the `<drop behavior>` inside the parens.
+  **Breaking AST:** `DropTransformElements` is
+  `TransformKind * TransformKind option * bool`. Comment citations corrected:
+  the groups of 11.67/11.68 are space-separated repetitions (not comma lists),
+  and 11.65 is `STATE [ <specific name> ]`.
+- **17.2 `SET TRANSACTION`: `<transaction characteristics>` is optional**
+  (17.3's own brackets), so bare `SET TRANSACTION` parses as
+  `SetTransaction(isLocal, [])`.
+- **19.10 `FOR <character set specification list>`.** The list now uses
+  `<character set specification>` (10.5) instead of arbitrary schema-qualified
+  names, so `FOR "cs1"` is rejected. **Breaking AST:**
+  `SetSessionCollation`'s second field is `string list option`.
+
 ## Still open after the 2026-09-19 fixes
 
 - **6.37 in a general `<value expression>`.** `INTERVAL '1' DAY * ? DAY` parses under
