@@ -18,8 +18,7 @@ flows through the parsers, and which conventions the implementation follows.
   design document. Source comments cite the rule they implement as
   `// <clause> <rule name>` (e.g. `// 11.3 <table definition>`), and
   `SqlParser.Tests/RuleNumberingTests.fs` enforces that citation style. Where the
-  standard is strict, the parser is strict too — see
-  [trade-off.md](trade-off.md).
+  standard is strict, the parser is strict too — see [trade-off.md](trade-off.md).
 - **Parse-only.** The library produces an AST; it performs no name resolution,
   type checking or evaluation. Shape-based ambiguity between rules with identical
   syntax is therefore resolved heuristically and documented as such.
@@ -81,7 +80,7 @@ is fixed in `SqlParser/SqlParser.fsproj`.
 | File | Grammar sections | Responsibility |
 |------|------------------|----------------|
 | `Ast.fs` | — | All AST types (`Statement`, `Expression`, `DataType`, …). No parsers. |
-| `Lexer.fs` | §5, 10.1, 10.5 | Reserved words, whitespace/comments, identifiers, literals, operators, terminal characters, `<character set specification>`. |
+| `Lexer.fs` | §5, 10.1, 10.5 | Reserved words, whitespace/comments, identifiers, literals, operators, terminal characters, interval qualifiers, `<character set specification>`. |
 | `ExpressionParser.fs` | §6, §7/§8 fragments, §10 | Operator-precedence parser, routine invocation, subqueries, row patterns, JSON functions, `<data type>` family, shared `<scope clause>`/`pMethodKind`. |
 | `QueryParser.fs` | §7, 10.10 | `<query expression>`, `SELECT`, table/join references, windows, CTEs, `MATCH_RECOGNIZE`. |
 | `PredicateParser.fs` | §8 | `<predicate>` postfix chain (`BETWEEN`/`IN`/`LIKE`/`SIMILAR TO`/`IS …`) and the standalone `EXISTS`/`UNIQUE`/`JSON_EXISTS`/period predicates. |
@@ -98,11 +97,9 @@ is fixed in `SqlParser/SqlParser.fsproj`.
 
 Examples of the ordering constraint: `PredicateParser.fs` (§8) needs
 `ExpressionParser.pExpression`/`pJsonApiCommonSyntax` and the `pQuery` forward ref, so
-it compiles after `QueryParser.fs` (§7); it sits before `SchemaParser.fs` (§11)
-to keep the file order clause-ascending (§6 → §7 → §8 → §11).
-`AccessControlParser.fs` needs `SchemaParser.pSpecificRoutineDesignator` /
-`pRoutineDesignator` / `pDropBehavior`, so it compiles after
-`SchemaParser.fs`, again keeping the order clause-ascending (§11 → §12 → §14).
+it compiles after `QueryParser.fs` (§7) while keeping the file order
+clause-ascending (§6 → §7 → §8 → §11). `AccessControlParser.fs` (§12) needs
+`SchemaParser`'s `pSpecificRoutineDesignator` (10.6) and `pDropBehavior` (11.2), and
 `DataManipulationParser.fs` owns `pInputUsingClause`/`pOutputUsingClause` because
 `pOpenStatement` needs them and compiles before `DynamicParser.fs`.
 
@@ -121,19 +118,20 @@ crosses a module boundary is wired by whichever module first defines its target
 | `pStatement` / `pStatementRef` | `SchemaParser.fs` | the full statement `choice` (`SqlParser.fs`) | The first module that needs "any statement" — routine bodies (11.60) and triggered statements (11.49). `SqlParser.fs` reuses the same ref for `parseStatement`. |
 | `pDataChangeStatementRef` | `QueryParser.fs` | `pInsertStatement` … `pMergeStatement` (`SqlParser.fs`) | `<data change delta table>` (7.6) needs the DML parsers, compiled later. |
 | `pRoutineInvocation` | `ExpressionParser.fs` | the 10.4 `<routine invocation>` parser (same module) | A `<table argument>` (10.4) may be a `<table function invocation>`, i.e. a `<routine invocation>`, while a routine invocation's `<SQL argument list>` contains `<SQL argument>`s again. |
-| `pPredicateRef`, `pPredicateNoBooleanTestRef`, `pPredicatePrimaryRef` | `ExpressionParser.fs` | `PredicateParser` (§8) (`SqlParser.fs`) | §6.3 `<value expression primary>` and §6.39 `<boolean test>` consume §8 before `PredicateParser.fs` is compiled; `pPredicateNoBooleanTest` is the 8.1 suffix chain without the boolean test, for operands that are not `<boolean primary>`s; `pPredicatePrimary` bundles the 8.9/8.10/8.11/8.20/8.23 atoms into one ref. |
+| `pPredicateRef`, `pPredicateNoBooleanTestRef`, `pBooleanTestPart2Ref`, `pWhenOperandPart2Ref`, `pPredicatePrimaryRef` | `ExpressionParser.fs` | `PredicateParser` (§8) (`SqlParser.fs`) | §6.3 `<value expression primary>` and §6.39 `<boolean test>` consume §8 before `PredicateParser.fs` is compiled. `pPredicate` is the full 8.1 suffix chain; `pPredicateNoBooleanTest` drops the 6.39 test for operands that are not `<boolean primary>`s; `pBooleanTestPart2` is the 6.39 `IS [NOT] {TRUE / FALSE / UNKNOWN}` suffix alone; `pWhenOperandPart2` carries 6.12's narrower part-2 list; `pPredicatePrimary` bundles the 8.9/8.10/8.11/8.20/8.23 atoms. |
 | `pQueryRef` | `ExpressionParser.fs` | `pQueryExpression` (`QueryParser.fs`) | Scalar and quantified subqueries (6.29) need the §7 query parser. |
 | `pExpression` | `ExpressionParser.fs` | `opp.ExpressionParser` | Central expression parser, used before `opp` is complete. |
-| `pNonBooleanValueExpression` | `ExpressionParser.fs` | `opp.ExpressionParser` | Boolean-free `<value expression>` for JSON slots and `<point in time>` (6.35). |
+| `pNonBooleanValueExpression` | `ExpressionParser.fs` | the boolean-free variant of `opp.ExpressionParser` | JSON slots and `<point in time>` (6.35) must not consume `AND`/`OR`. |
 | `pDataType` | `ExpressionParser.fs` | the 6.1 `<data type>` family | `CAST`, JSON `RETURNING`, collection element types. |
 | `pDatetimeValueExpression` | `ExpressionParser.fs` | the 6.35 `<datetime value expression>` | Needed by the 6.37 `<interval value expression>` alternative before it is defined. |
+| `pNumericValueExpression` | `ExpressionParser.fs` | `oppNumeric.ExpressionParser` (same module) | Breaks the cycle `pValueExpressionPrimaryImpl → pArrayElementReference → pNumericValueExpression → pValueExpressionPrimary`. |
 | `pMultisetValueExpression` | `ExpressionParser.fs` | post-`pValueExpressionPrimary` | 6.44 `SET (...)` is itself a `<value expression primary>`. |
 | `pBooleanFactor` | `ExpressionParser.fs` | the 6.39 `<boolean factor>` | `[ NOT ] <boolean test>` is left-recursive. |
 | `pRowPattern` | `ExpressionParser.fs` | 7.9 `<row pattern>` | `<row pattern>` is recursive through `<row pattern primary>`. |
 | `pTableReference` | `QueryParser.fs` | 7.6 `<table reference>` | A `<table primary>` may nest a parenthesised `<joined table>`. |
 | `pQueryExpressionBody` | `QueryParser.fs` | 7.17 `<query expression body>` | `UNION`/`EXCEPT` are left-recursive, and a parenthesised `<query primary>` contains a body. |
 | `pGroupingElement` | `QueryParser.fs` | 7.13 `<grouping element>` | `GROUPING SETS` nests `<grouping element>`s. |
-| `pJsonTableColumnsClause`, `pJsonTablePlanPrimary`, `pJsonTablePlan` | `QueryParser.fs` | 7.11 `<JSON table>` | `JSON_TABLE` columns and plans are mutually recursive. |
+| `pJsonTableColumnsClause` / `pJsonTablePrimitiveColumnsClause`, `pJsonTablePlanPrimary`, `pJsonTablePlan` | `QueryParser.fs` | 7.11 `<JSON table>` | `JSON_TABLE` columns and plans are mutually recursive. |
 
 **Never read `.Value` at module-initialisation time** — it holds FParsec's dummy
 parser until it is assigned. Reference the forwarding *parser* instead.
@@ -180,17 +178,17 @@ parser until it is assigned. Reference the forwarding *parser* instead.
   and consumes trailing whitespace. It works for reserved *and* non-reserved
   words — the reserved set only constrains identifiers.
 - Consequence: many dispatch decisions cannot rely on reservedness. Words such as
-  `TYPE`, `UNDER`, `DESCRIBE`, `FINAL`, `OPTIONS` are non-reserved, so the parser
-  lists alternatives in an order that keeps them apart (e.g. `ALTER TYPE` before
-  `ALTER ROUTINE`, `DROP TYPE` before `DROP ROUTINE`). These orderings are load-
-  bearing and recorded in [gotchas.md](gotchas.md).
-- Routine invocation is restricted to a **whitelist** (`functionKeywords` /
-  `pReservedFunctionName`) of reserved keywords the grammar spells as functions
-  (aggregate/window/inverse-distribution names plus built-ins without a dedicated
-  parser). Reserved words that start dedicated constructs (`EXISTS`, `UNIQUE`,
-  `VALUE_OF`, `PERIOD`, …) are intentionally absent, so they cannot silently
-  degrade to a generic `FunctionCall`. Adding a reserved-name built-in requires
-  extending the whitelist.
+  `TYPE`, `UNDER`, `ROUTINE`, `FINAL` and `OPTIONS` are non-reserved, so the
+  parser lists alternatives in an order that keeps them apart (e.g. `ALTER TYPE`
+  before `ALTER ROUTINE`, `DROP TYPE` before `DROP ROUTINE`). These orderings are
+  load-bearing and recorded in [gotchas.md](gotchas.md).
+- Routine invocation comes in two halves: a **whitelist** of reserved keywords the
+  grammar spells as functions (`functionKeywords` / `pReservedFunctionName` —
+  aggregate/window/inverse-distribution names plus built-ins without a dedicated
+  parser), and non-reserved/delimited identifiers (`pRoutineName`). Reserved words
+  that start dedicated constructs (`EXISTS`, `UNIQUE`, `VALUE_OF`, `PERIOD`, …) stay
+  off the whitelist, so they cannot silently degrade to a generic `FunctionCall`;
+  adding a reserved-name built-in requires extending it.
 - Closed enumerations (diagnostics/descriptor item names, `<language name>`,
   `<parameter style>`) are parsed with explicit `choice [ pKeyword "…" ]` lists,
   never `pIdentifierRaw`, which would also accept `ALL`/`SELECT`/….
@@ -237,10 +235,10 @@ parser until it is assigned. Reference the forwarding *parser* instead.
   templates — heading-only sections with no `<…>` productions) and §13.1–13.3
   (SQL-client module definition; not applicable to a library).
 - **N/A (⊘):** §13.4, §20.26, and all of §21 (embedded SQL host programs).
-- **Over-permissive:** none recorded. §5.3's known over-permissiveness was closed out;
-  the remaining accepted-but-not-standard constructs are the documented deliberate
-  deviations in [trade-off.md](trade-off.md) (semantic distinctions, e.g. interval vs
-  datetime operands, and the opaque JSON path language).
+- **Over-permissive:** none recorded — accepted-but-not-standard constructs are
+  limited to the deliberate deviations documented in [trade-off.md](trade-off.md)
+  (semantic distinctions, e.g. interval vs datetime operands, and the opaque JSON
+  path language).
 - A rule name absent from the source does **not** imply it is unimplemented — it
   may be a sub-rule of a cited parent production.
 
@@ -259,7 +257,7 @@ parser until it is assigned. Reference the forwarding *parser* instead.
 
 ### 📝 Data Manipulation (DML)
 
-- `INSERT INTO ... VALUES / SELECT`
+- `INSERT INTO ... VALUES / SELECT / DEFAULT VALUES`
 - `UPDATE [ <table> ] ... SET ... WHERE`, including `WHERE CURRENT OF <cursor>` (positioned and preparable-dynamic variants).
 - `DELETE [ FROM <table> ] ... WHERE`, including `WHERE CURRENT OF <cursor>` (positioned and preparable-dynamic variants).
 - `MERGE INTO ... USING ... ON ...`

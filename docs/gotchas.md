@@ -1,487 +1,223 @@
 # Gotchas & Common Mistakes
 
 Recurring pitfalls in this codebase. [architecture.md](architecture.md) covers the
-design and [trade-off.md](trade-off.md) the rationale behind the strictness.
+design and [trade-off.md](trade-off.md) the rationale. Check this file before touching
+parsers, AST patterns, or tests — every entry is a real failure mode from this codebase.
 
 ## F# language pitfalls
 
-### Union-case names clash — qualify at the use site
-
-Many SQL keywords map to natural F# case names that already exist in `Ast.fs`; an
-unqualified name silently resolves to the wrong type (usually the most recently
-defined).
-
-| Case name | Clashes between |
-|-----------|-----------------|
-| `Select`, `Insert`, `Update`, `Delete` | `StatementKind` vs `PrivilegeAction` |
-| `Unique`, `PrimaryKey`, `Check` | `ExpressionKind`/`ColumnConstraintKind` vs `TableConstraint` |
-| `SetDefault`, `DropDefault`, `AddConstraint`, `DropConstraint` | `ReferentialAction`/`ColumnAlteration`/`AlterTableAction`/`DomainAlteration` |
-| `Final` | `ResultOption` vs `TypeOption` vs `RunningOrFinal` |
-| `Between` | `ExpressionKind` vs `SystemTimeSpec` |
-| `Range` | `IntervalQualifier` vs `WindowFrameUnit` |
-| `BeginAtomic` | `RoutineBody` vs `TriggeredStatement` |
-| `First`, `Last`, `Next` | `Direction` vs `FirstOrLast`/`PrevOrNext` |
-
-Always qualify (`PrivilegeAction.Select`, `TableConstraint.Unique`,
-`IntervalQualifier.Range(…)`, `TypeOption.Final false`, `RunningOrFinal.Final`);
-`ColumnConstraintKind` has no bare `Null` for this reason. After moving
-declarations in `Ast.fs`, re-check for newly ambiguous cases.
-
-### Record types with identical field shapes are inference-ambiguous
-
-`Expression`, `TableSource` and `Statement` all have `Kind` + `Pos`, so an
-unannotated literal like `{ Kind = Literal(Number 1m); Pos = … }` can be inferred
-as `Statement`; `CreateViewStatement` and `Cte` similarly collide in `pWithListElement`.
-
-**Fix:** qualify the first field (`{ Expression.Kind = …; … }`,
-`{ TableSource.Kind = …; … }`, `{ Cte.Name = name; … }`) or annotate the binding
-(`let defaultCount: Expression = …`).
-
-### Named parsers need an explicit type annotation
-
-Value restriction: annotate `let pLeftBrace: Parser<char, unit> = pchar '{'` (use
-`Parser<string, unit>` for `pstring`); inline `token (pstring "{")` is unaffected.
-
-### Record patterns: alignment and nesting rules
-
-- Omitted fields are ignored — never write `{ Kind = X; _ }`.
-- Newline-separated fields must start at the **same column** (FS0010); extract the
-  record and match separately, or bind and assert on fields.
-- A `[` for a list value must start on the `=` line
-  (`| CreateProcedure { Parameters = [ { Mode = Some In } ] } -> ()`); an inline
-  list-of-record inside `Some(...)` fails even then — bind it first
-  (`| CreateType { Representation = Some(MemberList attrs) } -> match attrs with …`).
-- Deeply nested multi-line patterns are fragile — bind intermediates and
-  `Assert.Equal`.
-
-### `[<TailCall>]` needs a module-level function and a real tail call
-
-The attribute cannot be attached to a local `let rec` inside a function body (FS0010), and a
-*monadic* parser loop cannot satisfy it at all: `pBooleanTestSuffixes` recurses as
-`suffix >>= pBooleanTestSuffixes`, which F# reports as FS3569 ("has the TailCallAttribute
-attribute, but is not being used in a tail recursive way"). Where a collector must be
-tail-recursive, move it to module level and thread the state through an explicit work list
-(`collectSqlArgumentChildren` in `ExpressionParser.fs`, called by `findExpressionViolationIn`).
+- **Union-case names clash across DUs** — `Select`/`Insert`/`Update`/`Delete`
+  (`StatementKind` vs `PrivilegeAction`), `Unique`/`PrimaryKey`/`Check`,
+  `SetDefault`/`AddConstraint`/`DropConstraint`, `Final` (`ResultOption` vs
+  `TypeOption` vs `RunningOrFinal`), `Between`, `Range` (`IntervalQualifier` vs
+  `WindowFrameUnit`), `BeginAtomic`, `First`/`Last`/`Next`. An unqualified name
+  silently resolves to the wrong (usually most-recently-defined) type — qualify
+  (`PrivilegeAction.Select`, `TableConstraint.Unique`, …), and re-check after moving
+  declarations in `Ast.fs`.
+- **Identically-shaped records are inference-ambiguous** — `Expression`, `TableSource`
+  and `Statement` all have `Kind` + `Pos`; `CreateViewStatement` and `Cte` collide in
+  `pWithListElement`. Qualify the first field (`{ Expression.Kind = … }`) or annotate
+  the binding.
+- **Value restriction**: a *named* parser binding needs an explicit type
+  (`let pLeftBrace: Parser<char, unit> = pchar '{'`; `Parser<string, unit>` for
+  `pstring`). Inline `token (pstring "{")` is unaffected.
+- **Record patterns**: omitted fields are ignored (never `{ Kind = X; _ }`);
+  newline-separated fields must start at the same column (FS0010); a list `[` must
+  start on the `=` line; an inline list-of-record inside `Some(...)` fails even then —
+  bind intermediates and assert on fields. Functions cannot appear in patterns
+  (`dataTypeParam Integer` fails).
+- **`[<TailCall>]`** cannot be attached to a local `let rec` (FS0010), and a *monadic*
+  loop can never satisfy it (FS3569 — `suffix >>= pBooleanTestSuffixes`). Move
+  tail-recursive collectors to module level with an explicit work list
+  (`collectSqlArgumentChildren`).
 
 ## FParsec combinator pitfalls
 
-### Operator precedence
-
-`<|>` binds **tighter** than the `.>>`/`.>>.`/`>>.` family, and `>>%` shares F#'s
-precedence group with `<|>`. Parenthesise each alternative, and the constructor
-branch of `attempt pTargetTable |>> DmlTarget.TableTarget <|> preturn …`, which
-otherwise parses as `attempt pTargetTable |>> (DmlTarget.TableTarget <|> …)`
-(`|>>` binds looser than `<|>`).
-
-### `>>.` silently discards a result
-
-Use `.>>.` when the value must survive (`>>. opt p .>>. q`).
-
-A `>>.`-chain also returns the *last* keyword's string, so
-`pKeyword "DROP" >>. pKeyword "SYSTEM" >>. pKeyword "VERSIONING" .>>. pDropBehavior`
-yields `string * bool`. Use `>>.` (not `.>>.`) for the final keyword.
-
-### `|>>` swallows a following `>>=` into the lambda body
-
-```fsharp
-|>> fun x -> { … } >>= f    // parses as |>> (fun x -> { … } >>= f)
-```
-
-Parenthesise the lambda: `|>> (fun x -> { … }) >>= f`. An `|>>` projection cannot
-fail, so validation must use `>>=` + `fail`, and the `StatementKind` wrapper goes
-*after* it.
-
-### `opt` does not backtrack partial consumption
-
-Wrap optional multi-keyword clauses in `attempt`
-(`opt (attempt (pKeyword "WITH" >>. pKeyword "HIERARCHY" >>. pKeyword "OPTION"))`)
-— required for `pIdentityColumnSpecification`, `pWithCheckOption`, `pUpdatabilityClause`,
-`pCursorHoldability`, `pCursorReturnability`, the `FOR UPDATE OF` group and the
-`WITH`-prefixed clauses.
-
-A single optional token hits the same trap once an earlier parser has already
-consumed input: `pCharacterSetSpecification` must use
-`opt (attempt (pSqlLanguageIdentifier .>> token (pstring ".")))`, otherwise the
-name is consumed and the missing `.` aborts the whole unqualified form, so
-`_UTF8'abc'` fails to parse.
-
-### `notFollowedBy` makes the failure fatal — wrap in `attempt`
-
-`opt` cannot catch it, so wrap in `attempt` to let `opt` return `None` (see
-`pExistingWindowName` / `pWindowFrameClause`).
-
-### `attempt` is required inside postfix loops
-
-A consumed token followed by a failure aborts the enclosing `many`. Canonical:
-`many (attempt pDereferenceReference <|> attempt pMethodOrFieldReference)` and
-`many (attempt pPredicate <|> … <|> attempt pTimeZoneSuffix)`.
-
-### `sepBy1` does not backtrack a consumed separator — and must not re-parse `p`
-
-Use `p .>>. many (attempt (sep >>. p))` when a trailing separator is optional (`t.*`
-in `<derived column>`). Consume only `.` in the separator, never `p` itself:
-`pIdentifier .>>. many (attempt (token "." >>. pIdentifier .>>? notFollowedBy "("))`.
-
-### Whitespace is not skipped automatically
-
-`pKeyword` skips no *leading* whitespace, and raw parsers (`pchar '*'`,
-`pUnsignedInteger`) consume no *trailing* whitespace — follow them with `.>> ws` /
-`token`, or the next `pKeyword` fails on the space.
-
-`pKeyword` also refuses a keyword immediately followed by an identifier character
-(`SYSTEM` ≠ `SYSTEM_TIME`, `C` ≠ `COBOL`).
-
-### `pKeyword` returns `Parser<string, unit>`, not `Parser<unit, unit>`
-
-Harmless with `>>.`/`.>>`/`>>%`, but mixing it with a `Parser<unit, _>` in an `<|>`
-is a type error — coerce with `|>> ignore` or `>>% ()`.
-
-The matched string is the keyword **as written in the input**: `pstringCI`
-matches case-insensitively but returns the input casing, so never match on it
-case-sensitively. The 6.1 `<with or without time zone>` parser mapped
-`function Some "WITH" -> true | _ -> false`, which silently read lower-case
-`with time zone` as WITHOUT TIME ZONE. Attach the result at the branch with
-`pKeyword "WITH" >>% true <|> …` instead.
+- **Precedence**: `<|>` binds tighter than `.>>`/`.>>.`/`>>.`; `>>%` shares `<|>`'s
+  group; `|>>` binds looser than `<|>` — parenthesise alternatives and constructor
+  branches (`attempt p |>> C <|> …` otherwise parses as `|>> (C <|> …)`).
+- **`>>.` discards the left result**; a `>>.`-chain returns the *last* keyword's string
+  (`pKeyword "DROP" >>. … .>>. pDropBehavior` yields `string * bool`). Use `.>>.` when
+  the value must survive, `>>.` for the final keyword.
+- **`|>>` swallows a following `>>=` into its lambda body** — parenthesise the lambda.
+  An `|>>` projection cannot fail, so semantic validation needs `>>=` + `fail`, with
+  the `StatementKind` wrapper *after* it.
+- **`opt` does not backtrack partial consumption** — wrap optional multi-keyword
+  clauses in `attempt` (`pIdentityColumnSpecification`, `pWithCheckOption`,
+  `pUpdatabilityClause`, `pCursorHoldability`/`pCursorReturnability`, `FOR UPDATE OF`,
+  the `WITH`-prefixed clauses). Even a single optional token hits the trap after input
+  was consumed: `pCharacterSetSpecification` needs
+  `opt (attempt (pSqlLanguageIdentifier .>> token (pstring ".")))` or `_UTF8'abc'` fails.
+- **`notFollowedBy` makes failure fatal** — `opt` cannot catch it; wrap in `attempt`
+  (`pExistingWindowName`, `pWindowFrameClause`).
+- **Postfix loops need `many (attempt …)`** — a consumed token followed by a failure
+  aborts the enclosing `many` (dereference/method chains, predicate suffixes).
+- **`sepBy1` does not backtrack a consumed separator** — use
+  `p .>>. many (attempt (sep >>. p))` when a trailing separator is optional (`t.*`),
+  and consume only the separator in the loop, never `p` itself.
+- **Whitespace is not skipped automatically** — `pKeyword` skips no *leading* ws; raw
+  parsers (`pchar '*'`, `pUnsignedInteger`) consume no *trailing* ws — follow them with
+  `.>> ws` / `token`.
+- **`pKeyword` returns `Parser<string, unit>`** — mixing it with a `Parser<unit, _>`
+  via `<|>` is a type error; coerce with `|>> ignore` / `>>% ()`. The matched string
+  keeps the *input casing* (`pstringCI`), so never match it case-sensitively — attach
+  the meaning per branch (`pKeyword "WITH" >>% true`). It also refuses a keyword
+  immediately followed by an identifier character (`SYSTEM` ≠ `SYSTEM_TIME`).
 
 ## Definition order, forward references and dispatch
 
-### Define before use, or use a forward reference
-
-F# requires definitions before use. Move the dependency above its user
-(`pSequenceGeneratorOption`/`pIdentityColumnSpecification` before `pColumnDefinition`), nest it when there
-is exactly one consumer (`pTransformsToBeDropped` in `pDropStatement`), or use
-`createParserForwardedToRef` across modules.
-
-### Definitions are ordered by spec clause (best-effort)
-
-Top-level definitions follow the ascending ISO/IEC 9075-2:2016 clause number cited
-above them (sort key: the *first* citation; uncited helpers stay with what they
-serve), but `define-before-use` wins — a helper cited under a later clause stays
-above its user (`pReferentialTriggeredAction` 11.8 before `pColumnConstraintDefinition`
-11.4). Where order is compiler-irrelevant it is kept strictly ascending (`Ast.fs`'s
-`and` group 6.1 → 6.43, `ExpressionKind`/`Expression` at 6.28; the
-`createParserForwardedToRef` declarations in `ExpressionParser.fs`, 6.1 → 7.17).
-Single-use sub-parsers are nested inside their consumer, so they add no inversion.
-
-### Forward-reference wiring happens in `SqlParser.fs`
-
-`pDataChangeStatementRef`, `pPredicateRef`, `pPredicateNoBooleanTestRef`, `pBooleanTestPart2Ref`,
-`pWhenOperandPart2Ref`, `pPredicatePrimaryRef` and `pStatementRef` are assigned in
-`SqlParser.fs` *after* the target is defined (`pStatement`/`pStatementRef` are declared in
-`SchemaParser.fs` and reused there); wiring them inside their own module fails. Use the
-forwarding **parser**, never `…Ref.Value` — reading `.Value` at module-initialisation time
-captures FParsec's dummy parser. The §8 refs must also be assigned there: nothing else
-references `PredicateParser`, so its initialiser would not run and the refs would stay
-dummy. `SqlParser.fs` (initialised before `parse`) forces the module to load.
-
-### An optional-looking sub-rule must not match empty input
-
-`opt A .>>. many B` succeeds on empty input and silently shadows later
-alternatives — transcribe them literally, e.g. 11.20:
-`attempt (pSetIdentityColumnGeneration .>>. many option) <|> (many1 option)`.
-
-### Dispatch order is load-bearing
-
-Because `pKeyword` matches non-reserved words too, `choice` order keeps prefixes
-apart. The pairs that must be ordered:
-
-- `ALTER TYPE` **before** `ALTER ROUTINE`.
-- `DROP TYPE` **before** `DROP ROUTINE`.
-- `EXECUTE IMMEDIATE` **before** `EXECUTE <name>`.
-- `DECLARE LOCAL TEMPORARY TABLE` **before** `DECLARE <cursor>`.
-- `SELECT ... INTO` **before** `pQuery`.
-- The PTF `DESCRIBE WITH …` body **before** the generic statement branch.
-- 20.17 `ALLOCATE … FOR <statement>` **before** 20.18 `ALLOCATE … FOR PROCEDURE`.
-- The `(VALUES …)` branch **before** the subquery branch in `pTablePrimary`.
-- `SELECT ( <privilege method list> )` **before** `SELECT [ <column list> ]` — and the
-  method list item (`pPrivilegeMethodItem`) re-checks that a `<routine type>` is present,
-  otherwise `pSpecificRoutineDesignator`'s bare-name form (for `ALTER ROUTINE`) would
-  swallow `SELECT (c1, c2)` as a method list.
-- The `FINAL|NEW|OLD TABLE` alternative **before** the plain table alternative.
-- The 6.26 navigation parser **before** `pRoutineInvocation` and
-  `pColumnReferenceExpression`, tried Compound → Logical → Physical.
-- 6.37's interval alternative **before**, and inside the same `attempt` as, the
-  plain parenthesized `pExpression` branch.
-- The NESTED branch before the regular-column branch in `pJsonTableColumnDefinition`.
-
-### A predicate suffix is conditioned on the accumulated expression
-
-`pBooleanTestSuffixes` applies suffixes one at a time and picks the predicate parser from the
-*current* expression, because 6.39 `<boolean primary>` is `<predicate> | <boolean predicand>`
-and a `<boolean predicand>` is a parenthesized boolean value expression or a
-*nonparenthesized* value expression primary. Four shapes are distinguished:
-
-| Accumulated expression | Predicate suffix offered |
-|---|---|
-| a boolean test (`IsBoolean`) | none — a boolean test is not a `<boolean primary>` |
-| any other top-level boolean (comparison, predicate) | `pBooleanTestPart2` only |
-| `BinaryOp` / `UnaryOp` / `RowValueConstructor` | `pPredicateNoBooleanTest` (a term is a `<common value expression>`, hence a `<row value predicand>`, but not a boolean primary) |
-| everything else (primaries, `Parenthesized`, `EXISTS`, …) | `pPredicate` (the full 8.1 chain, boolean test included) |
-
-A new predicate added to `PredicateParser.pPredicateImpl` therefore needs three decisions:
-whether it belongs to the boolean-primary set (only the boolean test does), whether it must
-be dropped by the `includeBooleanTest = false` form (`pPredicateNoBooleanTest`), and whether
-6.12 `<when operand>` includes it (`forWhenOperand = true` carries the narrower list —
-comparison / quantified comparison part 2 are when-operand-only). Do not re-organise the
-suffixes back into a `many ( … )` fold: the gating needs the accumulated expression at each
-step.
-
-Operand categories are checked at the same time: `PredicateParser` has three operand parsers
-(`pOperand` = `<row value predicand>`, `pValueOperand` = a value expression, `pInValueItem` =
-`<row value expression>`), and `ExpressionParser.isBooleanTopLevel` / `isRowValueExpression` /
-`isValueShaped` expose the shapes they test.
-
-### `<table argument>` vs the forms it shares syntax with
-
-`<table argument proper>`'s `<table function invocation>` and `TABLE ( <query> )` are also
-`<value expression>`s and `expr AS <name>` is also a `<generalized expression>`, so
-`pTableArgument` only accepts them when a table-argument clause follows
-(`PARTITION BY` / `PRUNE|KEEP WHEN EMPTY` / `ORDER BY`, or a correlation with a derived
-column list); `TABLE ( <name> )` is unambiguous and needs none. `pSqlArgument` tries
-`pTableArgument` before the value-expression fallback, so a change in the clause parsers can
-silently reclassify an argument. `COPARTITION` is *not* a 5.2 reserved word, so
-`pCorrelationName` and the routine-name parse must reject it explicitly, or
-`TABLE(t2) COPARTITION (a, b)` swallows the clause as a correlation with a column list.
-A `<named argument SQL argument>` (10.4) has NO `<named argument specification>`
-alternative, so `f(a => b => 1)` is rejected while `f(a => f2(b => 1))` is legal — the
-argument collectors only have to unwrap one level of `SqlArgumentNamed`.
-
-### Desugared nodes must not be re-checked by post-parse validators
-
-`COALESCE` expands to a searched `Case` whose conditions are `IsNull` of its arguments, and
-`NULLIF` expands to `BinaryOp(Equal, …)`. A post-parse traversal that rejected "IsNull with
-a boolean left operand" (or "= with a boolean operand") would therefore reject the *legal*
-`COALESCE(1 = 2, TRUE)` / `NULLIF(1 = 2, 3)`. That is why the predicate left-operand rule
-is enforced at parse time by the suffix gating and `findExpressionViolationIn` checks only
-the standalone `QuantifiedSubquery` and the `<period predicate>` left operand; the
-comparison check reads only the top node of an `opp` parse.
-
-### `<cast specification>` vs the 10.4 `<descriptor argument>`
-
-`CAST ( NULL AS DESCRIPTOR )` is not a cast: `<cast target>` is a `<domain name>` or a
-`<data type>`, so `pCastSpecification` rejects `AS DESCRIPTOR` and the form is parsed as
-`ExpressionKind.DescriptorCast` by `pDescriptorArgument` in the `<SQL argument>` slots
-(`pSqlArgument`). `ExpressionKind.Cast` carries the optional `FORMAT <cast template>` as a
-third field. `DESCRIPTOR ( … )` in the same slots is the shared 20.16
-`pDescriptorValueConstructor` — also used by 11.60 `<parameter default>`, so do not
-re-declare it in `SchemaParser.fs`.
-
-### Do not reuse a parser whose grammar does not cover the slot
-
-`INSERT` must keep `pSchemaQualifiedNameExpression` for its target: 14.11 `<insertion target>`
-is a plain `<table name>` with no `ONLY` form, so `pTargetTable` would wrongly
-accept `INSERT INTO ONLY (t) …`. Likewise `pPartitionedJoinColumnReferenceList` is column references only.
-
-The omitted DML target relies on `SET` and `WHERE` being reserved words —
-`pTargetTable` fails cleanly on them. Do not "fix" a missing table name with
-`pIdentifierRaw`, which would parse `UPDATE SET …` with `SET` as the table.
+- **Define before use**: move the dependency up, nest single-use sub-parsers inside
+  their consumer, or use `createParserForwardedToRef` across modules. Top-level
+  definitions follow ascending ISO clause order *best-effort* — `define-before-use`
+  wins (`pReferentialTriggeredAction` 11.8 stays above `pColumnConstraintDefinition` 11.4).
+- **Cross-module refs are wired in `SqlParser.fs`** after the target is defined
+  (`pDataChangeStatementRef`; the §8 refs `pPredicateRef` / `pPredicateNoBooleanTestRef` /
+  `pPredicatePrimaryRef`; `pBooleanTestPart2Ref`, `pWhenOperandPart2Ref`; `pStatementRef`).
+  Reference the forwarding *parser*, never `…Ref.Value` — reading `.Value` at
+  initialisation captures FParsec's dummy parser. The §8 refs must live in `SqlParser.fs`
+  because nothing else loads `PredicateParser`.
+- **An optional-looking sub-rule must not match empty input** — `opt A .>>. many B`
+  succeeds on empty input and shadows later alternatives; transcribe literally (11.20:
+  `attempt (pSetIdentityColumnGeneration .>>. many option) <|> (many1 option)`).
+- **Dispatch order is load-bearing** because `pKeyword` matches non-reserved words too.
+  Keep apart: `ALTER TYPE` < `ALTER ROUTINE`; `DROP TYPE` < `DROP ROUTINE`;
+  `EXECUTE IMMEDIATE` < `EXECUTE <name>`; `DECLARE LOCAL TEMPORARY TABLE` <
+  `DECLARE <cursor>`; `SELECT ... INTO` < `pQuery`; PTF `DESCRIBE WITH …` body <
+  generic branch; 20.17 `ALLOCATE … FOR <statement>` < 20.18 `… FOR PROCEDURE`;
+  `(VALUES …)` < subquery in `pTablePrimary`; `FINAL|NEW|OLD TABLE` < plain table;
+  `SELECT ( <privilege method list> )` < `SELECT [ <column list> ]` (and
+  `pPrivilegeMethodItem` must re-check a `<routine type>` is present, else
+  `pSpecificRoutineDesignator`'s bare-name form swallows `SELECT (c1, c2)`);
+  6.26 navigation < `pRoutineInvocation`/`pColumnReferenceExpression`; 6.37 interval
+  alternative < plain parenthesized `pExpression` (same `attempt`); NESTED <
+  regular-column in `pJsonTableColumnDefinition`. In `<object name>` (12.3) the
+  routine-designator branch must come **first**: `ROUTINE` is non-reserved, so the
+  kind branch would swallow `GRANT EXECUTE ON ROUTINE add TO u` as a plain name.
+- **Predicate suffixes are gated on the accumulated expression** —
+  `pBooleanTestSuffixes` picks per shape: `IsBoolean` → none; other top-level boolean
+  → `pBooleanTestPart2` only; `BinaryOp`/`UnaryOp`/`RowValueConstructor` →
+  `pPredicateNoBooleanTest`; everything else → full `pPredicate`. A new predicate in
+  `PredicateParser.pPredicateImpl` needs three decisions: boolean-primary set? dropped
+  by `includeBooleanTest = false`? included in 6.12 `<when operand>` (`forWhenOperand`)?
+  Do not fold the suffixes back into `many ( … )` — the gating needs the current
+  expression at each step. Operand categories are checked alongside: `pOperand`
+  (`<row value predicand>`), `pValueOperand` (value-shaped), `pInValueItem`
+  (`<row value expression>`), tested by `isBooleanTopLevel` / `isRowValueExpression` /
+  `isValueShaped`.
+- **`<table argument>` vs its syntactic twins** — `<table function invocation>` and
+  `TABLE ( <query> )` are also `<value expression>`s and `expr AS <name>` is also a
+  `<generalized expression>`, so `pTableArgument` accepts them only when a
+  table-argument clause follows (`PARTITION BY` / `PRUNE|KEEP WHEN EMPTY` / `ORDER BY`,
+  or correlation + derived column list). `COPARTITION` is *not* reserved, so
+  `pCorrelationName` and the routine-name parse must reject it explicitly.
+  `f(a => b => 1)` is rejected (no nested `<named argument specification>` in 10.4);
+  `f(a => f2(b => 1))` is legal — collectors unwrap one level of `SqlArgumentNamed`
+  only.
+- **Desugared nodes must not be re-checked post-parse** — `COALESCE` expands to a
+  searched `Case` with `IsNull` conditions, `NULLIF` to `BinaryOp(Equal, …)`; a
+  traversal rejecting boolean operands would reject the legal forms. Hence the
+  predicate left-operand rule is enforced at parse time by the suffix gating, and
+  `findExpressionViolationIn` checks only standalone `QuantifiedSubquery` and the
+  `<period predicate>` left operand (top node of an `opp` parse only).
+- **`CAST ( NULL AS DESCRIPTOR )` is not a cast** — `<cast target>` is a
+  `<domain name>` or `<data type>`, so `pCastSpecification` rejects `AS DESCRIPTOR`;
+  the form belongs to `pDescriptorArgument` (`ExpressionKind.DescriptorCast`).
+  `DESCRIPTOR ( … )` in the same slots is the shared 20.16
+  `pDescriptorValueConstructor` — do not duplicate it.
+- **Do not reuse a parser whose grammar doesn't cover the slot** — `INSERT` keeps
+  `pSchemaQualifiedNameExpression` (14.11 `<insertion target>` has no `ONLY` form, so
+  `pTargetTable` would wrongly accept `INSERT INTO ONLY (t) …`);
+  `pPartitionedJoinColumnReferenceList` is column references only. The omitted DML
+  target relies on `SET`/`WHERE` being reserved — never "fix" it with `pIdentifierRaw`,
+  which would read `UPDATE SET …`'s `SET` as the table.
 
 ## Reserved words and keywords
 
-### `pRoutineInvocation` only accepts reserved *function* keywords
-
-`pReservedFunctionName` is a whitelist (`COUNT`, `ROW_NUMBER`, `PERCENTILE_CONT`,
-`ABS`, …) plus non-reserved/delimited identifiers. Therefore:
-
-- Reserved words that start a dedicated construct (`EXISTS`, `UNIQUE`,
-  `JSON_EXISTS`, `PERIOD`, `VALUE_OF`) must stay off the whitelist, and their
-  dedicated parsers must be listed **before** `pRoutineInvocation` in
-  `pValueExpressionPrimary`.
-- **Adding a reserved-name built-in requires adding it to `functionKeywords`**, or
-  `SELECT ABS(x)` / `SELECT ROW_NUMBER() OVER (…)` fail with "reserved word".
-  Non-reserved names (`foo(...)`) are unaffected.
-
-### `pIdentifierRaw` is too permissive for closed enumerations
-
-Item names that are reserved words (`NUMBER`, `ROW_COUNT`, `DATA`, …) cannot use
-`pIdentifier`, but `pIdentifierRaw` also accepts `ALL`, `SELECT`, …. Use an
-explicit `choice [ pKeyword "…" ]` enumeration (diagnostics/descriptor item names,
-`<language name>`, `<parameter style>`). The same applies to `<char length units>`
-(`CHARACTERS | OCTETS`), which is `pCharLengthUnits` in `ExpressionParser.fs`.
-
-### A citation must name the clause that *defines* the rule
-
-`RuleNumberingTests` matches an unnumbered `<rule name>` against the clauses that
-*mention* it, so the number must be the defining clause even when the rule is used
-elsewhere: `<local qualified name>` is a **5.4** rule (not 14.1/20.1, where it is the
-`<cursor name>` production) and `<char length units>` is a **6.1** rule (not
-6.30/6.32, where it is used). Same class as the `<scope option>` (5.4) and
-`<semicolon>` (5.1) entries above.
-
-### Numeric conversions must be checked *and* culture-invariant
-
-`uint64`/`int`/`decimal` conversions throw `OverflowException`/`FormatException` on
-out-of-range input, and F#'s `decimal` reads a string with the **current culture**
-(de-DE reads `1.5` as 15). Use the checked helpers (`toUnsignedInteger`,
-`toDecimal`, `pUnsignedIntegerAsInt`) with `CultureInfo.InvariantCulture`; the
-`runParser` try/with in `SqlParser.fs` is only a safety net, not the fix.
-
-### `<literal>` includes `<signed numeric literal>`, but `pLiteral` does not
-
-`pLiteral` covers the unsigned and general literal forms only, so `pLiteralExpression`
-rejects a leading sign. Where the grammar requires a `<simple value specification>`
-(which does admit `<signed numeric literal>`), add the sign form at that slot —
-`pSimpleValueSpecification` does — instead of widening `pLiteral`, which would change
-the AST of every `SELECT -1` (a unary-minus expression today, a literal after).
-
-### NULL is not a `<literal>` — it is the 6.5 `<null specification>`
-
-`pLiteral` has no `NULL` branch (2026-09-19): 5.3 `<literal>` does not admit NULL.
-Do not "fix" a failing `x = NULL` test by re-adding NULL to `pLiteral` — that
-over-accepts `SELECT 1 + NULL`. Add `pNullSpecification` (`ExpressionParser.fs`, 6.5)
-to the contextually-typed slot instead; the full slot list is in trade-off.md.
-
-### Non-reserved keywords need explicit handling
-
-`TYPE`, `UNDER`, `OVERRIDING`, `INSTANCE`, `CONSTRUCTOR`, `INSTANTIABLE`, `FINAL`,
-`OPTIONS`, `DERIVED`, `GENERATED`, `PRIVATE`, `FULFILL`, `FINISH`, `SECURITY`,
-`DISPATCH`, `GENERAL`, `IMPLEMENTATION`, `DEFINER`, `INVOKER`, `TRANSFORM`, `STYLE`,
-`LOCATOR`, `PRESERVE`, `TEMPORARY`, `EXTENDED`, `ATTRIBUTES` are **not** reserved.
-Consequences:
-
-- A `<typed table element>` cannot be dispatched on its first token —
-  `<column options>` is only recognisable once the mandatory `WITH OPTIONS` has
-  been consumed, so every alternative needs `attempt`.
-- `DESCRIPTOR` must be tried before `<data type>` in `<parameter type>`, otherwise
-  `(d DESCRIPTOR)` parses as a parameter of UDT type `DESCRIPTOR`.
-- `INSTANCE`/`CONSTRUCTOR` must be `attempt`ed in `pMethodKind` so they can still
-  be identifiers elsewhere.
-
-`LOG` **is** reserved, so `INSERT INTO log …` fails — use another table name in
-tests. `METHOD`, `REF`, `OUT`, `SYSTEM_TIME`, `VALUE_OF`, `DESCRIBE`, `START`,
-`STATIC`, `GROUP`, `PARAMETER`, `SQL`, `EXTERNAL`, `DEFAULT` are reserved too.
-
-### `<scope option>` is a 5.4 rule, `<semicolon>` a 5.1 rule
-
-`RuleNumberingTests` matches a citation against the clauses that mention the name,
-so `<scope option>` must cite 5.4 (not 20.15/20.17) and `<semicolon>` must cite 5.1
-(not 5.2).
+- **`pReservedFunctionName` is a whitelist** (`functionKeywords`: `COUNT`,
+  `ROW_NUMBER`, `ABS`, …); `pRoutineName` wraps it with non-reserved/delimited
+  identifiers. Reserved words that start dedicated constructs (`EXISTS`, `UNIQUE`,
+  `JSON_EXISTS`, `PERIOD`, `VALUE_OF`) must stay off the whitelist, with their parsers
+  listed *before* `pRoutineInvocation` in `pValueExpressionPrimaryImpl`. Adding a
+  reserved-name built-in requires adding it to `functionKeywords` or `SELECT ABS(x)`
+  fails.
+- **`pIdentifierRaw` is too permissive for closed enumerations** (item names that are
+  reserved words can't use `pIdentifier`, but `pIdentifierRaw` also accepts
+  `ALL`/`SELECT`/…). Use explicit `choice [ pKeyword "…" ]` lists
+  (diagnostics/descriptor items, `<language name>`, `<parameter style>`,
+  `<char length units>` = `pCharLengthUnits`).
+- **A citation must name the defining clause**, not the using one: `<local qualified
+  name>` is 5.4, `<char length units>` is 6.1, `<scope option>` is 5.4, `<semicolon>`
+  is 5.1 — `RuleNumberingTests` matches against mentioning clauses, so any number works
+  there but only the defining clause is correct.
+- **Numeric conversions must be checked *and* culture-invariant** — use
+  `toUnsignedInteger` / `toDecimal` / `pUnsignedIntegerAsInt` with
+  `CultureInfo.InvariantCulture` (de-DE reads `"1.5"` as 15); `runParser`'s try/with is
+  a safety net, not the fix.
+- **`pLiteral` excludes `<signed numeric literal>` and NULL** — 5.3 admits neither.
+  Where the grammar wants a `<simple value specification>` (which does admit signs),
+  add the sign form at that slot (`pSimpleValueSpecification`) instead of widening
+  `pLiteral` (that would change every `SELECT -1` AST). NULL is the 6.5
+  `pNullSpecification` — don't re-add it to `pLiteral` to fix `x = NULL`; that
+  over-accepts `SELECT 1 + NULL`.
+- **Non-reserved keywords need explicit handling** — `TYPE`, `UNDER`, `OVERRIDING`,
+  `INSTANCE`, `CONSTRUCTOR`, `FINAL`, `OPTIONS`, `DERIVED`, `GENERATED`, `SECURITY`,
+  `DEFINER`, `INVOKER`, `TRANSFORM`, `STYLE`, `LOCATOR`, `PRESERVE`, `TEMPORARY`,
+  `EXTENDED`, `ATTRIBUTES`, `COPARTITION`, `ROUTINE` are *not* reserved: typed-table
+  elements need `attempt` on every alternative (dispatchable only after `WITH
+  OPTIONS`); `DESCRIPTOR` must be tried before `<data type>` in `<parameter type>`;
+  `INSTANCE`/`CONSTRUCTOR` need `attempt` in `pMethodKind`. Conversely `LOG` *is*
+  reserved (`INSERT INTO log …` fails — avoid it in tests), as are `METHOD`, `REF`,
+  `OUT`, `SYSTEM_TIME`, `VALUE_OF`, `DESCRIBE`, `START`, `STATIC`, `GROUP`,
+  `PARAMETER`, `SQL`, `EXTERNAL`, `DEFAULT`.
 
 ## Grammar-specific traps
 
-### `pExpression` includes boolean operators
-
-Where `AND` must not be consumed as a boolean operator, use a boolean-free parser:
-`<point in time>` / `FOR PORTION OF` use the 6.35 datetime parser, and the JSON
-argument slots use `pNonBooleanValueExpression` (`opp.ExpressionParser` without
-boolean operators). That parser is a forward ref because the JSON parsers are
-defined before `opp` is built.
-
-### `pDataType` accepts any identifier as a user-defined type
-
-Any identifier is a valid UDT name, so `NESTED PATH '$.items'` would be read as a
-column named `NESTED` of type `PATH`. The UDT branch ends with
-`.>>? notFollowedBy pIdentifier` so a name immediately followed by another
-identifier is rejected; the NESTED branch is also tried first.
-
-### Recursive/ambiguous expression forms
-
-- `JSON_ARRAY(NULL ON NULL)` — `sepBy pExpression ","` greedily consumes `NULL`,
-  leaving `ON NULL` unconsumed. Guard each element with
-  `pExpression .>>? notFollowedBy (attempt (pKeyword "ON" >>. pKeyword "NULL"))`.
-- `pExplicitRowValueConstructor` (7.1) needs `attempt` so `(a)` can fall through to
-  the plain parenthesized expression branch.
-- 6.44 `SET ( … )` and `pMultisetValueExpression` are mutually recursive; the
-  latter is a forward ref wired after `pValueExpressionPrimary`.
-- `pIntervalSign` must not swallow the `-` of `->`: guard with
-  `notFollowedBy (pchar '>')`.
-- `<collection type>` suffixes must be folded
-  (`pDataTypeElement .>>. many (…) |> List.fold`), never parsed self-referentially —
-  `pDataType ARRAY …` recurses forever.
-- `expressionChildren` (the work-list traversal behind
-  `containsStandaloneQuantifiedSubquery`) has a `| _ -> []` catch-all, so a new
-  `ExpressionKind` case holding an `Expression` silently escapes the standalone-
-  `ANY` rejection. **Add a branch for every new case** — the compiler will not warn.
-  (`Parenthesized`, added 2026-09-19, forwards its child: `| Parenthesized inner -> [ inner ]`.)
-- A boolean tree search cannot be tail-recursive with `||` / `List.exists`, so
-  `[<TailCall>]` would warn (FS3569): collect children into a list
-  (`expressionChildren`) and fold an explicit work list instead. `[<TailCall>]`
-  also cannot be attached to a **local** `let rec` (FS0010), so the loop must be a
-  module-level `private` function.
-
-### `Condition` is an `Expression`, not an `ExpressionKind`
-
-`RowPatternDefinition.Condition` and similar fields hold records with `Kind`+`Pos`,
-so test patterns must wrap them: `Condition = { Kind = … }`.
-
-### `pWhereClause` is shadowed inside `DataManipulationParser.fs`
-
-`QueryParser.fs` defines `WHERE <expression>`; `DataManipulationParser.fs` defines a
-local parser of the same name returning `(cursor, search condition)` for
-`WHERE CURRENT OF` / search. The local binding shadows the imported one for every
-unqualified use **after** its definition, so it must stay below
-`pSelectStatementSingleRow` (14.7), which needs `QueryParser.pWhereClause`;
-`pDeleteStatement`/`pUpdateStatement` sit below it and bind the local parser.
-Hoisting the local `pWhereClause` above `pSelectStatementSingleRow` is a type error, not
-a silent rebind.
-
-### `LockingClause` must live inside the recursive type group
-
-`LockingClause.ForUpdate` carries `Expression list option`, and `Expression` is
-defined inside the `and`-chain starting at `DataType`. A standalone
-`type LockingClause = …` before the group fails with FS0039.
+- **`pExpression` includes boolean operators** — where `AND` must not be consumed,
+  use the boolean-free parser: `<point in time>` / `FOR PORTION OF` use the 6.35
+  datetime parser; JSON slots use `pNonBooleanValueExpression` (a forward ref — the
+  JSON parsers are defined before `opp` is built).
+- **`pDataType` accepts any identifier as a UDT** — `NESTED PATH '$.items'` would
+  read as column `NESTED` of type `PATH`; the UDT branch ends
+  `.>>? notFollowedBy pIdentifier` and the NESTED branch is tried first.
+- **Recursive/ambiguous forms**: `JSON_ARRAY(NULL ON NULL)` — guard elements with
+  `pExpression .>>? notFollowedBy (attempt (pKeyword "ON" >>. pKeyword "NULL"))`;
+  `pExplicitRowValueConstructor` needs `attempt` so `(a)` falls through; 6.44
+  `SET ( … )` ↔ `pMultisetValueExpression` mutual recursion uses a forward ref;
+  `pIntervalSign` must not swallow `->` (`notFollowedBy (pchar '>')`); `<collection
+  type>` suffixes are folded (`pDataTypeElement .>>. many … |> List.fold`), never
+  self-referential.
+- **`expressionChildren` has a `| _ -> []` catch-all** — a new `ExpressionKind`
+  case holding an `Expression` silently escapes `findExpressionViolationIn`'s
+  checks. Add a branch for every new case; the compiler will not warn. (The
+  traversal cannot use `||`/`List.exists` tail-recursively — collect into a list and
+  fold an explicit work list.)
+- **`Condition` is an `Expression`, not an `ExpressionKind`** — test patterns must
+  wrap: `Condition = { Kind = … }`.
+- **`pWhereClause` is shadowed in `DataManipulationParser.fs`** — the local
+  `(cursor, search condition)` variant must stay below `pSelectStatementSingleRow`
+  (14.7, which needs `QueryParser.pWhereClause`); hoisting it above is a type error,
+  not a silent rebind.
+- **`LockingClause` must live inside the recursive `and`-group** — it carries
+  `Expression list option`, and a standalone `type` before the group fails FS0039.
 
 ## Test-writing pitfalls
 
-### The `parse` helpers append `;` and need a type annotation
-
-Every test file's helper is
-`let parse (sql: string) = SqlParser.parse (sql.TrimEnd() + ";")`; the
-`(sql: string)` annotation is required (FS0072). A test that calls
-`SqlParser.parse` directly must append the semicolon itself, or it can pass for the
-wrong reason.
-
-Use `SqlParser.parse` for directly executable statements and
-`SqlParser.parseStatement` for cursors / dynamic SQL / positioned DML — the two
-entry points accept different statement sets.
-
-Merging two test files is a trap: the moved blocks keep calling whatever `parse`
-helper is in scope, not the one they were written against, so tests can fail — or
-`... is rejected` tests can pass *vacuously* — for the wrong reason. Keep a
-`parseStatement` / `parseStatementFails` helper alongside `parse` in any file that
-exercises both entry points.
-
-### `open FParsec` shadows `Result.Ok` / `Result.Error`
-
-`ReplyStatus` has the same case names, so a test file that does `open FParsec`
-resolves the `parse` helper's `| Ok res` / `| Error e` to `ReplyStatus` (FS3191,
-plus a bogus `Result<Statement, ParseError>` mismatch). Qualify them —
-`| Result.Ok res` / `| Result.Error e`.
-
-### Prefer pattern matching over `Assert.Equal` on `Expression`s
-
-`Expression` is a record with a `Pos` field, so an expected value needs a
-hand-written `Pos` that never matches the parsed one. Match the pattern (ignores
-`Pos`) or assert on individual fields.
-
-### Validate numbering with the right regex
-
-`RuleNumberingTests` extracts citations with `(\d+\.\d+)\s*<([^<>]+)>`. Capturing
-`(\s*<…>)` and stripping with `Substring(1, len-2)` drops the closing `>` and
-silently skips every citation, so the test passes vacuously.
-
-### Reordering definitions means reordering their tests
-
-`AGENTS.md` requires test functions to follow the source definitions they exercise
-(compile order, then definition order). Because the order is review-only, a
-definition reorder compiles and passes without warning while the tests silently
-drift. When moving a definition, move the matching test block in the same change;
-reordering a whole file is safest done with a block-level rewrite that re-inserts
-every test exactly once (an insert+delete pair applied out of order can duplicate
-or drop a block).
-
-Order each block by the rule it names, not by the umbrella parser it happens to
-call: `LexerTests.fs` drives `<regular identifier>` / `<delimited identifier>` (5.2)
-through `pIdentifier` (5.4), and the blocks sit at the 5.2 position - next to
-`pAnyRune`/`pUnicode*Escape` and before the numeric literals - mirroring `Lexer.fs`.
-
-### `ROUTINE` is a regular identifier - try the designator branch first
-
-In `<object name>` (12.3) the kind branch (`opt <object kind> <qualified name>`)
-accepts `ROUTINE` as a plain name because `ROUTINE` is a non-reserved word.
-When the routine-designator branch comes second, `GRANT EXECUTE ON ROUTINE add TO u`
-therefore parses `ROUTINE` as the object name, fails at the missing `TO` (the
-whole `attempt`ed branch backtracks) and the error surfaces as
-`Expecting: . or TO`. The routine branch (`<routine type> <qualified name>`,
-with the `<routine type>` keyword mandatory) must come first - `pRoutineType`
-fails on ordinary names, so plain names still reach the kind branch.
+- **The `parse` helpers append `;` and need `(sql: string)`** (FS0072). Tests calling
+  `SqlParser.parse` directly must append the semicolon themselves or pass for the
+  wrong reason. Use `parse` (22.1) for directly executable statements and
+  `parseStatement` (13.4) for cursors / dynamic SQL / positioned DML. When merging
+  test files, moved blocks keep whatever helper is in scope — keep a
+  `parseStatement`/`parseStatementFails` pair in any file exercising both entry
+  points, or rejection tests pass vacuously.
+- **`open FParsec` shadows `Result.Ok`/`Result.Error`** with `ReplyStatus` (FS3191) —
+  qualify as `Result.Ok` / `Result.Error`.
+- **Prefer pattern matching over `Assert.Equal` on `Expression`s** — the `Pos` field
+  never matches a hand-written expected value; match the pattern or assert fields.
+- **`RuleNumberingTests` regex**: `(\d+\.\d+)\s*<([^<>]+)>` — capturing the leading
+  space and stripping with `Substring(1, len-2)` drops the closing `>` and makes the
+  test pass vacuously.
+- **Reordering source definitions means reordering their tests** (AGENTS.md: compile
+  order, then definition order; review-only, so drift is silent). Move the matching
+  test block in the same change; rewrite whole files at block level so every test is
+  re-inserted exactly once. Order each block by the rule it names, not the umbrella
+  parser it calls (`LexerTests.fs` drives 5.2 identifiers through `pIdentifier`).

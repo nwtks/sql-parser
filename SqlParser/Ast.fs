@@ -1838,12 +1838,9 @@ and RevokeOptionExtension =
     | GrantOptionFor
     | HierarchyOptionFor
 
-// 12.3 <grantor> ::= CURRENT_USER | CURRENT_ROLE
-// The grammar only allows the two keywords in the <grantor> position; the parser also
-// accepts an <authorization identifier> there (over-permissive — see docs/trade-off.md),
-// which AuthorizationId carries.
+// 12.3 <grantor> ::= CURRENT_USER | CURRENT_ROLE — a closed keyword set; an
+// <authorization identifier> is not a <grantor>.
 and Grantor =
-    | AuthorizationId of Expression
     | CurrentUser
     | CurrentRole
 
