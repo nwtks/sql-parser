@@ -1028,6 +1028,16 @@ let ``CREATE PROCEDURE with DESCRIPTOR parameter default verification`` () =
     | res -> Assert.Fail(sprintf "Expected CreateProcedure, got %A" res)
 
 [<Fact>]
+let ``CREATE PROCEDURE with DEFAULT NULL parameter verification`` () =
+    // 6.5 <null specification> — a legal <parameter default>.
+    match parse "CREATE PROCEDURE p (IN x INT DEFAULT NULL) SELECT 1" with
+    | CreateProcedure { Parameters = [ param ] } ->
+        match param.Default with
+        | Some { Kind = Literal Null } -> ()
+        | other -> Assert.Fail(sprintf "Expected DEFAULT NULL, got %A" other)
+    | res -> Assert.Fail(sprintf "Expected CreateProcedure, got %A" res)
+
+[<Fact>]
 let ``SQL parameter type verification`` () =
     // `IN mytype` — the identifier after the mode is the <parameter type>, not a parameter name
     match parse "CREATE PROCEDURE p (IN mytype) SELECT 1" with

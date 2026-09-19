@@ -25,7 +25,19 @@ module AccessControlParser =
             between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
 
         // 12.3 <privilege method list> ::= <specific routine designator> [ { , <specific routine designator> }... ]
-        let pPrivilegeMethodList = sepBy1 pSpecificRoutineDesignator (token (pstring ","))
+        // Each item carries a MANDATORY <routine type> (or SPECIFIC): pSpecificRoutineDesignator
+        // also accepts a bare name (needed by ALTER ROUTINE — see docs/trade-off.md), but a
+        // bare name is NOT a <specific routine designator>, so without this re-check the
+        // method list would swallow `SELECT (c1, c2)` instead of the <privilege column list>.
+        let pPrivilegeMethodItem =
+            pSpecificRoutineDesignator
+            >>= fun d ->
+                if d.IsSpecific || d.RoutineType.IsSome then
+                    preturn d
+                else
+                    fail "12.3 <privilege method list>: a <routine type> is required"
+
+        let pPrivilegeMethodList = sepBy1 pPrivilegeMethodItem (token (pstring ","))
 
         // 12.3 <action> ::= SELECT | SELECT ( <privilege column list> )
         //                 | SELECT ( <privilege method list> ) | INSERT [ <column list> ] ...

@@ -236,8 +236,10 @@ parser until it is assigned. Reference the forwarding *parser* instead.
   templates — heading-only sections with no `<…>` productions) and §13.1–13.3
   (SQL-client module definition; not applicable to a library).
 - **N/A (⊘):** §13.4, §20.26, and all of §21 (embedded SQL host programs).
-- **Over-permissive:** none recorded. §5.3's known over-permissiveness was closed
-  out.
+- **Over-permissive:** none recorded. §5.3's known over-permissiveness was closed out;
+  the remaining accepted-but-not-standard constructs are the documented deliberate
+  deviations in [trade-off.md](trade-off.md) (semantic distinctions, e.g. interval vs
+  datetime operands, and the opaque JSON path language).
 - A rule name absent from the source does **not** imply it is unimplemented — it
   may be a sub-rule of a cited parent production.
 

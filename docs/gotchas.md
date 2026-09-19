@@ -177,7 +177,10 @@ apart. The pairs that must be ordered:
 - The PTF `DESCRIBE WITH …` body **before** the generic statement branch.
 - 20.17 `ALLOCATE … FOR <statement>` **before** 20.18 `ALLOCATE … FOR PROCEDURE`.
 - The `(VALUES …)` branch **before** the subquery branch in `pTablePrimary`.
-- `SELECT ( <privilege method list> )` **before** `SELECT [ <column list> ]`.
+- `SELECT ( <privilege method list> )` **before** `SELECT [ <column list> ]` — and the
+  method list item (`pPrivilegeMethodItem`) re-checks that a `<routine type>` is present,
+  otherwise `pSpecificRoutineDesignator`'s bare-name form (for `ALTER ROUTINE`) would
+  swallow `SELECT (c1, c2)` as a method list.
 - The `FINAL|NEW|OLD TABLE` alternative **before** the plain table alternative.
 - The 6.26 navigation parser **before** `pRoutineInvocation` and
   `pColumnReferenceExpression`, tried Compound → Logical → Physical.
@@ -243,6 +246,13 @@ rejects a leading sign. Where the grammar requires a `<simple value specificatio
 `pSimpleValueSpecification` does — instead of widening `pLiteral`, which would change
 the AST of every `SELECT -1` (a unary-minus expression today, a literal after).
 
+### NULL is not a `<literal>` — it is the 6.5 `<null specification>`
+
+`pLiteral` has no `NULL` branch (2026-09-19): 5.3 `<literal>` does not admit NULL.
+Do not "fix" a failing `x = NULL` test by re-adding NULL to `pLiteral` — that
+over-accepts `SELECT 1 + NULL`. Add `pNullSpecification` (`ExpressionParser.fs`, 6.5)
+to the contextually-typed slot instead; the full slot list is in trade-off.md.
+
 ### Non-reserved keywords need explicit handling
 
 `TYPE`, `UNDER`, `OVERRIDING`, `INSTANCE`, `CONSTRUCTOR`, `INSTANTIABLE`, `FINAL`,
@@ -304,6 +314,7 @@ identifier is rejected; the NESTED branch is also tried first.
   `containsStandaloneQuantifiedSubquery`) has a `| _ -> []` catch-all, so a new
   `ExpressionKind` case holding an `Expression` silently escapes the standalone-
   `ANY` rejection. **Add a branch for every new case** — the compiler will not warn.
+  (`Parenthesized`, added 2026-09-19, forwards its child: `| Parenthesized inner -> [ inner ]`.)
 - A boolean tree search cannot be tail-recursive with `||` / `List.exists`, so
   `[<TailCall>]` would warn (FS3569): collect children into a list
   (`expressionChildren`) and fold an explicit work list instead. `[<TailCall>]`

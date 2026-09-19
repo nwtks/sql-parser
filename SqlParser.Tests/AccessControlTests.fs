@@ -245,6 +245,30 @@ let ``GRANT EXECUTE ON routine verification`` () =
     | res -> Assert.Fail(sprintf "Expected GrantType, got %A" res)
 
 [<Fact>]
+let ``GRANT SELECT column list versus method list verification`` () =
+    // 12.3 — a <privilege method list> item requires a <routine type> (or SPECIFIC);
+    // a bare comma-separated name list is a <privilege column list>.
+    match parse "GRANT SELECT (col1, col2) ON t1 TO alice" with
+    | GrantObject stmt ->
+        match stmt.Privileges with
+        | Privileges.Actions [ PrivilegeAction.Select(Some(PrivilegeColumns [ { Kind = Identifier "COL1" }
+                                                                              { Kind = Identifier "COL2" } ])) ] -> ()
+        | res -> Assert.Fail(sprintf "Expected PrivilegeColumns, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected GrantObject, got %A" res)
+
+    // A data type list is neither a column nor a method list.
+    parseFails "GRANT SELECT (a INT, b INT) ON t1 TO alice"
+
+    match parse "GRANT SELECT (FUNCTION f, PROCEDURE p) ON t1 TO alice" with
+    | GrantObject stmt ->
+        match stmt.Privileges with
+        | Privileges.Actions [ PrivilegeAction.Select(Some(PrivilegeMethods [ routine; procedure ])) ] ->
+            Assert.Equal(Some RoutineType.Function, routine.RoutineType)
+            Assert.Equal(Some RoutineType.Procedure, procedure.RoutineType)
+        | res -> Assert.Fail(sprintf "Expected PrivilegeMethods, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected GrantObject, got %A" res)
+
+[<Fact>]
 let ``CREATE ROLE verification`` () =
     // 12.4 <role definition> ::= CREATE ROLE <role name> [ WITH ADMIN <grantor> ]
     match parse "CREATE ROLE admin" with

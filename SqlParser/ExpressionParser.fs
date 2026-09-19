@@ -55,8 +55,8 @@ module ExpressionParser =
             { Expression.Kind = kind
               Pos = { Line = pos.Line; Column = pos.Column } }
 
-    // 5.3 <literal> ::= NULL | <character string literal> | <numeric literal>
-    //     | <boolean literal> | <datetime literal> | <interval literal> | <hex string literal>
+    // 5.3 <literal> ::= <signed numeric literal> | <general literal> — NULL is NOT a
+    //     <literal> (it is the 6.5 <null specification>, wired per context below).
     let pLiteralExpression = pLiteral |> withExprPosition
 
     // 5.4 <schema qualified name>
@@ -342,6 +342,14 @@ module ExpressionParser =
     // 6.5 <default specification> ::= DEFAULT — only valid in specific contexts (INSERT VALUES, UPDATE SET), not as a general expression. This parser is used by the DML parser for those contexts.
     let pDefaultSpecification: Parser<Expression, unit> =
         pKeyword "DEFAULT" >>% Default |> withExprPosition
+
+    // 6.5 <null specification> ::= NULL — the implicitly-typed half of a 6.5
+    //     <contextually typed value specification>. NOT a 5.3 <literal>: it is accepted
+    //     only in the contextually-typed slots that OR it in (CAST operand, SQL arguments,
+    //     INSERT/MERGE VALUES, SET clauses, <default option>, <parameter default>) and in
+    //     the 16.2 <return value> / 6.12 <result> alternatives.
+    let pNullSpecification: Parser<Expression, unit> =
+        pKeyword "NULL" >>% Literal Null |> withExprPosition
 
     // A dotted identifier chain stops before '. <identifier> ( ... )' so that a
     // method invocation like a.b.method(x) parses as a column reference (a.b)
@@ -741,9 +749,14 @@ module ExpressionParser =
     //     | CASE <searched when clause>... [ ELSE <result> ] END
     // A <when operand> is a <row value predicand> or a predicate part 2 — a TOP-LEVEL
     // boolean-producing expression (comparison, AND/OR/NOT, another predicate) is
-    // rejected; a parenthesized form is a <value expression primary> and stays legal.
+    // rejected; a PARENTHESIZED expression is a 6.39 <boolean predicand> and stays legal
+    // (the Parenthesized node keeps the parens, so the content is not top-level).
     let isBooleanTopLevel (e: Expression) =
         match e.Kind with
+        // 6.39 <boolean predicand> ::= <parenthesized boolean value expression>
+        //     | <nonparenthesized value expression primary> — a parenthesized expression
+        // is a predicand even when its content is boolean (the AST keeps the parens).
+        | Parenthesized _ -> false
         | UnaryOp(op, _) when op = UnaryOperator.Not -> true
         | BinaryOp(op, _, _) ->
             op = BinaryOperator.And
@@ -819,10 +832,14 @@ module ExpressionParser =
                 | kind -> kind
             |> withExprPosition
 
-    // 6.13 <cast specification> ::= CAST ( <value expression> AS <data type> )
+    // 6.13 <cast specification> ::= CAST ( <cast operand> AS <cast target> )
+    // <cast operand> ::= <value expression> | <implicitly typed value specification> (6.5)
     let pCastSpecification =
         pKeyword "CAST"
-        >>. between (token (pstring "(")) (token (pstring ")")) (pExpression .>> pKeyword "AS" .>>. pDataType)
+        >>. between
+                (token (pstring "("))
+                (token (pstring ")"))
+                ((pExpression <|> pNullSpecification) .>> pKeyword "AS" .>>. pDataType)
         |>> Cast
         |> withExprPosition
 
@@ -843,9 +860,13 @@ module ExpressionParser =
         |> withExprPosition
 
     // 10.4 <SQL argument list> (plain — no DISTINCT/ALL; used by <method invocation>,
-    // <static method invocation> and <new specification>)
+    // <static method invocation> and <new specification>). <SQL argument> also admits a
+    // 6.5 <contextually typed value specification>, so NULL is a legal argument.
     let pSqlArgumentList =
-        between (token (pstring "(")) (token (pstring ")")) (sepBy pExpression (token (pstring ",")))
+        between
+            (token (pstring "("))
+            (token (pstring ")"))
+            (sepBy (pExpression <|> pNullSpecification) (token (pstring ",")))
 
     let pMethodOrFieldReference =
         // 6.32 <specific type method> ::= <user-defined type value expression> <period> SPECIFICTYPE [ ( ) ]
@@ -1613,7 +1634,8 @@ module ExpressionParser =
                 (token (pstring "("))
                 (token (pstring ")"))
                 (opt (pKeyword "DISTINCT" >>% true <|> (pKeyword "ALL" >>% false))
-                 .>>. (attempt pStarArg <|> sepBy pExpression (token (pstring ","))))
+                 .>>. (attempt pStarArg
+                       <|> sepBy (pExpression <|> pNullSpecification) (token (pstring ","))))
 
         let pFilter =
             pKeyword "FILTER"
@@ -1926,7 +1948,11 @@ module ExpressionParser =
               attempt pDatetimeDifference
               attempt pExplicitRowValueConstructor
               pColumnReferenceExpression
-              between (token (pstring "(")) (token (pstring ")")) pExpression ]
+              // 6.3 <parenthesized value expression> — kept as a Parenthesized node so a
+              // parenthesized boolean expression is a 6.39 <boolean predicand>, not an operator.
+              between (token (pstring "(")) (token (pstring ")")) pExpression
+              |>> Parenthesized
+              |> withExprPosition ]
         // The postfix loop must be able to leave a '.' behind (e.g. the `.*` of
         // <all fields reference>, 7.16), so both alternatives are backtracking.
         .>>. many (attempt pDereferenceReference <|> attempt pMethodOrFieldReference)
@@ -2269,6 +2295,10 @@ module ExpressionParser =
             match e.Kind with
             | BinaryOp(_, l, r) -> [ l; r ]
             | UnaryOp(_, x) -> [ x ]
+            // A Parenthesized node TRANSLUCENTLY forwards its child: the standalone-ANY
+            // guard below must see through it (docs/gotchas.md — a new Expression case
+            // holding an Expression silently escapes the catch-all arm if unlisted).
+            | Parenthesized inner -> [ inner ]
             | FunctionCall(name, _, args, _, filter, withinGroup) ->
                 [ yield name
                   yield! args

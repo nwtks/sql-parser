@@ -354,6 +354,13 @@ let ``INSERT VALUES DEFAULT verification`` () =
     | res -> Assert.Fail(sprintf "Expected Insert VALUES DEFAULT, got %A" res)
 
 [<Fact>]
+let ``INSERT VALUES NULL verification`` () =
+    // 6.5 <null specification> — legal in a <contextually typed row value constructor element>.
+    match parse "INSERT INTO users (name, age) VALUES (NULL, 30)" with
+    | Insert { Source = Values [ [ { Kind = Literal Null }; { Kind = Literal(Number 30m) } ] ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected Insert VALUES NULL, got %A" res)
+
+[<Fact>]
 let ``INSERT insertion target does not accept ONLY`` () =
     // <insertion target> is a plain <table name> (14.11), unlike <target table>.
     parseFails "INSERT INTO ONLY (users) VALUES (1)"
@@ -369,6 +376,24 @@ let ``MERGE verification`` () =
               On = { Kind = BinaryOp(Equal,
                                      { Kind = ColumnReference [ "T"; "ID" ] },
                                      { Kind = ColumnReference [ "S"; "ID" ] }) } } -> ()
+    | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)
+
+[<Fact>]
+let ``MERGE SET NULL and INSERT VALUES NULL verification`` () =
+    // 6.5 <contextually typed value specification> — legal in <update source>
+    // (via <set clause>) and in a <merge insert value element>.
+    match
+        parse
+            "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET name = NULL WHEN NOT MATCHED THEN INSERT (name) VALUES (NULL)"
+    with
+    | Merge { WhenClauses = [ matched; notMatched ] } ->
+        match matched.Action with
+        | MergeUpdate [ ({ Kind = Identifier "NAME" }, { Kind = Literal Null }) ] -> ()
+        | res -> Assert.Fail(sprintf "Expected MergeUpdate SET NULL, got %A" res)
+
+        match notMatched.Action with
+        | MergeInsert(_, None, [ { Kind = Literal Null } ]) -> ()
+        | res -> Assert.Fail(sprintf "Expected MergeInsert VALUES (NULL), got %A" res)
     | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)
 
 [<Fact>]
@@ -450,6 +475,13 @@ let ``UPDATE SET DEFAULT verification`` () =
     match parse "UPDATE users SET name = DEFAULT" with
     | Update { Set = [ SingleSet({ Kind = Identifier "NAME" }, { Kind = Default }) ] } -> ()
     | res -> Assert.Fail(sprintf "Expected Update SET DEFAULT, got %A" res)
+
+[<Fact>]
+let ``UPDATE SET NULL verification`` () =
+    // 6.5 <contextually typed value specification> — legal in <update source>.
+    match parse "UPDATE users SET name = NULL WHERE id = 1" with
+    | Update { Set = [ SingleSet({ Kind = Identifier "NAME" }, { Kind = Literal Null }) ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected Update SET NULL, got %A" res)
 
 [<Fact>]
 let ``UPDATE with alias verification`` () =

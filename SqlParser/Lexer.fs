@@ -1001,12 +1001,13 @@ module Lexer =
             else
                 fail "invalid interval value"
 
-    // 5.3 <literal> ::= NULL | <character string literal> | <numeric literal>
-    //     | <boolean literal> | <datetime literal> | <interval literal> | <hex string literal>
+    // 5.3 <literal> ::= <signed numeric literal> | <general literal>
+    //     (character string | numeric | boolean | datetime | interval | hex string)
+    // NULL is NOT a <literal>: it is the 6.5 <null specification>, parsed only in the
+    // contextually-typed slots wired via ExpressionParser.pNullSpecification.
     let pLiteral =
         choice
-            [ attempt (pKeyword "NULL" >>% Null |>> Literal)
-              attempt (pCharacterStringLiteral |>> String |>> Literal)
+            [ attempt (pCharacterStringLiteral |>> String |>> Literal)
               attempt (pNationalCharacterStringLiteral |>> NationalString |>> Literal)
               attempt (pUnicodeCharacterStringLiteral |>> UnicodeString |>> Literal)
               attempt (pUnsignedNumericLiteral |>> Number |>> Literal)

@@ -38,9 +38,8 @@ module PredicateParser =
     let pPredicate pExpr =
         // A predicate part-2 operand is a <row value predicand>: a TOP-LEVEL
         // boolean-producing expression (comparison, AND/OR/NOT, or another predicate)
-        // is rejected. NOTE: the AST does not keep a parenthesized node, so a
-        // parenthesized boolean expression is rejected too — slightly stricter than
-        // the grammar (see docs/trade-off.md).
+        // is rejected. A PARENTHESIZED expression is a 6.39 <boolean predicand> and stays
+        // legal — the AST keeps a Parenthesized node, so `x BETWEEN (1 = 1) AND 2` parses.
         let pOperand =
             pExpr
             >>= fun e ->

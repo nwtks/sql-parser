@@ -77,7 +77,25 @@ let ``Literal expressions verification`` () =
     Assert.Equal(Literal(Number 123m), parse "SELECT 123")
     Assert.Equal(Literal(String "hello"), parse "SELECT 'hello'")
     Assert.Equal(Literal(Bool(Some true)), parse "SELECT TRUE")
-    Assert.Equal(Literal Null, parse "SELECT NULL")
+
+[<Fact>]
+let ``NULL is a null specification, not a literal`` () =
+    // 6.5 <null specification> — NULL is NOT a 5.3 <literal>, so it is rejected in
+    // plain value-expression positions and accepted only in the contextually-typed slots.
+    parseFails "SELECT NULL"
+    parseFails "SELECT 1 + NULL"
+    parseFails "SELECT ABS(NULL)"
+    parseFails "SELECT CASE x WHEN NULL THEN 1 ELSE 0 END"
+    parseFails "SELECT x FROM t WHERE x = NULL"
+
+    match parse "SELECT CAST(NULL AS INT)" with
+    | Cast({ Kind = Literal Null }, Integer) -> ()
+    | res -> Assert.Fail(sprintf "Expected CAST(NULL AS INT), got %A" res)
+
+    // 10.4 <SQL argument> admits a <contextually typed value specification>.
+    match parse "SELECT my_func(NULL)" with
+    | FunctionCall({ Kind = Identifier "MY_FUNC" }, _, [ { Kind = Literal Null } ], _, _, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected my_func(NULL), got %A" res)
 
 [<Fact>]
 let ``Exact numeric type variants are parsed`` () =
@@ -484,7 +502,7 @@ let ``Method invocation verification`` () =
 [<Fact>]
 let ``Method invocation on parenthesized expression verification`` () =
     match parse "SELECT (a.b).prune(x)" with
-    | MethodInvocation({ Kind = ColumnReference [ "A"; "B" ] },
+    | MethodInvocation({ Kind = Parenthesized { Kind = ColumnReference [ "A"; "B" ] } },
                        { Kind = Identifier "PRUNE" },
                        [ { Kind = Identifier "X" } ]) -> ()
     | res -> Assert.Fail(sprintf "Expected MethodInvocation on parenthesized, got %A" res)
@@ -992,13 +1010,14 @@ let ``Datetime difference interval verification`` () =
                          IntervalQualifier.Range(Day, Second, None)) -> ()
     | res -> Assert.Fail(sprintf "Expected a datetime difference, got %A" res)
 
-    // Without a trailing <interval qualifier> the parenthesized subtraction is unchanged.
+    // Without a trailing <interval qualifier> the parenthesized subtraction is a
+    // 6.3 <parenthesized value expression> around the plain subtraction.
     match parse "SELECT (ts1 - ts2)" with
-    | BinaryOp(Subtract, { Kind = Identifier "TS1" }, { Kind = Identifier "TS2" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected plain subtraction, got %A" res)
+    | Parenthesized { Kind = BinaryOp(Subtract, { Kind = Identifier "TS1" }, { Kind = Identifier "TS2" }) } -> ()
+    | res -> Assert.Fail(sprintf "Expected a parenthesized subtraction, got %A" res)
 
     match parse "SELECT (ts1 - ts2) * 2" with
-    | BinaryOp(Multiply, { Kind = BinaryOp(Subtract, _, _) }, { Kind = Literal(Number 2m) }) -> ()
+    | BinaryOp(Multiply, { Kind = Parenthesized _ }, { Kind = Literal(Number 2m) }) -> ()
     | res -> Assert.Fail(sprintf "Expected parenthesized subtraction, got %A" res)
 
     // Only a difference of two datetimes may carry the qualifier: `(a + b) DAY`
@@ -1076,10 +1095,11 @@ let ``Row value constructor verification`` () =
     | RowValueConstructor [ { Kind = Identifier "A" } ] -> ()
     | res -> Assert.Fail(sprintf "Expected ROW(a), got %A" res)
 
-    // A one-element parenthesized expression is not a row value constructor.
+    // A one-element parenthesized form is a 6.3 <parenthesized value expression>,
+    // not a <row value constructor> (which needs ≥ 2 elements).
     match parse "SELECT (a)" with
-    | Identifier "A" -> ()
-    | res -> Assert.Fail(sprintf "Expected a, got %A" res)
+    | Parenthesized { Kind = Identifier "A" } -> ()
+    | res -> Assert.Fail(sprintf "Expected a parenthesized identifier, got %A" res)
 
     // 8.2 <comparison predicate> — <row value predicand> on both sides.
     match parse "SELECT (1, 2) = (3, 4)" with

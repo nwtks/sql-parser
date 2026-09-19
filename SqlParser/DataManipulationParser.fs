@@ -278,14 +278,15 @@ module DataManipulationParser =
     // 14.11 <from default>     ::= DEFAULT VALUES
     let pInsertStatement =
         // 7.3 <contextually typed table value constructor> ::= VALUES <contextually typed row value expression list>
-        // Used as <from constructor> of <insert statement> (14.11).
+        // Used as <from constructor> of <insert statement> (14.11). Each <contextually typed
+        // row value constructor element> also admits a 6.5 <contextually typed value specification>.
         let pContextuallyTypedTableValueConstructor =
             pKeyword "VALUES"
             >>. sepBy1
                     (between
                         (token (pstring "("))
                         (token (pstring ")"))
-                        (sepBy1 (pDefaultSpecification <|> pExpression) (token (pstring ","))))
+                        (sepBy1 (pDefaultSpecification <|> pNullSpecification <|> pExpression) (token (pstring ","))))
                     (token (pstring ","))
             |>> Values
 
@@ -328,9 +329,14 @@ module DataManipulationParser =
         // 14.12 <merge delete specification> ::= DELETE
         let pMatchedAction =
             // <merge update or delete specification> ::= <merge update specification> | <merge delete specification>
+            // <set clause> shares 14.15's <update source>, which admits a 6.5
+            // <contextually typed value specification> (NULL).
             choice
                 [ attempt (pKeyword "UPDATE" >>. pKeyword "SET")
-                  >>. sepBy1 (pIdentifierExpression .>> token (pstring "=") .>>. pExpression) (token (pstring ","))
+                  >>. sepBy1
+                          (pIdentifierExpression .>> token (pstring "=")
+                           .>>. (pNullSpecification <|> pExpression))
+                          (token (pstring ","))
                   |>> MergeUpdate
                   pKeyword "DELETE" >>% MergeDelete ]
 
@@ -345,7 +351,7 @@ module DataManipulationParser =
             .>>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (sepBy1 (pDefaultSpecification <|> pExpression) (token (pstring ",")))
+                (sepBy1 (pDefaultSpecification <|> pNullSpecification <|> pExpression) (token (pstring ",")))
             |>> fun ((cols, ovr), values) -> MergeInsert(cols, ovr, values)
 
         // 14.12 <merge when matched clause>     ::= WHEN MATCHED [ AND <search condition> ] THEN <merge update or delete specification>
@@ -403,7 +409,11 @@ module DataManipulationParser =
             attempt (
                 between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
                 .>> token (pstring "=")
-                .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ",")))
+                // <assigned row> is a <contextually typed row value expression>: NULL is legal.
+                .>>. between
+                    (token (pstring "("))
+                    (token (pstring ")"))
+                    (sepBy1 (pNullSpecification <|> pExpression) (token (pstring ",")))
                 |>> MultipleSet
             )
             <|> attempt (
@@ -412,7 +422,7 @@ module DataManipulationParser =
                 // <set clause> ::= <mutated set clause> <equals operator> <update source>
                 pIdentifierExpression .>>. many1 (token (pstring ".") >>. pIdentifierExpression)
                 .>> token (pstring "=")
-                .>>. (pDefaultSpecification <|> pExpression)
+                .>>. (pDefaultSpecification <|> pNullSpecification <|> pExpression)
                 |>> fun ((first, rest), value) ->
                     // The last segment is the method name; the rest is the
                     // mutated target (folded into a FieldReference chain).
@@ -429,7 +439,7 @@ module DataManipulationParser =
             <|> ( // 14.15 <set clause> ::= <set target> <equals operator> <update source>
             // <set target> ::= <update target> (<object column>)
             pIdentifierExpression .>> token (pstring "=")
-            .>>. (pDefaultSpecification <|> pExpression)
+            .>>. (pDefaultSpecification <|> pNullSpecification <|> pExpression)
             |>> SingleSet)
 
         pKeyword "UPDATE" >>. pOptionalDmlTarget

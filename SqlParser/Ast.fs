@@ -261,6 +261,9 @@ and ExpressionKind =
     // 5.3 <signed numeric literal>
     // 6.39 <boolean factor>
     | UnaryOp of UnaryOperator * Expression
+    // 6.3 <parenthesized value expression> ::= ( <value expression> ) — kept in the AST so
+    // a parenthesized boolean expression is a 6.39 <boolean predicand> (not an operator).
+    | Parenthesized of Expression
     // 6.4 <dynamic parameter specification>
     // 6.4 <host parameter specification>
     | Parameter of string

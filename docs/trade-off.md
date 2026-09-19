@@ -358,12 +358,11 @@ gaps below. Each is a breaking change: SQL that previously parsed is now rejecte
 **Remaining deliberate deviations (documented, not fixed):**
 
 - Predicate part-2 operands (`BETWEEN`/`IN`/`LIKE`/... right-hand sides), `<when operand>`s
-  and the left operand of a period predicate still accept full comparison-capable
-  expressions — the precedence-parser architecture applies predicates as postfix to the
-  full `opp` expression, and a separate `<row value predicand>`-level parser would be a
-  structural refactor.
-- `NULL` is accepted as an ordinary value expression (`SELECT 1 + NULL`); the grammar's
-  `<literal>` has no `NULL` alternative, but rejecting it would be hostile.
+  and the left operand of a period predicate accept the full `<value expression>` chain —
+  the precedence-parser architecture applies predicates as postfix to the full `opp`
+  expression. The top-level check (`isBooleanTopLevel`) approximates the
+  `<row value predicand>` requirement; a parenthesized boolean operand is legal
+  (`Parenthesized` keeps the parens), a bare one is rejected.
 - The `<binary position expression>` form admits `USING <char length units>` — binary and
   character operands are syntactically indistinguishable, so one parser serves both.
 - `GRANT ... ON <name>` without a kind keyword is parsed as a table grant even when the
@@ -384,9 +383,9 @@ Four of the remaining deliberate deviations were closed:
 - **8.x / 6.12** — predicate part-2 operands and `<when operand>`s reject a TOP-LEVEL
   boolean-producing expression (`isBooleanTopLevel` in `ExpressionParser.fs`):
   `1 BETWEEN 1 = 1 AND 2`, `'a' LIKE 'b' = 'c'`, `CASE x WHEN 1 AND 2 THEN 1 END` are
-  rejected. This is an approximation, not a full `<row value predicand>` parser: the AST
-  does not keep a parenthesized node, so a parenthesized boolean expression
-  (`x BETWEEN (1 = 1) AND 2`) is rejected too — slightly stricter than the grammar.
+  rejected. This is an approximation, not a full `<row value predicand>` parser. The
+  parenthesized over-strictness noted here was resolved on 2026-09-19 — the AST now
+  keeps a `Parenthesized` node (see that section below).
 - **6.37** — `<interval term>`'s `*`/`/` right operand is now `pIntervalFactor`
   (`[ <sign> ] <interval primary>`), which covers both the `<factor>` form (no qualifier)
   and the 4th alternative's `<interval factor>` (optional qualifier):
@@ -394,8 +393,51 @@ Four of the remaining deliberate deviations were closed:
 
 Still open (syntactically indistinguishable or semantic): interval vs datetime operands,
 calendar validity, binary `POSITION ... USING`, kind-less `GRANT ON <name>`,
-`TABLE (expr)` PTF classification, `NULL` as a value expression, and the JSON path
-grammar (kept opaque by design).
+`TABLE (expr)` PTF classification, and the JSON path grammar (kept opaque by design).
+
+## NULL is a null specification, not a literal (2026-09-19)
+
+`pLiteral` no longer accepts `NULL`: 5.3 `<literal>` has no NULL alternative — NULL is
+the **6.5 `<null specification>`**, the implicitly-typed half of a `<contextually typed
+value specification>`. `ExpressionParser.pNullSpecification` (next to
+`pDefaultSpecification`) is OR-ed in at exactly the slots the grammar allows:
+
+- **6.13** `<cast operand>` (`CAST(NULL AS INT)`), **10.4** `<SQL argument>` (routine,
+  method, static-method and `CALL` arguments), **11.60** `<parameter default>`,
+  **11.5** `<default option>`, **14.11** `<contextually typed row value constructor
+  element>` (INSERT VALUES), **14.12** `<merge insert value element>` and the merge
+  `UPDATE SET` values, **14.15** `<update source>` / `<assigned row>`, **16.2**
+  `<return value>` (`RETURN NULL`) and the **6.12** `<result>` alternative
+  (`THEN NULL` / `ELSE NULL`, which already had its own alternative).
+- The keyword slots (`IS [NOT] NULL`, `SET NULL`, `NOT NULL`, `NULLS FIRST|LAST`,
+  the JSON `NULL`/`ON NULL` behaviors) are keyword forms and are untouched.
+
+Breaking: `SELECT 1 + NULL`, `WHERE x = NULL`, `ABS(NULL)`, `COALESCE(NULL, 1)` and
+`CASE x WHEN NULL` are now rejected. `ExpressionKind.Literal Null` stays in the AST —
+it is what `pNullSpecification` and the `NULLIF` desugar produce.
+
+## Parenthesized value expressions keep their parens (2026-09-19)
+
+`pValueExpressionPrimaryImpl`'s parenthesized alternative now wraps its result in a new
+`ExpressionKind.Parenthesized of Expression` (cited as 6.3, defined inside the 6.3 rule)
+instead of flattening, so a parenthesized boolean expression (`x BETWEEN (1 = 1) AND 2`,
+`CASE x WHEN (1 = 1) THEN 1`) is a 6.39 `<boolean predicand>` and is accepted —
+`isBooleanTopLevel` treats `Parenthesized` as non-boolean. This resolves the
+over-strictness documented in the 2026-09-18 follow-up. `expressionChildren` forwards
+the inner child transparently, so the standalone-`ANY` guard still sees through it.
+`(ts1 - ts2)` without a qualifier is now a `Parenthesized` subtraction (the qualified
+4th alternative of 6.37 is tried first and unchanged).
+
+## The privilege method list requires a routine type (2026-09-19)
+
+12.3's `<privilege method list>` items are `<specific routine designator>`s, whose
+`<routine type>` is mandatory — but `pSpecificRoutineDesignator` accepts a bare name
+(for `ALTER ROUTINE add`, a deliberate trade-off), which leaked into `pPrivileges`:
+`GRANT SELECT (c1, c2)` was classified as `PrivilegeMethods` (the column-list branch
+was unreachable) and `SELECT (a INT, b INT)` was accepted. `pPrivilegeMethodItem` now
+re-checks the designator (`IsSpecific || RoutineType.IsSome`), so a bare name list
+falls through to the `<privilege column list>` branch and typed lists are rejected.
+`pSpecificRoutineDesignator` itself is unchanged — `ALTER ROUTINE add` still parses.
 
 ## The `*` wildcard is out of the expression parser (2026-09-18)
 

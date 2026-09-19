@@ -1066,7 +1066,7 @@ let ``All fields reference verification`` () =
     match parse "SELECT (a + b).* FROM t" with
     | Select(SelectQuery s) ->
         match s.Columns with
-        | [ Column({ Kind = AllFieldsReference({ Kind = BinaryOp(Add, _, _) }, None) }, None) ] -> ()
+        | [ Column({ Kind = AllFieldsReference({ Kind = Parenthesized _ }, None) }, None) ] -> ()
         | res -> Assert.Fail(sprintf "Expected AllFieldsReference for (a + b).*, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 

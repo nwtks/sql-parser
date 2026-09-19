@@ -281,7 +281,7 @@ module SchemaParser =
     // `?` / `:name` and `COLLATION FOR (...)`, none of which are <default option>s.
     let pDefaultOption =
         // 11.5 <implicitly typed value specification> ::= <null specification> | <empty specification>
-        // (<null specification> is covered by pLiteralExpression; <empty specification> is
+        // (<null specification> is 6.5 pNullSpecification; <empty specification> is
         //  ARRAY[] / MULTISET[] — see 6.42 / 6.45)
         let pEmptySpecification =
             attempt (
@@ -305,6 +305,8 @@ module SchemaParser =
               attempt (pKeyword "CURRENT_CATALOG" >>% CurrentCatalog |> withExprPosition)
               attempt (pKeyword "CURRENT_SCHEMA" >>% CurrentSchema |> withExprPosition)
               attempt (pKeyword "CURRENT_PATH" >>% CurrentPath |> withExprPosition)
+              // 6.5 <null specification> — the implicitly-typed half of <default option>.
+              attempt pNullSpecification
               attempt pEmptySpecification ]
 
     // 11.5 <default clause> ::= DEFAULT <default option>
@@ -1187,7 +1189,13 @@ module SchemaParser =
         attempt (
             attempt pWithName <|> pWithoutName
             .>>. opt (pKeyword "RESULT")
-            .>>. opt (pKeyword "DEFAULT" >>. (attempt pDescriptorValueConstructor <|> pExpression))
+            .>>. opt (
+                pKeyword "DEFAULT"
+                >>. (attempt pDescriptorValueConstructor
+                     <|> pExpression
+                     // 6.5 <contextually typed value specification> — DEFAULT NULL is legal.
+                     <|> pNullSpecification)
+            )
             |>> fun (((mode, name, paramType), isResult), defaultVal) ->
                 { Mode = mode
                   Name = name

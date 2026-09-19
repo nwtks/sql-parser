@@ -124,17 +124,25 @@ let ``Predicate part-2 operands are row value predicands (8.x)`` () =
     parseFails "SELECT x MEMBER OF 1 = 2"
     parseFails "SELECT x LIKE_REGEX 'a' FLAG 'i' = 'j'"
 
-    // NOTE: the check is on the top-level Kind, and the AST does not keep a
-    // parenthesized node — so a parenthesized boolean expression is rejected too
-    // (slightly stricter than the grammar; see docs/trade-off.md).
-    parseFails "SELECT x BETWEEN (1 = 1) AND 2"
+    // A PARENTHESIZED boolean expression is a 6.39 <boolean predicand> and stays
+    // legal — the AST keeps a Parenthesized node, so the content is not top-level.
+    match parse "SELECT x BETWEEN (1 = 1) AND 2" with
+    | ExpressionKind.Between({ Kind = Identifier "X" },
+                             false,
+                             false,
+                             { Kind = Parenthesized _ },
+                             { Kind = Literal(Number 2m) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected Between with a parenthesized operand, got %A" res)
 
 [<Fact>]
 let ``When operands are row value predicands (6.12)`` () =
     parseFails "SELECT CASE x WHEN 1 AND 2 THEN 1 END"
 
-    // A parenthesized boolean form is rejected too (the AST drops the parens).
-    parseFails "SELECT CASE x WHEN (1 = 1) THEN 1 ELSE 0 END"
+    // A PARENTHESIZED boolean form is a 6.39 <boolean predicand> and stays legal
+    // (the Parenthesized node keeps the parens).
+    match parse "SELECT CASE x WHEN (1 = 1) THEN 1 ELSE 0 END" with
+    | Case(Some { Kind = Identifier "X" }, [ ({ Kind = Parenthesized _ }, { Kind = Literal(Number 1m) }) ], _) -> ()
+    | res -> Assert.Fail(sprintf "Expected simple CASE with a parenthesized when operand, got %A" res)
 
     // A non-boolean parenthesized operand stays legal.
     match parse "SELECT CASE x WHEN (1 + 2) THEN 1 ELSE 0 END" with

@@ -26,6 +26,11 @@ let ``CALL statement verification`` () =
            [ { Kind = Literal(Number 30m) }; { Kind = Literal(String "days") } ]) -> ()
     | res -> Assert.Fail(sprintf "Expected Call with args, got %A" res)
 
+    // 6.5 <contextually typed value specification> — NULL is a legal <SQL argument>.
+    match parseStatement "CALL write_log(NULL)" with
+    | Call({ Kind = Identifier "WRITE_LOG" }, [ { Kind = Literal Null } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected Call with NULL argument, got %A" res)
+
 [<Fact>]
 let ``CALL without routine is rejected`` () = parseStatementFails "CALL"
 
