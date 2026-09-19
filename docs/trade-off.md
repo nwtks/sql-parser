@@ -357,11 +357,12 @@ gaps below. Each is a breaking change: SQL that previously parsed is now rejecte
 
 **Remaining deliberate deviations (documented, not fixed):**
 
-- Predicate part-2 operands accept the full `<value expression>` chain (only a TOP-LEVEL
-  boolean is rejected, via `isBooleanTopLevel`); they are not true `<row value predicand>`
-  parsers, so a row constructor is accepted where a `<character pattern>` is required
-  (`'a' LIKE (1, 2)`). Part-1 left operands and comparison operands ARE checked since
-  2026-09-19 (see below).
+- Predicate part-2 operands are grouped by grammar category: `<row value predicand>` for
+  `BETWEEN`/`IS DISTINCT FROM`/`OVERLAPS`, a dedicated `<row value expression>` item parser
+  for `<in value list>`, and a value-shape check (`isValueShaped`) for the 8.5/8.6/8.7
+  pattern/escape/flag slots and the 8.16/8.17 multiset operands. Only the *type-level*
+  distinctions (character vs numeric) remain unchecked. Part-1 left operands and comparison
+  operands ARE checked since 2026-09-19 (see below).
 - The `<binary position expression>` has no `USING` slot — it is the *character* position
   expression (6.30) that admits `USING <char length units>`. Binary and character operands
   are usually syntactically indistinguishable, so one parser serves both and the slot is
@@ -493,8 +494,9 @@ parser runs: `3 EQUALS PERIOD (s, e)` is rejected, `p1 EQUALS PERIOD (s, e)` and
 Comparison operands (8.2/8.9) are checked from the other side: `pValueExpressionChecked`
 rejects a TOP-LEVEL boolean operand of a comparison (`a = b = c`, `x = EXISTS ( … )`, a
 boolean left operand of `= ANY ( … )`), while parenthesized booleans stay legal
-(`(a = b) = c`, `a = (b = c)`). `SIMILAR TO`'s pattern and escape now use `pOperand` like
-the LIKE branch, so `'a' SIMILAR TO 1 = 1` is rejected.
+(`(a = b) = c`, `a = (b = c)`). `SIMILAR TO`'s pattern and escape now use the operand
+parser like the LIKE branch (`pValueOperand` since the operand-category work below), so
+`'a' SIMILAR TO 1 = 1` is rejected.
 
 Two DESUGARED nodes make the checks deliberately narrow:
 
@@ -507,10 +509,11 @@ period left operand.
 of an `opp` parse — a chain always surfaces there, while the desugared `=` sits inside its
 `Case` (`NULLIF(1 = 2, 3)` and `NULLIF(1 = 2, 3) = 4` stay legal).
 
-**Still open (type-level):** the part-2 slots still accept every non-boolean expression
-(a row constructor where a `<character pattern>` is required), and the boolean test's own
-left operand is approximated (`1 + 1 IS TRUE` is accepted although the grammar's
-`<boolean primary>` allows only a predicate or a value expression primary).
+**Still open (type-level):** character-vs-numeric operands remain semantic — a numeric
+expression is still accepted where a `<character pattern>` is required (`x LIKE 1 + 1`),
+because a parse-only library cannot resolve types. The syntactically distinguishable
+categories (row value expression / row value predicand / value expression) were closed on
+2026-09-19 — see the section below.
 
 ## 6.12 <when operand> predicate part-2 forms (2026-09-19)
 
@@ -544,12 +547,116 @@ grammar's only descriptor cast is the `CAST ( NULL AS DESCRIPTOR )` form below.
 `<SQL argument>`: `DESCRIPTOR ( a INT, b )` (the 20.16 `<descriptor value constructor>`,
 now shared with 11.60 `<parameter default>` — SchemaParser's local copy is gone) and
 `CAST ( NULL AS DESCRIPTOR )` (new `ExpressionKind.DescriptorCast`). `pSqlArgument`
-(the argument approximation + the descriptor argument + the 6.5 contextually typed NULL)
-is used by routine invocations, method invocations, `NEW`, dereferences and `CALL`.
+(the argument parser — see the §10.4 section below) is used by routine invocations,
+method invocations, `NEW`, dereferences and `CALL`.
 A standalone `CAST ( NULL AS DESCRIPTOR )` stays rejected — it is not a
 <cast specification>.
 
-**Still open:** PTF `<copartition clause>` / `<table argument>` are unimplemented.
+## §10.4 SQL arguments are structured (2026-09-19)
+
+`<SQL argument>` is no longer an expression approximation: the invocation nodes
+(`FunctionCall`, `MethodInvocation`, `StaticMethodInvocation`, `NewSpecification`,
+`GeneralizedInvocation`, `Dereference` and 16.1 `Call`) now carry a
+`SqlArgumentList = { Arguments: SqlArgument list; Copartition: Expression list list option }`,
+and each argument is one of:
+
+| `SqlArgument` case | Grammar alternative |
+|---|---|
+| `SqlArgumentValue` | `<value expression>` / `<target specification>` (20.4) / `<contextually typed value specification>` (6.5, i.e. `NULL`) |
+| `SqlArgumentGeneralized` | `<generalized expression>` — `expr AS <UDT name>` (kept as `UserDefinedType`) |
+| `SqlArgumentNamed` | `<named argument specification>` — `<parameter name> => <argument>` (the `=>` token is 5.2) |
+| `SqlArgumentTable` | `<table argument>` — proper + correlation + `PARTITION BY` + `PRUNE`/`KEEP WHEN EMPTY` + `ORDER BY` |
+| `SqlArgumentDescriptor` | `<descriptor argument>` — the 20.16 constructor or `CAST ( NULL AS DESCRIPTOR )` |
+
+Newly accepted: `my_func(x AS my_type)`, `my_func(a => 1)`, `my_ptf(TABLE(t) AS x (c1, c2) KEEP WHEN EMPTY)`, `my_ptf(f(x) PARTITION BY (a, b) PRUNE WHEN EMPTY ORDER BY c DESC)`
+and the `<copartition clause>` (`COPARTITION (t1, t2)`).
+
+**Heuristics** (a parse-only library cannot resolve names):
+
+- A `<table function invocation>` / `TABLE ( <query> )` proper is also a `<value
+  expression>`, so it is read as a `<table argument>` only when a table-argument clause
+  follows — `my_ptf(f(x) PARTITION BY a)` is a table argument while `my_ptf(f(x))` and
+  `my_ptf(TABLE(SELECT …))` stay value expressions. The unambiguous `TABLE ( <name> )` form
+  needs no clause (the same trade-off as `TABLE ( <expr> )`, 7.6).
+- `expr AS <name>` is the `<generalized expression>` when the argument ends there, and a
+  table-argument correlation when a column list or another clause follows.
+- `COPARTITION` is not in the 5.2 reserved set, so it is excluded from the correlation and
+  routine-name positions of the argument parser; `x COPARTITION (p, q)` is the clause.
+- A reserved built-in (`functionKeywords`) takes `<value expression>` arguments only, so
+  `SUM(a, TABLE(t))` is rejected; a general routine name (a PTF) may take the new forms.
+
+## Operand categories and the TRIM shorthand (2026-09-19)
+
+The remaining syntactically-decidable operand mismatches were closed. Each is breaking:
+SQL that used to parse is now rejected.
+
+- **6.32** — `TRIM ( <trim source> )` now parses (`ExpressionKind.Trim(None, None, source)`).
+  The explicit form is attempted first, so `TRIM(BOTH ' ' FROM x)` and
+  `TRIM(LEADING FROM x)` are unchanged, and a bare specification (`TRIM(BOTH)`) stays
+  rejected — `BOTH`/`LEADING`/`TRAILING` are reserved words, so they cannot start the
+  shorthand's `<trim source>`.
+- **8.4** — `<in value list>` elements are parsed by a dedicated `pInValueItem`: an element
+  must be a `<row value expression>` (`<nonparenthesized value expression primary> |
+  <explicit row value constructor>`), so `x IN (1 + 1)` (a term), `x IN ((1), 2)` (a
+  parenthesized value expression) and `x IN (-1)` (a `<signed numeric literal>` is not an
+  `<unsigned value specification>`) are rejected, while `x IN (ROW(1, 2), 3)` and
+  `(1, 2) IN ((1, 2), (3, 4))` stay legal.
+- **8.5/8.6/8.7/8.16/8.17** — the pattern / escape / flag and multiset operands are parsed
+  by `pValueOperand` (`isValueShaped`), which rejects an explicit row value constructor:
+  `'a' LIKE (1, 2)`, `'a' LIKE_REGEX 'b' FLAG (1, 2)` and `x MEMBER OF (1, 2)` are rejected.
+  `BETWEEN` / `IS DISTINCT FROM` / `OVERLAPS` keep the wider `<row value predicand>` check
+  (a term such as `x BETWEEN 1 + 1 AND 3` is legal).
+- **6.39** — `pBooleanTestSuffixes` now checks the accumulated expression's shape:
+  a `<boolean primary>` is a `<predicate>` or a `<boolean predicand>`
+  (`<parenthesized boolean value expression> | <nonparenthesized value expression primary>`),
+  so a term or signed primary cannot take a boolean test (`1 + 1 IS TRUE`, `-x IS TRUE`,
+  `a || b IS TRUE` are rejected), and a boolean test cannot take a further predicate suffix
+  (`x IS TRUE IS FALSE`, `x IS TRUE IS NULL` are rejected — the latter two used to be
+  accepted). A parenthesized boolean stays legal (`(a = b) IS TRUE`), as do
+  `x IS TRUE`, `x IS NULL IS TRUE` and `EXISTS ( … ) IS TRUE`.
+
+The gate needs a predicate suffix parser without the boolean test, so
+`PredicateParser.pPredicateImpl` gained an `includeBooleanTest` parameter and
+`pPredicateNoBooleanTest` is wired through a fifth forward ref (see
+[architecture.md](architecture.md) §5).
+
+## 6.1 data types keep their lengths and type-level modifiers (2026-09-19)
+
+The string/binary `DataType` cases now carry the grammar's length model instead of a bare
+`int option`, and a character string type can carry its type-level clauses:
+
+- `CharacterLength = { Value: int; Unit: CharLengthUnit option }` —
+  `<character length> ::= <length> [ <char length units> ]`, so `CHAR(10 CHARACTERS)` and
+  `VARCHAR(10 OCTETS)` keep their unit (`CharLengthUnit = Characters | Octets`).
+- `LargeObjectLength = { Value: int; Multiplier: LengthMultiplier option; Unit }` —
+  `<large object length> ::= <unsigned integer> [ <multiplier> ] | <large object length token>`,
+  so `CLOB(10M)` / `BLOB(4 K)` keep their `K | M | G | T | P` multiplier.
+- **A varying type REQUIRES its length** — `Varchar of CharacterLength` and `VarBinary of int`
+  have no `option`, because the grammar has no length-less alternative: `VARCHAR`,
+  `CHARACTER VARYING`, `CHAR VARYING`, `NCHAR VARYING`, `VARBINARY` and `BINARY VARYING` are
+  now rejected. `Binary`, `CLOB`/`NCLOB`/`BLOB` and the fixed-length `CHARACTER`/`NCHAR` keep
+  their optional length.
+- `<char length units>` is the closed set `CHARACTERS | OCTETS` — a DU for type lengths and
+  the historical `string` for the 6.30 position/length slots (`pCharLengthUnit` /
+  `pCharLengthUnits`). A unit or multiplier in the wrong slot is rejected (`VARCHAR(10M)`,
+  `CHAR(10 M)`, `BLOB(10 OCTETS)`), and `<length>` for `BINARY`/`VARBINARY` is a plain
+  `<unsigned integer>`.
+- **Type-level modifiers** — `<predefined type>` attaches
+  `[ CHARACTER SET <character set specification> ] [ <collate clause> ]` to a character string
+  type (a `<national character string type>` takes the collate clause only). The AST wraps the
+  type: `CharacterTypeWithModifiers(DataType, { CharacterSet; Collation })`, present only when
+  a clause is, so the common cases keep their single-field shape.
+  `CAST(x AS VARCHAR(10) COLLATE en_us)` now parses.
+
+**Ambiguity:** a `<collate clause>` directly after a character type is parsed as the 6.1
+type-level clause, since `<predefined type>` (6.1) and 11.4/11.34/11.52 each allow one. A
+clause that follows the other clauses still lands in that rule's own `Collation` field, so
+`c VARCHAR(10) COLLATE en_us` reports the type-level wrapper while
+`c VARCHAR(10) NOT NULL COLLATE en_us` reports `ColumnDefinition.Collation`.
+
+**Breaking:** the `DataType` case arities changed (`Varchar(Some 100)` is
+`Varchar { Value = 100; Unit = None }`), and a collate clause immediately after a character
+type moved from the enclosing rule into the type.
 
 ## Still open after the 2026-09-19 fixes
 
@@ -559,9 +666,8 @@ but is rejected in a select list, where `INTERVAL '1' DAY` is a literal primary 
 is numeric multiplication. Interval-vs-numeric operands are a type distinction
 (`<numeric primary>` → `<value expression primary>` admits interval literals), so
 `INTERVAL '1' DAY * INTERVAL '2' DAY` also stays accepted.
-- **`<in value list>`** elements accept any expression (`x IN ((1), 2)`, `x IN (1 + 1)`),
-where the grammar's `<row value expression>` is the narrow rule (nonparenthesized primary
-or explicit row constructor).
+- **`<in value list>`** — closed 2026-09-19: elements are `<row value expression>`s now
+(see "Operand categories and the TRIM shorthand").
 - The semantic items are unchanged: interval vs datetime operands, calendar validity,
 binary `POSITION ... USING` (the *character* form is the one with the slot), kind-less
 `GRANT ON <name>`, `TABLE (expr)` PTF classification, JSON path opacity.

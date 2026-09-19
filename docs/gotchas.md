@@ -54,6 +54,15 @@ Value restriction: annotate `let pLeftBrace: Parser<char, unit> = pchar '{'` (us
 - Deeply nested multi-line patterns are fragile — bind intermediates and
   `Assert.Equal`.
 
+### `[<TailCall>]` needs a module-level function and a real tail call
+
+The attribute cannot be attached to a local `let rec` inside a function body (FS0010), and a
+*monadic* parser loop cannot satisfy it at all: `pBooleanTestSuffixes` recurses as
+`suffix >>= pBooleanTestSuffixes`, which F# reports as FS3569 ("has the TailCallAttribute
+attribute, but is not being used in a tail recursive way"). Where a collector must be
+tail-recursive, move it to module level and thread the state through an explicit work list
+(`collectSqlArgumentChildren` in `ExpressionParser.fs`, called by `findExpressionViolationIn`).
+
 ## FParsec combinator pitfalls
 
 ### Operator precedence
@@ -149,7 +158,7 @@ Single-use sub-parsers are nested inside their consumer, so they add no inversio
 
 ### Forward-reference wiring happens in `SqlParser.fs`
 
-`pDataChangeStatementRef`, `pPredicateRef`, `pBooleanTestPart2Ref`,
+`pDataChangeStatementRef`, `pPredicateRef`, `pPredicateNoBooleanTestRef`, `pBooleanTestPart2Ref`,
 `pWhenOperandPart2Ref`, `pPredicatePrimaryRef` and `pStatementRef` are assigned in
 `SqlParser.fs` *after* the target is defined (`pStatement`/`pStatementRef` are declared in
 `SchemaParser.fs` and reused there); wiring them inside their own module fails. Use the
@@ -190,16 +199,45 @@ apart. The pairs that must be ordered:
 
 ### A predicate suffix is conditioned on the accumulated expression
 
-`pBooleanTestSuffixes` applies suffixes one at a time and selects the suffix parser from the
-*current* expression: only 6.39's `pBooleanTestPart2` (`IS [NOT] { TRUE | FALSE | UNKNOWN }`)
-is offered once the expression is a top-level boolean, because every 8.x predicate takes a
-`<row value predicand>` left operand and a second boolean test would need the previous one to
-be a `<boolean primary>`. A new predicate added to `PredicateParser.pPredicateImpl`
-therefore needs two decisions: whether it belongs to the boolean-primary set (only the
-boolean test does), and whether 6.12 `<when operand>` includes it (`forWhenOperand = true`
-carries the narrower list — comparison / quantified comparison part 2 are
-when-operand-only). Do not re-organise the suffixes back into a `many ( … )` fold: the
-gating needs the accumulated expression at each step.
+`pBooleanTestSuffixes` applies suffixes one at a time and picks the predicate parser from the
+*current* expression, because 6.39 `<boolean primary>` is `<predicate> | <boolean predicand>`
+and a `<boolean predicand>` is a parenthesized boolean value expression or a
+*nonparenthesized* value expression primary. Four shapes are distinguished:
+
+| Accumulated expression | Predicate suffix offered |
+|---|---|
+| a boolean test (`IsBoolean`) | none — a boolean test is not a `<boolean primary>` |
+| any other top-level boolean (comparison, predicate) | `pBooleanTestPart2` only |
+| `BinaryOp` / `UnaryOp` / `RowValueConstructor` | `pPredicateNoBooleanTest` (a term is a `<common value expression>`, hence a `<row value predicand>`, but not a boolean primary) |
+| everything else (primaries, `Parenthesized`, `EXISTS`, …) | `pPredicate` (the full 8.1 chain, boolean test included) |
+
+A new predicate added to `PredicateParser.pPredicateImpl` therefore needs three decisions:
+whether it belongs to the boolean-primary set (only the boolean test does), whether it must
+be dropped by the `includeBooleanTest = false` form (`pPredicateNoBooleanTest`), and whether
+6.12 `<when operand>` includes it (`forWhenOperand = true` carries the narrower list —
+comparison / quantified comparison part 2 are when-operand-only). Do not re-organise the
+suffixes back into a `many ( … )` fold: the gating needs the accumulated expression at each
+step.
+
+Operand categories are checked at the same time: `PredicateParser` has three operand parsers
+(`pOperand` = `<row value predicand>`, `pValueOperand` = a value expression, `pInValueItem` =
+`<row value expression>`), and `ExpressionParser.isBooleanTopLevel` / `isRowValueExpression` /
+`isValueShaped` expose the shapes they test.
+
+### `<table argument>` vs the forms it shares syntax with
+
+`<table argument proper>`'s `<table function invocation>` and `TABLE ( <query> )` are also
+`<value expression>`s and `expr AS <name>` is also a `<generalized expression>`, so
+`pTableArgument` only accepts them when a table-argument clause follows
+(`PARTITION BY` / `PRUNE|KEEP WHEN EMPTY` / `ORDER BY`, or a correlation with a derived
+column list); `TABLE ( <name> )` is unambiguous and needs none. `pSqlArgument` tries
+`pTableArgument` before the value-expression fallback, so a change in the clause parsers can
+silently reclassify an argument. `COPARTITION` is *not* a 5.2 reserved word, so
+`pCorrelationName` and the routine-name parse must reject it explicitly, or
+`TABLE(t2) COPARTITION (a, b)` swallows the clause as a correlation with a column list.
+A `<named argument SQL argument>` (10.4) has NO `<named argument specification>`
+alternative, so `f(a => b => 1)` is rejected while `f(a => f2(b => 1))` is legal — the
+argument collectors only have to unwrap one level of `SqlArgumentNamed`.
 
 ### Desugared nodes must not be re-checked by post-parse validators
 

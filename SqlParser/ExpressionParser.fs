@@ -36,11 +36,22 @@ module ExpressionParser =
     // 7.17 <query expression> — forward ref (defined in QueryParser; used by scalar/quantified subqueries)
     let pQuery, pQueryRef = createParserForwardedToRef<Query, unit> ()
 
+    // 10.4 <routine invocation> — forward ref (defined below): a <table argument> (10.4) may be
+    // a <table function invocation>, i.e. a <routine invocation>, whose own <SQL argument list>
+    // contains <SQL argument>s again.
+    let pRoutineInvocation, pRoutineInvocationRef =
+        createParserForwardedToRef<Expression, unit> ()
+
     // 8 Predicates — forward refs (defined in PredicateParser.fs, compiled after QueryParser.fs;
     // wired in SqlParser.fs). §6.3 <value expression primary> and §6.39 <boolean test> consume
     // them, so they must be referenced before PredicateParser is compiled.
     // 8.1 <predicate> — the postfix predicate suffix (Expression -> Expression)
     let pPredicate, pPredicateRef =
+        createParserForwardedToRef<Expression -> Expression, unit> ()
+    // 8.1 <predicate> without the 6.39 <boolean test> alternative — used when the accumulated
+    // expression may take every §8 predicate suffix but not a boolean test, because a boolean
+    // test's left operand is a <boolean primary> (see pBooleanTestSuffixes below).
+    let pPredicateNoBooleanTest, pPredicateNoBooleanTestRef =
         createParserForwardedToRef<Expression -> Expression, unit> ()
     // 6.39 <boolean test> — the `IS [ NOT ] { TRUE | FALSE | UNKNOWN }` suffix, the ONLY
     // predicate suffix that may follow a boolean primary (defined in PredicateParser.fs).
@@ -76,57 +87,187 @@ module ExpressionParser =
             | parts -> ColumnReference parts
         |> withExprPosition
 
-    // 6.1 <character string type> ::= CHARACTER [ ( <character length> ) ] | CHAR [ ( <length> ) ] | CHARACTER VARYING ( <length> ) | VARCHAR ( <length> ) | <character large object type>
+    // 6.1 <char length units> ::= CHARACTERS | OCTETS
+    // A closed set, so `USING <identifier>` is rejected instead of silently accepted.
+    let pCharLengthUnit =
+        pKeyword "CHARACTERS" >>% Characters <|> (pKeyword "OCTETS" >>% Octets)
+
+    // The same closed set in the `string` shape the 6.30 position/length slots store.
+    let pCharLengthUnits =
+        pCharLengthUnit
+        |>> function
+            | Characters -> "CHARACTERS"
+            | Octets -> "OCTETS"
+
+    // 6.1 <length> ::= <unsigned integer> — the trailing <separator> is consumed so that a
+    // following <multiplier> or <char length units> keyword can match.
+    let pLengthValue = pUnsignedIntegerAsInt .>> ws
+
+    // 6.1 <multiplier> ::= K | M | G | T | P
+    let pLengthMultiplier =
+        choice
+            [ pKeyword "K" >>% Kilo
+              pKeyword "M" >>% Mega
+              pKeyword "G" >>% Giga
+              pKeyword "T" >>% Tera
+              pKeyword "P" >>% Peta ]
+
+    // 6.1 <character length> ::= <length> [ <char length units> ]
+    let pCharacterLength =
+        pLengthValue .>>. opt (attempt pCharLengthUnit)
+        |>> fun (value, unit) -> { Value = value; Unit = unit }
+
+    // 6.1 <large object length> ::= <unsigned integer> [ <multiplier> ] | <large object length token>
+    let pLargeObjectLength =
+        pLengthValue .>>. opt (attempt pLengthMultiplier)
+        |>> fun (value, multiplier) ->
+            { Value = value
+              Multiplier = multiplier
+              Unit = None }
+
+    // 6.1 <character large object length> ::= <large object length> [ <char length units> ]
+    let pCharacterLargeObjectLength =
+        pLargeObjectLength .>>. opt (attempt pCharLengthUnit)
+        |>> fun (length, unit) -> { length with Unit = unit }
+
+    // 6.1 <predefined type> — attach the `[ CHARACTER SET <character set specification> ]`
+    // `[ <collate clause> ]` modifiers to the character string type they modify.
+    let private withCharacterTypeModifiers modifiers ty =
+        match modifiers with
+        | Some m -> CharacterTypeWithModifiers(ty, m)
+        | None -> ty
+
+    // 6.1 <character string type> ::= CHARACTER [ ( <character length> ) ] | CHAR [ ( <character length> ) ]
+    //     | CHARACTER VARYING ( <character length> ) | CHAR VARYING ( <character length> )
+    //     | VARCHAR ( <character length> ) | <character large object type>
+    // <character large object type> ::= CHARACTER LARGE OBJECT [ ( <character large object length> ) ]
+    //     | CHAR LARGE OBJECT [ ( <character large object length> ) ] | CLOB [ ( <character large object length> ) ]
+    // The varying forms REQUIRE their length. The <predefined type> alternatives attach
+    // `[ CHARACTER SET <character set specification> ] [ <collate clause> ]`.
     let pCharacterStringType =
-        choice
-            [ attempt (pKeyword "CHARACTER" .>> pKeyword "VARYING") >>% Varchar
-              attempt (pKeyword "CHAR" .>> pKeyword "VARYING") >>% Varchar
-              pKeyword "VARCHAR" >>% Varchar
-              attempt (pKeyword "CHARACTER" .>> pKeyword "LARGE" .>> pKeyword "OBJECT")
-              >>% CharacterLargeObject
-              attempt (pKeyword "CHAR" .>> pKeyword "LARGE" .>> pKeyword "OBJECT")
-              >>% CharacterLargeObject
-              pKeyword "CLOB" >>% CharacterLargeObject
-              pKeyword "CHARACTER" >>% Character
-              pKeyword "CHAR" >>% Character ]
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedIntegerAsInt)
-        |>> fun (typ, len) -> typ len
+        let pOptionalLength =
+            opt (attempt (between (token (pstring "(")) (token (pstring ")")) pCharacterLength))
 
-    // 6.1 <national character string type> ::= NATIONAL CHARACTER [ ( <character length> ) ] | NCHAR [ ... ] | NATIONAL CHARACTER VARYING ... | <national character large object type>
+        let pRequiredLength =
+            between (token (pstring "(")) (token (pstring ")")) pCharacterLength
+
+        let pOptionalLargeObjectLength =
+            opt (attempt (between (token (pstring "(")) (token (pstring ")")) pCharacterLargeObjectLength))
+
+        // 6.1 <predefined type> — the type-level modifiers of a character string type.
+        let pModifiers =
+            opt (attempt (pKeyword "CHARACTER" >>. pKeyword "SET" >>. pSchemaQualifiedNameExpression))
+            .>>. opt (attempt (pKeyword "COLLATE" >>. pSchemaQualifiedNameExpression))
+            |>> fun (charSet, collation) ->
+                match charSet, collation with
+                | None, None -> None
+                | _ ->
+                    Some
+                        { CharacterSet = charSet
+                          Collation = collation }
+
+        let pBase =
+            choice
+                [ attempt (pKeyword "CHARACTER" .>> pKeyword "VARYING") >>. pRequiredLength
+                  |>> Varchar
+                  attempt (pKeyword "CHAR" .>> pKeyword "VARYING") >>. pRequiredLength |>> Varchar
+                  pKeyword "VARCHAR" >>. pRequiredLength |>> Varchar
+                  attempt (pKeyword "CHARACTER" .>> pKeyword "LARGE" .>> pKeyword "OBJECT")
+                  >>. pOptionalLargeObjectLength
+                  |>> CharacterLargeObject
+                  attempt (pKeyword "CHAR" .>> pKeyword "LARGE" .>> pKeyword "OBJECT")
+                  >>. pOptionalLargeObjectLength
+                  |>> CharacterLargeObject
+                  pKeyword "CLOB" >>. pOptionalLargeObjectLength |>> CharacterLargeObject
+                  pKeyword "CHARACTER" >>. pOptionalLength |>> Character
+                  pKeyword "CHAR" >>. pOptionalLength |>> Character ]
+
+        pBase .>>. pModifiers
+        |>> fun (ty, modifiers) -> withCharacterTypeModifiers modifiers ty
+
+    // 6.1 <national character string type> ::= NATIONAL CHARACTER [ ( <character length> ) ]
+    //     | NATIONAL CHAR [ ( <character length> ) ] | NCHAR [ ( <character length> ) ]
+    //     | NATIONAL CHARACTER VARYING ( <character length> )
+    //     | NATIONAL CHAR VARYING ( <character length> ) | NCHAR VARYING ( <character length> )
+    //     | <national character large object type>
+    // Only the `<collate clause>` modifier is admissible (there is no CHARACTER SET slot).
+    // The varying forms REQUIRE their length.
     let pNationalCharacterStringType =
-        choice
-            [ attempt (pKeyword "NATIONAL" .>> pKeyword "CHARACTER" .>> pKeyword "VARYING")
-              >>% NationalVarchar
-              attempt (pKeyword "NATIONAL" .>> pKeyword "CHAR" .>> pKeyword "VARYING")
-              >>% NationalVarchar
-              attempt (pKeyword "NCHAR" .>> pKeyword "VARYING") >>% NationalVarchar
-              attempt (
-                  pKeyword "NATIONAL"
-                  .>> pKeyword "CHARACTER"
-                  .>> pKeyword "LARGE"
-                  .>> pKeyword "OBJECT"
-              )
-              >>% NationalCharacterLargeObject
-              attempt (pKeyword "NCHAR" .>> pKeyword "LARGE" .>> pKeyword "OBJECT")
-              >>% NationalCharacterLargeObject
-              pKeyword "NCLOB" >>% NationalCharacterLargeObject
-              attempt (pKeyword "NATIONAL" .>> pKeyword "CHARACTER") >>% NationalCharacter
-              attempt (pKeyword "NATIONAL" .>> pKeyword "CHAR") >>% NationalCharacter
-              pKeyword "NCHAR" >>% NationalCharacter ]
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedIntegerAsInt)
-        |>> fun (typ, len) -> typ len
+        let pOptionalLength =
+            opt (attempt (between (token (pstring "(")) (token (pstring ")")) pCharacterLength))
 
-    // 6.1 <binary string type> ::= BINARY [ ( <length> ) ] | BINARY VARYING ( <length> ) | VARBINARY ( <length> ) | <binary large object string type>
+        let pRequiredLength =
+            between (token (pstring "(")) (token (pstring ")")) pCharacterLength
+
+        let pOptionalLargeObjectLength =
+            opt (attempt (between (token (pstring "(")) (token (pstring ")")) pCharacterLargeObjectLength))
+
+        let pModifiers =
+            opt (attempt (pKeyword "COLLATE" >>. pSchemaQualifiedNameExpression))
+            |>> fun collation ->
+                match collation with
+                | None -> None
+                | Some _ ->
+                    Some
+                        { CharacterSet = None
+                          Collation = collation }
+
+        let pBase =
+            choice
+                [ attempt (pKeyword "NATIONAL" .>> pKeyword "CHARACTER" .>> pKeyword "VARYING")
+                  >>. pRequiredLength
+                  |>> NationalVarchar
+                  attempt (pKeyword "NATIONAL" .>> pKeyword "CHAR" .>> pKeyword "VARYING")
+                  >>. pRequiredLength
+                  |>> NationalVarchar
+                  attempt (pKeyword "NCHAR" .>> pKeyword "VARYING") >>. pRequiredLength
+                  |>> NationalVarchar
+                  attempt (
+                      pKeyword "NATIONAL"
+                      .>> pKeyword "CHARACTER"
+                      .>> pKeyword "LARGE"
+                      .>> pKeyword "OBJECT"
+                  )
+                  >>. pOptionalLargeObjectLength
+                  |>> NationalCharacterLargeObject
+                  attempt (pKeyword "NCHAR" .>> pKeyword "LARGE" .>> pKeyword "OBJECT")
+                  >>. pOptionalLargeObjectLength
+                  |>> NationalCharacterLargeObject
+                  pKeyword "NCLOB" >>. pOptionalLargeObjectLength |>> NationalCharacterLargeObject
+                  attempt (pKeyword "NATIONAL" .>> pKeyword "CHARACTER") >>. pOptionalLength
+                  |>> NationalCharacter
+                  attempt (pKeyword "NATIONAL" .>> pKeyword "CHAR") >>. pOptionalLength
+                  |>> NationalCharacter
+                  pKeyword "NCHAR" >>. pOptionalLength |>> NationalCharacter ]
+
+        pBase .>>. pModifiers
+        |>> fun (ty, modifiers) -> withCharacterTypeModifiers modifiers ty
+
+    // 6.1 <binary string type> ::= BINARY [ ( <length> ) ] | BINARY VARYING ( <length> )
+    //     | VARBINARY ( <length> ) | <binary large object string type>
+    // <binary large object string type> ::= BINARY LARGE OBJECT [ ( <large object length> ) ]
+    //     | BLOB [ ( <large object length> ) ]
+    // <length> is a plain <unsigned integer> (no units, no multiplier) and the varying forms
+    // REQUIRE it; a <binary string type> takes no CHARACTER SET / COLLATE modifier.
     let pBinaryStringType =
+        let pOptionalLength =
+            opt (attempt (between (token (pstring "(")) (token (pstring ")")) pLengthValue))
+
+        let pRequiredLength =
+            between (token (pstring "(")) (token (pstring ")")) pLengthValue
+
+        let pOptionalLargeObjectLength =
+            opt (attempt (between (token (pstring "(")) (token (pstring ")")) pLargeObjectLength))
+
         choice
-            [ attempt (pKeyword "BINARY" .>> pKeyword "VARYING") >>% VarBinary
-              pKeyword "VARBINARY" >>% VarBinary
+            [ attempt (pKeyword "BINARY" .>> pKeyword "VARYING") >>. pRequiredLength
+              |>> VarBinary
+              pKeyword "VARBINARY" >>. pRequiredLength |>> VarBinary
               attempt (pKeyword "BINARY" .>> pKeyword "LARGE" .>> pKeyword "OBJECT")
-              >>% BinaryLargeObject
-              pKeyword "BLOB" >>% BinaryLargeObject
-              pKeyword "BINARY" >>% Binary ]
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) pUnsignedIntegerAsInt)
-        |>> fun (typ, len) -> typ len
+              >>. pOptionalLargeObjectLength
+              |>> BinaryLargeObject
+              pKeyword "BLOB" >>. pOptionalLargeObjectLength |>> BinaryLargeObject
+              pKeyword "BINARY" >>. pOptionalLength |>> Binary ]
 
     // 6.1 <exact numeric type> ::= NUMERIC [ ( <precision> [ , <scale> ] ) ] | DECIMAL [ ... ] | DEC [ ... ] | SMALLINT | INTEGER | INT | BIGINT  —  <decimal floating-point type> ::= DECFLOAT [ ( <precision> ) ]
     let pNumericType =
@@ -800,6 +941,31 @@ module ExpressionParser =
         | JsonExists _ -> true
         | _ -> false
 
+    // 7.2 <row value expression> ::= <row value special case> | <explicit row value constructor>
+    //   <row value special case> ::= <nonparenthesized value expression primary>
+    // A parenthesized value expression (`(1)`) is a <value expression primary> but NOT a
+    // <row value special case>; a term (`1 + 1`) or a signed primary is not a primary at all.
+    // An explicit row value constructor (including a <row subquery>) is the other alternative.
+    let isRowValueExpression e =
+        not (isBooleanTopLevel e)
+        && match e.Kind with
+           | RowValueConstructor _ -> true // <explicit row value constructor>
+           | SubqueryExpression _ -> true // <row subquery>
+           | Parenthesized _ -> false // <parenthesized value expression>
+           | BinaryOp _ -> false // a term, not a primary
+           | UnaryOp _ -> false // [ <sign> ] <numeric primary>, not a primary
+           | _ -> true // a <nonparenthesized value expression primary>
+
+    // A grammar slot that requires a *value* expression (8.5/8.6/8.7 pattern and escape,
+    // 8.16/8.17 multiset operand): a boolean and an explicit row value constructor are both
+    // excluded, so `'a' LIKE (1, 2)` is rejected. Character-vs-numeric distinctions stay
+    // semantic — a parse-only library cannot see them.
+    let isValueShaped e =
+        not (isBooleanTopLevel e)
+        && match e.Kind with
+           | RowValueConstructor _ -> false
+           | _ -> true
+
     // 6.12 <case expression> ::= CASE <case operand> <simple when clause>... [ <else clause> ] END
     //     | CASE <searched when clause>... [ <else clause> ] END
     // A <case operand> / <when operand> is a <row value predicand>: a TOP-LEVEL
@@ -966,15 +1132,181 @@ module ExpressionParser =
 
         attempt pDescriptorCast <|> pDescriptorValueConstructor
 
-    // 10.4 <SQL argument> — the value-expression approximation plus the 10.4
-    // <descriptor argument> and the 6.5 <contextually typed value specification> (NULL).
-    let pSqlArgument =
-        attempt pDescriptorArgument <|> pExpression <|> pNullSpecification
+    // 10.4 <generalized expression> ::= <value expression> AS <path-resolved user-defined type name>
+    let pGeneralizedExpressionArgument =
+        pExpression .>> pKeyword "AS" .>>. pSchemaQualifiedNameExpression
+        |>> fun (e, name) -> SqlArgumentGeneralized(e, UserDefinedType name)
 
-    // 10.4 <SQL argument list> (plain — no DISTINCT/ALL; used by <routine invocation>,
-    // <method invocation>, <static method invocation> and <new specification>).
+    // 10.4 <table argument proper> ::= TABLE ( <table or query name> ) | TABLE <table subquery>
+    //     | <table function invocation>
+    let pTableArgumentProper =
+        choice
+            [ // TABLE <table subquery> ::= TABLE ( <query expression> )
+              attempt (pKeyword "TABLE" >>. between (token (pstring "(")) (token (pstring ")")) pQuery)
+              |>> TableArgumentTableQuery
+              // TABLE ( <table or query name> )
+              pKeyword "TABLE"
+              >>. between (token (pstring "(")) (token (pstring ")")) pSchemaQualifiedNameExpression
+              |>> TableArgumentName
+              // <table function invocation> ::= <routine invocation>
+              pRoutineInvocation |>> TableArgumentInvocation ]
+
+    // 10.4 <table argument> ::= <table argument proper>
+    //     [ [ AS ] <table argument correlation name> [ ( <derived column list> ) ] ]
+    //     [ PARTITION BY <table argument partitioning list> ]
+    //     [ PRUNE WHEN EMPTY | KEEP WHEN EMPTY ]
+    //     [ ORDER BY <table argument ordering list> ]
+    // The `<table function invocation>` and `TABLE ( <query> )` forms are also <value
+    // expression>s, so they are only read as a <table argument> when a table-argument clause
+    // is present (the unambiguous `TABLE ( <name> )` form needs none) — see docs/trade-off.md.
+    let pTableArgument =
+        // 10.4 <table argument parenthesized derived column list>
+        let pDerivedColumnList =
+            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
+
+        // 10.4 <table argument correlation name> ::= <correlation name> — the optional AS
+        // is not kept (the AST models correlations as a name + optional column list).
+        // COPARTITION starts the <copartition clause> and is never a correlation.
+        let pCorrelationName =
+            pIdentifierExpression
+            >>= fun name ->
+                match name.Kind with
+                | Identifier "COPARTITION" -> fail "COPARTITION starts a <copartition clause> (10.4)"
+                | _ -> preturn name
+
+        let pCorrelation =
+            attempt (opt (pKeyword "AS") >>. pCorrelationName .>>. opt (attempt pDerivedColumnList))
+
+        // 10.4 <table argument partitioning list> ::= <column reference>
+        //     | ( [ <column reference> [ { <comma> <column reference> }... ] ] )
+        let pPartitioning =
+            pKeyword "PARTITION"
+            >>. pKeyword "BY"
+            >>. (attempt (
+                     between
+                         (token (pstring "("))
+                         (token (pstring ")"))
+                         (sepBy pColumnReferenceExpression (token (pstring ",")))
+                 )
+                 <|> (pColumnReferenceExpression |>> fun c -> [ c ]))
+
+        // 10.4 <table argument pruning> ::= PRUNE WHEN EMPTY | KEEP WHEN EMPTY
+        let pPruning =
+            pKeyword "PRUNE" >>. pKeyword "WHEN" >>. pKeyword "EMPTY" >>% PruneWhenEmpty
+            <|> (pKeyword "KEEP" >>. pKeyword "WHEN" >>. pKeyword "EMPTY" >>% KeepWhenEmpty)
+
+        // 10.4 <table argument ordering column> ::= <column reference> [ <ordering specification> ] [ <null ordering> ]
+        // 10.4 <table argument ordering list> ::= <table argument ordering column>
+        //     | ( <table argument ordering column> [ { <comma> ... }... ] )
+        let pOrdering =
+            pKeyword "ORDER"
+            >>. pKeyword "BY"
+            >>. (attempt (
+                     between
+                         (token (pstring "("))
+                         (token (pstring ")"))
+                         (sepBy1 pSortSpecification (token (pstring ",")))
+                 )
+                 <|> (pSortSpecification |>> fun s -> [ s ]))
+
+        let mkTableArgument proper correlation partitioning pruning ordering =
+            { Table = proper
+              Correlation = correlation
+              PartitionBy = partitioning
+              Pruning = pruning
+              OrderBy = ordering }
+            : TableArgument
+
+        attempt (
+            pTableArgumentProper
+            .>>. opt pCorrelation
+            .>>. opt (attempt pPartitioning)
+            .>>. opt (attempt pPruning)
+            .>>. opt (attempt pOrdering)
+            >>= fun ((((proper, correlation), partitioning), pruning), ordering) ->
+                let hasClause =
+                    Option.isSome correlation
+                    || Option.isSome partitioning
+                    || Option.isSome pruning
+                    || Option.isSome ordering
+
+                match proper, hasClause with
+                | TableArgumentName _, _ -> preturn (mkTableArgument proper correlation partitioning pruning ordering)
+                | _, true -> preturn (mkTableArgument proper correlation partitioning pruning ordering)
+                | _ -> fail "a <table argument> needs a table-argument clause (10.4)"
+        )
+
+    // 10.4 <named argument SQL argument> ::= <value expression> | <target specification>
+    //     | <contextually typed value specification> | <table argument> | <descriptor argument>
+    let pNamedArgumentValue =
+        choice
+            [ attempt pDescriptorArgument |>> SqlArgumentDescriptor
+              attempt pTableArgument |>> SqlArgumentTable
+              pNullSpecification |>> SqlArgumentValue
+              pExpression |>> SqlArgumentValue ]
+
+    // 10.4 <named argument specification> ::=
+    //     <SQL parameter name> <named argument assignment token> <named argument SQL argument>
+    // <named argument assignment token> ::= `=>` (5.2).
+    let pNamedArgument =
+        pIdentifierExpression .>> token (pstring "=>") .>>. pNamedArgumentValue
+        |>> SqlArgumentNamed
+
+    // The delimiter that ends an <SQL argument>: `,`, `)` or the <copartition clause>.
+    let pSqlArgumentEnd =
+        token (pstring ",") >>% ()
+        <|> (token (pstring ")") >>% ())
+        <|> (pKeyword "COPARTITION" >>% ())
+
+    // 10.4 <SQL argument> ::= <value expression> | <generalized expression>
+    //     | <target specification> | <contextually typed value specification>
+    //     | <named argument specification> | <table argument> | <descriptor argument>
+    let pSqlArgument =
+        choice
+            [ attempt pDescriptorArgument |>> SqlArgumentDescriptor
+              attempt pNamedArgument
+              // A <generalized expression> is only taken when the argument ends there:
+              // `f(x) AS t PARTITION BY a` is a <table argument> (10.4).
+              attempt (pGeneralizedExpressionArgument .>> followedBy pSqlArgumentEnd)
+              attempt pTableArgument |>> SqlArgumentTable
+              pNullSpecification |>> SqlArgumentValue
+              pExpression |>> SqlArgumentValue ]
+
+    // 10.4 <copartition specification> ::= ( <range variable> [ { <comma> <range variable> }... ] )
+    // 10.4 <range variable> ::= <table name> | <query name> | <correlation name>
+    let pCopartitionSpecification =
+        between
+            (token (pstring "("))
+            (token (pstring ")"))
+            (sepBy1 pSchemaQualifiedNameExpression (token (pstring ",")))
+
+    // 10.4 <copartition clause> ::= COPARTITION <copartition list>
+    let pCopartition =
+        pKeyword "COPARTITION"
+        >>. sepBy1 pCopartitionSpecification (token (pstring ","))
+
+    // 10.4 <SQL argument list> ::=
+    //     ( [ <SQL argument> [ { <comma> <SQL argument> }... ] [ <copartition clause> ] ] )
+    // (plain — no DISTINCT/ALL; used by <routine invocation>, <method invocation>,
+    // <static method invocation>, <new specification> and 16.1 CALL.)
+    let pSqlArgumentListBody =
+        // A leading COPARTITION starts the <copartition clause>, not a routine call named
+        // COPARTITION (the keyword is not in the 5.2 reserved set).
+        let pCopartitionOnlyArgumentList =
+            pCopartition
+            |>> fun copartition ->
+                { Arguments = []
+                  Copartition = Some copartition }
+
+        choice
+            [ attempt pCopartitionOnlyArgumentList
+              sepBy pSqlArgument (token (pstring ",")) .>>. opt (attempt pCopartition)
+              |>> fun (arguments, copartition) ->
+                  { Arguments = arguments
+                    Copartition = copartition } ]
+
     let pSqlArgumentList =
-        between (token (pstring "(")) (token (pstring ")")) (sepBy pSqlArgument (token (pstring ",")))
+        between (token (pstring "(")) (token (pstring ")")) pSqlArgumentListBody
 
     let pMethodOrFieldReference =
         // 6.32 <specific type method> ::= <user-defined type value expression> <period> SPECIFICTYPE [ ( ) ]
@@ -1202,11 +1534,6 @@ module ExpressionParser =
             )
         |> withExprPosition
 
-    // 6.1 <char length units> ::= CHARACTERS | OCTETS
-    // A closed set, so `USING <identifier>` is rejected instead of silently accepted.
-    let pCharLengthUnits =
-        pKeyword "CHARACTERS" >>% "CHARACTERS" <|> (pKeyword "OCTETS" >>% "OCTETS")
-
     // The same keyword set in the <position expression> slot, which models the units as an <identifier>.
     let pCharLengthUnitsExpr = pCharLengthUnits |>> Identifier |> withExprPosition
 
@@ -1368,6 +1695,8 @@ module ExpressionParser =
         |> withExprPosition
 
     // 6.32 <trim function> ::= TRIM ( [ <trim specification> ] [ <trim character> ] FROM <trim source> )
+    //     | TRIM ( <trim source> )
+    // The shorthand is a separate production of 6.32: neither a specification nor a character.
     let pTrimFunction =
         let pSpec =
             opt (
@@ -1376,12 +1705,17 @@ module ExpressionParser =
                 <|> (pKeyword "BOTH" >>% Both)
             )
 
+        // `[ <trim specification> ] [ <trim character> ] FROM <trim source>`
+        let pExplicitForm =
+            pSpec .>>. opt pExpression .>> pKeyword "FROM" .>>. pExpression
+            |>> fun ((spec, character), source) -> spec, character, source
+
+        // `TRIM ( <trim source> )` — the shorthand carries neither part.
+        let pShorthandForm = pExpression |>> fun source -> None, None, source
+
         pKeyword "TRIM"
-        >>. between
-                (token (pstring "("))
-                (token (pstring ")"))
-                (pSpec .>>. opt pExpression .>> pKeyword "FROM" .>>. pExpression)
-        |>> (fun ((spec, char), source) -> Trim(spec, char, source))
+        >>. between (token (pstring "(")) (token (pstring ")")) (attempt pExplicitForm <|> pShorthandForm)
+        |>> (fun (spec, character, source) -> Trim(spec, character, source))
         |> withExprPosition
 
     // 6.32 <character substring function> ::= SUBSTRING ( <character value expression> FROM <start position> [ FOR <string length> ] [ USING <char length units> ] )
@@ -1727,22 +2061,25 @@ module ExpressionParser =
              |>> RowValueConstructor)
         |> withExprPosition
 
-    let pRoutineInvocation =
+    pRoutineInvocationRef.Value <-
         // 10.9 <aggregate function> ::= COUNT ( <asterisk> ) | ... — the bare `*` is an
         // argument ONLY of COUNT; every other function takes <value expression>s.
         // (The `*` is NOT a <value expression primary>, so it is parsed here directly.)
         let pStarArg =
             pstring "*" .>> ws .>>. getPosition
             |>> fun (_, pos) ->
-                [ { Expression.Kind = ExpressionKind.Star
-                    Pos = { Line = pos.Line; Column = pos.Column } } ]
+                { Arguments =
+                    [ SqlArgumentValue
+                          { Expression.Kind = ExpressionKind.Star
+                            Pos = { Line = pos.Line; Column = pos.Column } } ]
+                  Copartition = None }
 
         let pArgs =
             between
                 (token (pstring "("))
                 (token (pstring ")"))
                 (opt (pKeyword "DISTINCT" >>% true <|> (pKeyword "ALL" >>% false))
-                 .>>. (attempt pStarArg <|> sepBy pSqlArgument (token (pstring ","))))
+                 .>>. (attempt pStarArg <|> pSqlArgumentListBody))
 
         let pFilter =
             pKeyword "FILTER"
@@ -1772,7 +2109,7 @@ module ExpressionParser =
         .>>. opt pWithinGroup
         .>>. opt pFilter
         .>>. opt pWindowNameOrSpecification
-        >>= fun ((((name, (dist, args)), withinGroup), filter), window) ->
+        >>= fun ((((name, (dist, argumentList)), withinGroup), filter), window) ->
             // 6.10 and 10.9 make the suffix mandatory for some reserved function keywords: those
             // names are whitelisted, so without this check `ROW_NUMBER()` or `LISTAGG(x, ',')` would
             // degrade to a plain <routine invocation>.
@@ -1812,9 +2149,20 @@ module ExpressionParser =
                 then
                     fail (sprintf "%s does not take a FILTER clause (10.9 <set function>)." functionName)
                 else
-                    // Arity / argument-shape checks (6.10, 10.9).
-                    let argKinds = args |> List.map (fun a -> a.Kind)
+                    // 10.4 — the arity/shape rules below speak about <value expression>
+                    // arguments. A <table argument> / <named argument> / <descriptor argument>
+                    // cannot satisfy any of them, so a reserved built-in rejects one up front;
+                    // a general routine name (a PTF) may take them.
+                    let valueArguments =
+                        argumentList.Arguments
+                        |> List.choose (function
+                            | SqlArgumentValue e -> Some e
+                            | _ -> None)
 
+                    let hasNonValueArgument = argumentList.Arguments.Length > valueArguments.Length
+                    let args = valueArguments
+
+                    // Arity / argument-shape checks (6.10, 10.9).
                     let failArity what =
                         fail (sprintf "%s expects %s." functionName what)
 
@@ -1827,7 +2175,9 @@ module ExpressionParser =
                     // 10.9 — the bare `*` argument is only `COUNT ( <asterisk> )`.
                     let hasStarArg = args |> List.exists (fun a -> a.Kind = ExpressionKind.Star)
 
-                    if hasStarArg && functionName <> "COUNT" then
+                    if hasNonValueArgument && List.contains functionName functionKeywords then
+                        failArity "only <value expression> arguments (10.4)"
+                    elif hasStarArg && functionName <> "COUNT" then
                         failArity "no <asterisk> argument (10.9 <aggregate function>)"
                     elif
                         hasStarArg
@@ -1923,7 +2273,14 @@ module ExpressionParser =
                             )
                         | None ->
                             preturn (
-                                FunctionCall(name, Option.defaultValue false dist, args, None, filter, withinGroup)
+                                FunctionCall(
+                                    name,
+                                    Option.defaultValue false dist,
+                                    argumentList,
+                                    None,
+                                    filter,
+                                    withinGroup
+                                )
                             )
         |> withExprPosition
 
@@ -2361,31 +2718,41 @@ module ExpressionParser =
     pNumericValueExpressionRef.Value <- oppNumeric.ExpressionParser
 
     // 6.39 <boolean test> / 8.x <predicate> / 6.24 <array element reference> / 6.35 AT TIME ZONE /
-    // 6.43 multiset set operators — postfix suffixes applied to a <value expression>. The
-    // predicate suffix is conditioned on the accumulated expression: after a TOP-LEVEL boolean
-    // (a comparison or a predicate) only the 6.39 `IS [ NOT ] { TRUE | FALSE | UNKNOWN }` test
-    // may follow — every 8.x predicate takes a <row value predicand> left operand, which a
-    // predicate is not, and a second boolean test would need the previous one to be a
-    // <boolean primary> (a <boolean test> is not one).
+    // 6.43 multiset set operators — postfix suffixes applied to a <value expression>.
+    //
+    // The predicate alternative is conditioned on the accumulated expression, because
+    // 6.39 <boolean primary> ::= <predicate> | <boolean predicand> and
+    //   <boolean predicand> ::= <parenthesized boolean value expression>
+    //                         | <nonparenthesized value expression primary>:
+    //   * a top-level boolean (a comparison or a predicate) may take the boolean test ALONE —
+    //     every 8.x predicate takes a <row value predicand>, which a predicate is not;
+    //   * a boolean test is not a <boolean primary>, so no predicate suffix may follow it;
+    //   * a term (`1 + 1`) takes every 8.x predicate — it is a <common value expression>,
+    //     hence a <row value predicand> — but NOT the boolean test;
+    //   * every other shape (a primary, a parenthesized expression, `EXISTS (...)`) may take
+    //     any suffix, pPredicate offering the boolean test itself.
+    // NOTE: no [<TailCall>] here — the loop is monadic (`suffix >>= …`), so F# reports it as
+    // non-tail-recursive (FS3569). Its depth is bounded by the number of postfix suffixes in
+    // the input, each of which consumes at least one token.
     let rec pBooleanTestSuffixes e =
-        let allowBooleanTestOnly =
-            isBooleanTopLevel e
-            && match e.Kind with
-               | IsBoolean _ -> false
-               | _ -> true
-
-        let predicate =
-            (if allowBooleanTestOnly then
-                 pBooleanTestPart2
-             else
-                 pPredicate)
-            |>> fun applySuffix -> applySuffix e
-
-        let suffix =
-            predicate
-            <|> (pArrayElementReference |>> fun applySuffix -> applySuffix e)
+        let pNonPredicateSuffix =
+            (pArrayElementReference |>> fun applySuffix -> applySuffix e)
             <|> attempt (pMultisetSetOperatorSuffix |>> fun applySuffix -> applySuffix e)
             <|> attempt (pTimeZoneSuffix |>> fun applySuffix -> applySuffix e)
+
+        let predicateSuffix =
+            match e.Kind with
+            | IsBoolean _ -> None
+            | _ when isBooleanTopLevel e -> Some(pBooleanTestPart2 |>> fun applySuffix -> applySuffix e)
+            | BinaryOp _
+            | UnaryOp _
+            | RowValueConstructor _ -> Some(pPredicateNoBooleanTest |>> fun applySuffix -> applySuffix e)
+            | _ -> Some(pPredicate |>> fun applySuffix -> applySuffix e)
+
+        let suffix =
+            match predicateSuffix with
+            | Some predicate -> predicate <|> pNonPredicateSuffix
+            | None -> pNonPredicateSuffix
 
         suffix >>= pBooleanTestSuffixes <|> preturn e
 
@@ -2440,6 +2807,38 @@ module ExpressionParser =
     // be arbitrarily deep, and a boolean short-circuit (`a || b`) cannot put both recursive
     // calls in tail position. The child collectors sit at module level (rather than inside the
     // search) so they are not rebuilt on every visited node.
+    // 10.4 — the expressions an <SQL argument> carries, used by the post-parse checks below.
+    // A <table argument>'s `TABLE ( <query> )` stays opaque, like `TableQuery` (6.45). The
+    // chain of <named argument specification>s (`a => b => 1`) is walked with an explicit
+    // work list so the collector is tail-recursive, like the search itself: a plain
+    // `name :: children value` recursion would not be.
+    let private tableArgumentChildren (t: TableArgument) =
+        [ yield!
+              match t.Table with
+              | TableArgumentName e -> [ e ]
+              | TableArgumentTableQuery _ -> []
+              | TableArgumentInvocation e -> [ e ]
+          yield!
+              t.Correlation
+              |> Option.toList
+              |> List.collect (fun (correlation, columns) -> correlation :: Option.defaultValue [] columns)
+          yield! Option.defaultValue [] t.PartitionBy
+          yield! t.OrderBy |> Option.defaultValue [] |> List.map (fun (e, _, _) -> e) ]
+
+    [<TailCall>]
+    let rec private collectSqlArgumentChildren (work: SqlArgument list) (acc: Expression list) =
+        match work with
+        | [] -> List.rev acc
+        | arg :: rest ->
+            match arg with
+            | SqlArgumentValue e -> collectSqlArgumentChildren rest (e :: acc)
+            | SqlArgumentGeneralized(e, _) -> collectSqlArgumentChildren rest (e :: acc)
+            | SqlArgumentDescriptor e -> collectSqlArgumentChildren rest (e :: acc)
+            | SqlArgumentNamed(name, value) -> collectSqlArgumentChildren (value :: rest) (name :: acc)
+            | SqlArgumentTable t -> collectSqlArgumentChildren rest (List.rev (tableArgumentChildren t) @ acc)
+
+    let private sqlArgumentChildren (arguments: SqlArgument list) = collectSqlArgumentChildren arguments []
+
     [<TailCall>]
     let rec private findExpressionViolationIn (work: Expression list) =
         let jsonCommonChildren c =
@@ -2469,9 +2868,9 @@ module ExpressionParser =
             // guard below must see through it (docs/gotchas.md — a new Expression case
             // holding an Expression silently escapes the catch-all arm if unlisted).
             | Parenthesized inner -> [ inner ]
-            | FunctionCall(name, _, args, _, filter, withinGroup) ->
+            | FunctionCall(name, _, arguments, _, filter, withinGroup) ->
                 [ yield name
-                  yield! args
+                  yield! sqlArgumentChildren arguments.Arguments
                   yield! Option.toList filter
                   yield! withinGroup |> Option.defaultValue [] |> List.map (fun (e, _, _) -> e) ]
             | Cast(x, _, _) -> [ x ]
@@ -2537,8 +2936,14 @@ module ExpressionParser =
                   yield! orderBy |> Option.defaultValue [] |> List.map (fun (e, _, _) -> e) ]
             | SetFunction(_, x) -> [ x ]
             | Grouping xs -> xs
-            | GeneralizedInvocation(r, _, name, args) -> [ yield r; yield name; yield! Option.defaultValue [] args ]
-            | Dereference(r, name, args) -> [ yield r; yield name; yield! Option.defaultValue [] args ]
+            | GeneralizedInvocation(r, _, name, arguments) ->
+                [ yield r
+                  yield name
+                  yield! sqlArgumentChildren (arguments |> Option.toList |> List.collect (fun a -> a.Arguments)) ]
+            | Dereference(r, name, arguments) ->
+                [ yield r
+                  yield name
+                  yield! sqlArgumentChildren (arguments |> Option.toList |> List.collect (fun a -> a.Arguments)) ]
             | RowPatternNavigation(RowPatternNavigation.Logical(_, _, x, offset)) ->
                 [ yield x; yield! Option.toList offset ]
             | RowPatternNavigation(RowPatternNavigation.Physical(_, x, offset)) ->

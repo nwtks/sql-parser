@@ -59,6 +59,20 @@ let parseFails (sql: string) =
     | Ok _ -> failwithf "Expected parse failure for %s" sql
     | Error _ -> ()
 
+// 10.4 — an <SQL argument list> whose arguments are all plain <value expression>s, unwrapped
+// for assertions (the second element is the <copartition clause>, usually None).
+let (|SqlValueArguments|_|) (arguments: SqlArgumentList) =
+    let values =
+        arguments.Arguments
+        |> List.map (function
+            | SqlArgumentValue e -> Some e
+            | _ -> None)
+
+    if List.forall Option.isSome values then
+        Some(values |> List.map Option.get, arguments.Copartition)
+    else
+        None
+
 [<Fact>]
 let ``Concatenated hex literal verification`` () =
     match parse "SELECT X'0102' '0304'" with
@@ -94,8 +108,98 @@ let ``NULL is a null specification, not a literal`` () =
 
     // 10.4 <SQL argument> admits a <contextually typed value specification>.
     match parse "SELECT my_func(NULL)" with
-    | FunctionCall({ Kind = Identifier "MY_FUNC" }, _, [ { Kind = Literal Null } ], _, _, _) -> ()
+    | FunctionCall({ Kind = Identifier "MY_FUNC" }, _, SqlValueArguments([ { Kind = Literal Null } ], None), _, _, _) ->
+        ()
     | res -> Assert.Fail(sprintf "Expected my_func(NULL), got %A" res)
+
+[<Fact>]
+let ``Character and binary string types keep their length model (6.1)`` () =
+    // 6.1 <character length> ::= <length> [ <char length units> ]
+    match parse "SELECT CAST(x AS CHAR(10))" with
+    | Cast(_, Character(Some { Value = 10; Unit = None }), _) -> ()
+    | res -> Assert.Fail(sprintf "Expected CHAR(10), got %A" res)
+
+    match parse "SELECT CAST(x AS CHAR(10 CHARACTERS))" with
+    | Cast(_, Character(Some { Value = 10; Unit = Some Characters }), _) -> ()
+    | res -> Assert.Fail(sprintf "Expected CHAR(10 CHARACTERS), got %A" res)
+
+    match parse "SELECT CAST(x AS CLOB(10 OCTETS))" with
+    | Cast(_,
+           CharacterLargeObject(Some { Value = 10
+                                       Multiplier = None
+                                       Unit = Some Octets }),
+           _) -> ()
+    | res -> Assert.Fail(sprintf "Expected CLOB(10 OCTETS), got %A" res)
+
+    // 6.1 <large object length> ::= <unsigned integer> [ <multiplier> ] | <large object length token>
+    match parse "SELECT CAST(x AS CLOB(10M))" with
+    | Cast(_,
+           CharacterLargeObject(Some { Value = 10
+                                       Multiplier = Some Mega
+                                       Unit = None }),
+           _) -> ()
+    | res -> Assert.Fail(sprintf "Expected CLOB(10M), got %A" res)
+
+    match parse "SELECT CAST(x AS NCLOB(4 K))" with
+    | Cast(_,
+           NationalCharacterLargeObject(Some { Value = 4
+                                               Multiplier = Some Kilo
+                                               Unit = None }),
+           _) -> ()
+    | res -> Assert.Fail(sprintf "Expected NCLOB(4 K), got %A" res)
+
+    // 6.1 <binary string type> — <length> is a plain <unsigned integer> (no units, no multiplier).
+    match parse "SELECT CAST(x AS BINARY(8))" with
+    | Cast(_, Binary(Some 8), _) -> ()
+    | res -> Assert.Fail(sprintf "Expected BINARY(8), got %A" res)
+
+    match parse "SELECT CAST(x AS BLOB(1G))" with
+    | Cast(_,
+           BinaryLargeObject(Some { Value = 1
+                                    Multiplier = Some Giga
+                                    Unit = None }),
+           _) -> ()
+    | res -> Assert.Fail(sprintf "Expected BLOB(1G), got %A" res)
+
+[<Fact>]
+let ``Varying string types require their length (6.1)`` () =
+    // CHARACTER VARYING / VARCHAR / NATIONAL CHARACTER VARYING / NCHAR VARYING /
+    // BINARY VARYING / VARBINARY have no length-less alternative.
+    parseFails "SELECT CAST(x AS VARCHAR) FROM t"
+    parseFails "SELECT CAST(x AS CHARACTER VARYING) FROM t"
+    parseFails "SELECT CAST(x AS CHAR VARYING) FROM t"
+    parseFails "SELECT CAST(x AS NCHAR VARYING) FROM t"
+    parseFails "SELECT CAST(x AS NATIONAL CHARACTER VARYING) FROM t"
+    parseFails "SELECT CAST(x AS VARBINARY) FROM t"
+    parseFails "SELECT CAST(x AS BINARY VARYING) FROM t"
+
+[<Fact>]
+let ``String type modifiers are parsed (6.1)`` () =
+    // 6.1 <predefined type> — `[ CHARACTER SET <character set specification> ] [ <collate clause> ]`
+    match parse "SELECT CAST(x AS VARCHAR(10) CHARACTER SET utf8)" with
+    | Cast(_, CharacterTypeWithModifiers(Varchar { Value = 10; Unit = None }, modifiers), _) ->
+        Assert.Equal<ExpressionKind option>(
+            Some(Identifier "UTF8"),
+            modifiers.CharacterSet |> Option.map (fun e -> e.Kind)
+        )
+
+        Assert.True(Option.isNone modifiers.Collation)
+    | res -> Assert.Fail(sprintf "Expected a CHARACTER SET modifier, got %A" res)
+
+    match parse "SELECT CAST(x AS VARCHAR(10) CHARACTER SET utf8 COLLATE en_us)" with
+    | Cast(_, CharacterTypeWithModifiers(Varchar { Value = 10; Unit = None }, modifiers), _) ->
+        Assert.True(Option.isSome modifiers.CharacterSet)
+
+        Assert.Equal<ExpressionKind option>(
+            Some(Identifier "EN_US"),
+            modifiers.Collation |> Option.map (fun e -> e.Kind)
+        )
+    | res -> Assert.Fail(sprintf "Expected both type-level modifiers, got %A" res)
+
+    // A <binary string type> takes no modifier …
+    parseFails "SELECT CAST(x AS BINARY(8) CHARACTER SET utf8) FROM t"
+    // … and a <national character string type> has no CHARACTER SET slot.
+    parseFails "SELECT CAST(x AS NCHAR(8) CHARACTER SET utf8) FROM t"
 
 [<Fact>]
 let ``Exact numeric type variants are parsed`` () =
@@ -229,7 +333,12 @@ let ``Routine invocation arity and suffix restrictions (6.10 / 10.9)`` () =
 
     // positive: COUNT(*) parses
     match parse "SELECT COUNT(*)" with
-    | FunctionCall({ Kind = Identifier "COUNT" }, _, [ { Kind = ExpressionKind.Star } ], _, _, _) -> ()
+    | FunctionCall({ Kind = Identifier "COUNT" },
+                   _,
+                   SqlValueArguments([ { Kind = ExpressionKind.Star } ], None),
+                   _,
+                   _,
+                   _) -> ()
     | res -> Assert.Fail(sprintf "Expected COUNT(*), got %A" res)
 
     // <rank function type> takes empty parens in the OVER form
@@ -482,17 +591,18 @@ let ``CAST FORMAT template verification (6.13)`` () =
 [<Fact>]
 let ``Descriptor arguments in SQL argument lists (10.4)`` () =
     match parse "SELECT my_func(DESCRIPTOR (a INT, b)) FROM t" with
-    | FunctionCall(_,
-                   _,
-                   [ { Kind = DescriptorValueConstructor [ ({ Kind = Identifier "A" }, Some Integer)
-                                                           ({ Kind = Identifier "B" }, None) ] } ],
-                   _,
-                   _,
-                   _) -> ()
+    | FunctionCall(_, _, arguments, _, _, _) ->
+        match arguments.Arguments with
+        | [ SqlArgumentDescriptor { Kind = DescriptorValueConstructor [ ({ Kind = Identifier "A" }, Some Integer)
+                                                                        ({ Kind = Identifier "B" }, None) ] } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected a descriptor value constructor argument, got %A" res)
     | res -> Assert.Fail(sprintf "Expected a descriptor value constructor argument, got %A" res)
 
     match parse "SELECT my_func(CAST(NULL AS DESCRIPTOR)) FROM t" with
-    | FunctionCall(_, _, [ { Kind = DescriptorCast } ], _, _, _) -> ()
+    | FunctionCall(_, _, arguments, _, _, _) ->
+        match arguments.Arguments with
+        | [ SqlArgumentDescriptor { Kind = DescriptorCast } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected a CAST ( NULL AS DESCRIPTOR ) argument, got %A" res)
     | res -> Assert.Fail(sprintf "Expected a CAST ( NULL AS DESCRIPTOR ) argument, got %A" res)
 
     // The CAST form is a <descriptor argument> only — it is not a <cast specification>.
@@ -500,8 +610,92 @@ let ``Descriptor arguments in SQL argument lists (10.4)`` () =
 
     // A routine named DESCRIPTOR still parses as a plain identifier argument.
     match parse "SELECT my_func(DESCRIPTOR) FROM t" with
-    | FunctionCall(_, _, [ { Kind = Identifier "DESCRIPTOR" } ], _, _, _) -> ()
+    | FunctionCall(_, _, SqlValueArguments([ { Kind = Identifier "DESCRIPTOR" } ], None), _, _, _) -> ()
     | res -> Assert.Fail(sprintf "Expected a plain DESCRIPTOR argument, got %A" res)
+
+[<Fact>]
+let ``SQL argument forms (10.4)`` () =
+    // <generalized expression> ::= <value expression> AS <path-resolved user-defined type name>
+    match parse "SELECT my_func(x AS my_type) FROM t" with
+    | FunctionCall(_, _, arguments, _, _, _) ->
+        match arguments.Arguments with
+        | [ SqlArgumentGeneralized({ Kind = Identifier "X" }, UserDefinedType { Kind = Identifier "MY_TYPE" }) ] -> ()
+        | res -> Assert.Fail(sprintf "Expected a generalized expression argument, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected my_func, got %A" res)
+
+    // <named argument specification> ::= <SQL parameter name> => <named argument SQL argument>
+    match parse "SELECT my_func(a => 1, b => 'x') FROM t" with
+    | FunctionCall(_, _, arguments, _, _, _) ->
+        match arguments.Arguments with
+        | [ SqlArgumentNamed({ Kind = Identifier "A" }, SqlArgumentValue { Kind = Literal(Number 1m) })
+            SqlArgumentNamed({ Kind = Identifier "B" }, SqlArgumentValue { Kind = Literal(String "x") }) ] -> ()
+        | res -> Assert.Fail(sprintf "Expected named arguments, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected my_func, got %A" res)
+
+    parseFails "SELECT my_func(1 => 2) FROM t"
+
+    // <table argument> — `TABLE ( <name> )` is unambiguous, so it needs no clause; its
+    // correlation, partitioning, pruning and ordering are kept.
+    match parse "SELECT my_ptf(TABLE(t) AS x PARTITION BY a KEEP WHEN EMPTY ORDER BY b DESC) FROM t" with
+    | FunctionCall(_, _, arguments, _, _, _) ->
+        match arguments.Arguments with
+        | [ SqlArgumentTable table ] ->
+            match table.Table with
+            | TableArgumentName { Kind = Identifier "T" } -> ()
+            | res -> Assert.Fail(sprintf "Expected TABLE ( t ), got %A" res)
+
+            match table.Correlation with
+            | Some({ Kind = Identifier "X" }, None) -> ()
+            | res -> Assert.Fail(sprintf "Expected a correlation, got %A" res)
+
+            match table.PartitionBy with
+            | Some [ { Kind = Identifier "A" } ] -> ()
+            | res -> Assert.Fail(sprintf "Expected PARTITION BY a, got %A" res)
+
+            Assert.Equal(Some KeepWhenEmpty, table.Pruning)
+
+            match table.OrderBy with
+            | Some [ ({ Kind = Identifier "B" }, false, None) ] -> ()
+            | res -> Assert.Fail(sprintf "Expected ORDER BY b DESC, got %A" res)
+        | res -> Assert.Fail(sprintf "Expected a table argument, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected my_ptf, got %A" res)
+
+    // A <table function invocation> proper is also a <value expression>, so it needs a
+    // table-argument clause (see docs/trade-off.md).
+    match parse "SELECT my_ptf(f(x) PARTITION BY (a, b) PRUNE WHEN EMPTY) FROM t" with
+    | FunctionCall(_, _, arguments, _, _, _) ->
+        match arguments.Arguments with
+        | [ SqlArgumentTable table ] ->
+            match table.Table with
+            | TableArgumentInvocation { Kind = FunctionCall _ } -> ()
+            | res -> Assert.Fail(sprintf "Expected a table function invocation, got %A" res)
+
+            match table.PartitionBy with
+            | Some [ { Kind = Identifier "A" }; { Kind = Identifier "B" } ] -> ()
+            | res -> Assert.Fail(sprintf "Expected PARTITION BY (a, b), got %A" res)
+
+            Assert.Equal(Some PruneWhenEmpty, table.Pruning)
+        | res -> Assert.Fail(sprintf "Expected a table argument, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected my_ptf, got %A" res)
+
+    // Without any table-argument clause the same text stays a <value expression>.
+    match parse "SELECT my_ptf(TABLE(SELECT x FROM u)) FROM t" with
+    | FunctionCall(_, _, arguments, _, _, _) ->
+        match arguments.Arguments with
+        | [ SqlArgumentValue { Kind = TableQuery _ } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected a table query argument, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected my_ptf, got %A" res)
+
+    // <copartition clause> ::= COPARTITION <copartition list>
+    match parse "SELECT my_ptf(TABLE(t1) PARTITION BY a, TABLE(t2) COPARTITION (t1, t2)) FROM t" with
+    | FunctionCall(_, _, arguments, _, _, _) ->
+        match arguments.Copartition with
+        | Some [ [ { Kind = Identifier "T1" }; { Kind = Identifier "T2" } ] ] -> ()
+        | res -> Assert.Fail(sprintf "Expected a copartition clause, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected my_ptf, got %A" res)
+
+    // 10.4 — a reserved built-in takes <value expression> arguments only.
+    parseFails "SELECT ABS(1, TABLE(t)) FROM t"
 
 [<Fact>]
 let ``NEXT VALUE FOR verification`` () =
@@ -534,7 +728,7 @@ let ``Method invocation verification`` () =
     match parse "SELECT a.obj.prune(x)" with
     | MethodInvocation({ Kind = ColumnReference [ "A"; "OBJ" ] },
                        { Kind = Identifier "PRUNE" },
-                       [ { Kind = Identifier "X" } ]) -> ()
+                       SqlValueArguments([ { Kind = Identifier "X" } ], None)) -> ()
     | res -> Assert.Fail(sprintf "Expected MethodInvocation, got %A" res)
 
 [<Fact>]
@@ -542,7 +736,7 @@ let ``Method invocation on parenthesized expression verification`` () =
     match parse "SELECT (a.b).prune(x)" with
     | MethodInvocation({ Kind = Parenthesized { Kind = ColumnReference [ "A"; "B" ] } },
                        { Kind = Identifier "PRUNE" },
-                       [ { Kind = Identifier "X" } ]) -> ()
+                       SqlValueArguments([ { Kind = Identifier "X" } ], None)) -> ()
     | res -> Assert.Fail(sprintf "Expected MethodInvocation on parenthesized, got %A" res)
 
 [<Fact>]
@@ -550,15 +744,16 @@ let ``Field reference verification`` () =
     match parse "SELECT a.obj.prune(x).field" with
     | FieldReference({ Kind = MethodInvocation({ Kind = ColumnReference [ "A"; "OBJ" ] },
                                                { Kind = Identifier "PRUNE" },
-                                               [ { Kind = Identifier "X" } ]) },
+                                               SqlValueArguments([ { Kind = Identifier "X" } ], None)) },
                      { Kind = Identifier "FIELD" }) -> ()
     | res -> Assert.Fail(sprintf "Expected FieldReference, got %A" res)
 
 [<Fact>]
 let ``Method invocation on last chain segment verification`` () =
     match parse "SELECT a.b.c(x)" with
-    | MethodInvocation({ Kind = ColumnReference [ "A"; "B" ] }, { Kind = Identifier "C" }, [ { Kind = Identifier "X" } ]) ->
-        ()
+    | MethodInvocation({ Kind = ColumnReference [ "A"; "B" ] },
+                       { Kind = Identifier "C" },
+                       SqlValueArguments([ { Kind = Identifier "X" } ], None)) -> ()
     | res -> Assert.Fail(sprintf "Expected MethodInvocation on last segment, got %A" res)
 
     parseFails "SELECT 1 + DEFAULT"
@@ -569,11 +764,14 @@ let ``Generalized method invocation verification`` () =
     | GeneralizedInvocation({ Kind = Identifier "X" },
                             UserDefinedType { Kind = Identifier "MYTYPE" },
                             { Kind = Identifier "M" },
-                            Some []) -> ()
+                            Some(SqlValueArguments([], None))) -> ()
     | res -> Assert.Fail(sprintf "Expected GeneralizedInvocation, got %A" res)
 
     match parse "SELECT (x AS mytype).m(1)" with
-    | GeneralizedInvocation(_, _, { Kind = Identifier "M" }, Some [ { Kind = Literal(Number 1m) } ]) -> ()
+    | GeneralizedInvocation(_,
+                            _,
+                            { Kind = Identifier "M" },
+                            Some(SqlValueArguments([ { Kind = Literal(Number 1m) } ], None))) -> ()
     | res -> Assert.Fail(sprintf "Expected GeneralizedInvocation with args, got %A" res)
 
     match parse "SELECT (x AS mytype).m" with
@@ -585,14 +783,14 @@ let ``Static method invocation verification`` () =
     match parse "SELECT my_type::prune(x)" with
     | StaticMethodInvocation({ Kind = Identifier "MY_TYPE" },
                              { Kind = Identifier "PRUNE" },
-                             [ { Kind = Identifier "X" } ]) -> ()
+                             SqlValueArguments([ { Kind = Identifier "X" } ], None)) -> ()
     | res -> Assert.Fail(sprintf "Expected StaticMethodInvocation, got %A" res)
 
 [<Fact>]
 let ``NEW specification verification`` () =
     match parse "SELECT NEW my_type(1, 2)" with
-    | NewSpecification({ Kind = Identifier "MY_TYPE" }, [ { Kind = Literal(Number 1m) }; { Kind = Literal(Number 2m) } ]) ->
-        ()
+    | NewSpecification({ Kind = Identifier "MY_TYPE" },
+                       SqlValueArguments([ { Kind = Literal(Number 1m) }; { Kind = Literal(Number 2m) } ], None)) -> ()
     | res -> Assert.Fail(sprintf "Expected NewSpecification, got %A" res)
 
 [<Fact>]
@@ -602,7 +800,9 @@ let ``Dereference operation verification`` () =
     | res -> Assert.Fail(sprintf "Expected Dereference attribute, got %A" res)
 
     match parse "SELECT x -> m(1)" with
-    | Dereference({ Kind = Identifier "X" }, { Kind = Identifier "M" }, Some [ { Kind = Literal(Number 1m) } ]) -> ()
+    | Dereference({ Kind = Identifier "X" },
+                  { Kind = Identifier "M" },
+                  Some(SqlValueArguments([ { Kind = Literal(Number 1m) } ], None))) -> ()
     | res -> Assert.Fail(sprintf "Expected Dereference method, got %A" res)
 
     match parse "SELECT a.b -> c" with
@@ -887,6 +1087,18 @@ let ``TRIM verification`` () =
     | Trim(Some Both, Some { Kind = Literal(String " ") }, { Kind = Literal(String " abc ") }) -> ()
     | res -> Assert.Fail(sprintf "Expected Trim, got %A" res)
 
+    match parse "SELECT TRIM(LEADING FROM name)" with
+    | Trim(Some Leading, None, { Kind = Identifier "NAME" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected TRIM LEADING, got %A" res)
+
+    // 6.32 — `TRIM ( <trim source> )` is a separate production: no specification, no character.
+    match parse "SELECT TRIM(name)" with
+    | Trim(None, None, { Kind = Identifier "NAME" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected the TRIM shorthand, got %A" res)
+
+    // A specification keyword cannot start the shorthand (`BOTH` is reserved).
+    parseFails "SELECT TRIM(BOTH) FROM t"
+
 [<Fact>]
 let ``SUBSTRING FROM FOR verification`` () =
     match parse "SELECT SUBSTRING(name FROM 2 FOR 3)" with
@@ -1016,7 +1228,7 @@ let ``JSON_QUERY function verification`` () =
             "SELECT JSON_QUERY(doc, '$.x' RETURNING VARCHAR(100) FORMAT JSON WITHOUT ARRAY WRAPPER OMIT QUOTES ON SCALAR STRING NULL ON EMPTY ERROR ON ERROR)"
     with
     | JsonQuery({ Context = { Kind = Identifier "DOC" } },
-                Some { Returning = Varchar(Some 100)
+                Some { Returning = Varchar { Value = 100; Unit = None }
                        Format = Some(JsonEncoding None) },
                 Some { WithWrapper = false
                        Conditional = None
@@ -1157,13 +1369,23 @@ let ``Row value constructor invalid forms are rejected`` () =
 [<Fact>]
 let ``Function call verification`` () =
     match parse "SELECT COUNT(*)" with
-    | FunctionCall({ Kind = Identifier "COUNT" }, false, [ { Kind = ExpressionKind.Star } ], None, None, None) -> ()
+    | FunctionCall({ Kind = Identifier "COUNT" },
+                   false,
+                   SqlValueArguments([ { Kind = ExpressionKind.Star } ], None),
+                   None,
+                   None,
+                   None) -> ()
     | res -> Assert.Fail(sprintf "Expected COUNT(*), got %A" res)
 
 [<Fact>]
 let ``Aggregate functions verification`` () =
     match parse "SELECT COUNT(DISTINCT id)" with
-    | FunctionCall({ Kind = Identifier "COUNT" }, true, [ { Kind = Identifier "ID" } ], None, None, None) -> ()
+    | FunctionCall({ Kind = Identifier "COUNT" },
+                   true,
+                   SqlValueArguments([ { Kind = Identifier "ID" } ], None),
+                   None,
+                   None,
+                   None) -> ()
     | res -> Assert.Fail(sprintf "Expected COUNT(DISTINCT id), got %A" res)
 
 [<Fact>]
@@ -1171,7 +1393,7 @@ let ``FILTER clause verification`` () =
     match parse "SELECT COUNT(*) FILTER (WHERE x > 0)" with
     | FunctionCall({ Kind = Identifier "COUNT" },
                    false,
-                   [ { Kind = ExpressionKind.Star } ],
+                   SqlValueArguments([ { Kind = ExpressionKind.Star } ], None),
                    None,
                    Some { Kind = BinaryOp(GreaterThan, { Kind = Identifier "X" }, { Kind = Literal(Number 0m) }) },
                    None) -> ()
@@ -1182,7 +1404,7 @@ let ``WITHIN GROUP verification`` () =
     match parse "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x)" with
     | FunctionCall({ Kind = Identifier "PERCENTILE_CONT" },
                    false,
-                   [ { Kind = Literal(Number 0.5m) } ],
+                   SqlValueArguments([ { Kind = Literal(Number 0.5m) } ], None),
                    None,
                    None,
                    Some [ { Kind = Identifier "X" }, true, None ]) -> ()
@@ -1206,7 +1428,12 @@ let ``Reserved words that are not function keywords are rejected as routine name
 [<Fact>]
 let ``Non reserved names are accepted as routine names`` () =
     match parse "SELECT foo(x)" with
-    | FunctionCall({ Kind = Identifier "FOO" }, false, [ { Kind = Identifier "X" } ], None, None, None) -> ()
+    | FunctionCall({ Kind = Identifier "FOO" },
+                   false,
+                   SqlValueArguments([ { Kind = Identifier "X" } ], None),
+                   None,
+                   None,
+                   None) -> ()
     | res -> Assert.Fail(sprintf "Expected a FunctionCall for foo, got %A" res)
 
 [<Fact>]
@@ -1228,13 +1455,13 @@ let ``JSON_ARRAYAGG function verification`` () =
 [<Fact>]
 let ``RUNNING and FINAL set function verification`` () =
     match parse "SELECT RUNNING SUM(x)" with
-    | SetFunction(Some RunningOrFinal.Running,
-                  { Kind = FunctionCall({ Kind = Identifier "SUM" },
-                                        false,
-                                        [ { Kind = Identifier "X" } ],
-                                        None,
-                                        None,
-                                        None) }) -> ()
+    | SetFunction(Some RunningOrFinal.Running, inner) ->
+        match inner.Kind with
+        | FunctionCall({ Kind = Identifier "SUM" }, false, arguments, None, None, None) ->
+            match arguments.Arguments with
+            | [ SqlArgumentValue { Kind = Identifier "X" } ] -> ()
+            | res -> Assert.Fail(sprintf "Expected the SUM argument, got %A" res)
+        | res -> Assert.Fail(sprintf "Expected the SUM FunctionCall, got %A" res)
     | res -> Assert.Fail(sprintf "Expected RUNNING SUM, got %A" res)
 
     match parse "SELECT FINAL COUNT(*)" with

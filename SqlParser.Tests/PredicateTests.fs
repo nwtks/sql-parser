@@ -59,6 +59,20 @@ let parseFails (sql: string) =
     | Ok _ -> failwithf "Expected parse failure for %s" sql
     | Error _ -> ()
 
+// 10.4 — an <SQL argument list> whose arguments are all plain <value expression>s, unwrapped
+// for assertions (the second element is the <copartition clause>, usually None).
+let (|SqlValueArguments|_|) (arguments: SqlArgumentList) =
+    let values =
+        arguments.Arguments
+        |> List.map (function
+            | SqlArgumentValue e -> Some e
+            | _ -> None)
+
+    if List.forall Option.isSome values then
+        Some(values |> List.map Option.get, arguments.Copartition)
+    else
+        None
+
 [<Fact>]
 let ``Quantified comparison verification`` () =
     match parse "SELECT id = ANY (SELECT id FROM users)" with
@@ -84,11 +98,13 @@ let ``ANY and SOME stay usable as routine names`` () =
     // The 8.9 <quantified comparison predicate> term is tried before pRoutineInvocation, so a
     // non-query argument must fall through to the routine-call interpretation, not be rejected.
     match parse "SELECT ANY(x)" with
-    | FunctionCall({ Kind = Identifier "ANY" }, false, [ { Kind = Identifier "X" } ], _, _, _) -> ()
+    | FunctionCall({ Kind = Identifier "ANY" }, false, SqlValueArguments([ { Kind = Identifier "X" } ], None), _, _, _) ->
+        ()
     | res -> Assert.Fail(sprintf "Expected ANY(x) routine call, got %A" res)
 
     match parse "SELECT SOME(x)" with
-    | FunctionCall({ Kind = Identifier "SOME" }, false, [ { Kind = Identifier "X" } ], _, _, _) -> ()
+    | FunctionCall({ Kind = Identifier "SOME" }, false, SqlValueArguments([ { Kind = Identifier "X" } ], None), _, _, _) ->
+        ()
     | res -> Assert.Fail(sprintf "Expected SOME(x) routine call, got %A" res)
 
 [<Fact>]
@@ -143,6 +159,18 @@ let ``Predicate part-2 operands are row value predicands (8.x)`` () =
     parseFails "SELECT 1 IN (1 = 2)"
     parseFails "SELECT x IS DISTINCT FROM 1 = 2"
     parseFails "SELECT x OVERLAPS 1 = 2"
+
+    // 8.5/8.6/8.7 — the pattern/escape slots are *value* expressions: an explicit row value
+    // constructor is not one.
+    parseFails "SELECT 'a' LIKE (1, 2)"
+    parseFails "SELECT 'a' LIKE 'b' ESCAPE (1, 2)"
+    parseFails "SELECT 'a' SIMILAR TO (1, 2)"
+    parseFails "SELECT 'a' LIKE_REGEX (1, 2)"
+    parseFails "SELECT 'a' LIKE_REGEX 'b' FLAG (1, 2)"
+
+    // 8.16/8.17 — the operand is a <multiset value expression>.
+    parseFails "SELECT x MEMBER OF (1, 2)"
+    parseFails "SELECT x SUBMULTISET OF (1, 2)"
     parseFails "SELECT x MEMBER OF 1 = 2"
     parseFails "SELECT x LIKE_REGEX 'a' FLAG 'i' = 'j'"
 
@@ -256,6 +284,18 @@ let ``IN list verification`` () =
              [ { Kind = Literal(Number 1m) }; { Kind = Literal(Number 2m) }; { Kind = Literal(Number 3m) } ]) -> ()
     | res -> Assert.Fail(sprintf "Expected InList, got %A" res)
 
+    // 8.4 <in value list> — an element is a <row value expression>: an explicit row value
+    // constructor is one, a term or a parenthesized value expression is not.
+    match parse "SELECT x IN (ROW(1, 2), 3)" with
+    | InList({ Kind = Identifier "X" },
+             false,
+             [ { Kind = RowValueConstructor [ _; _ ] }; { Kind = Literal(Number 3m) } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected a row value IN list, got %A" res)
+
+    parseFails "SELECT 1 FROM t WHERE x IN (1 + 1)"
+    parseFails "SELECT 1 FROM t WHERE x IN ((1), 2)"
+    parseFails "SELECT 1 FROM t WHERE x IN (-1)"
+
 [<Fact>]
 let ``IN subquery verification`` () =
     match parse "SELECT x IN (SELECT y FROM t)" with
@@ -285,6 +325,25 @@ let ``IS TRUE FALSE UNKNOWN verification`` () =
     match parse "SELECT x IS UNKNOWN" with
     | IsBoolean({ Kind = Identifier "X" }, false, None) -> ()
     | res -> Assert.Fail(sprintf "Expected IsBoolean UNKNOWN, got %A" res)
+
+[<Fact>]
+let ``Boolean test requires a boolean primary (6.39)`` () =
+    // 6.39 <boolean primary> ::= <predicate> | <boolean predicand>
+    //   <boolean predicand> ::= <parenthesized boolean value expression>
+    //                         | <nonparenthesized value expression primary>
+    // A term is neither, so a boolean test cannot follow it …
+    parseFails "SELECT 1 FROM t WHERE 1 + 1 IS TRUE"
+    parseFails "SELECT 1 FROM t WHERE -x IS TRUE"
+    parseFails "SELECT 1 FROM t WHERE a || b IS TRUE"
+
+    // … and a <boolean test> is not a <boolean primary>, so nothing predicate-shaped follows it.
+    parseFails "SELECT 1 FROM t WHERE x IS TRUE IS FALSE"
+    parseFails "SELECT 1 FROM t WHERE x IS TRUE IS NULL"
+
+    // A parenthesized boolean value expression is a <boolean predicand>.
+    match parse "(a = b) IS TRUE" with
+    | IsBoolean({ Kind = Parenthesized _ }, false, Some true) -> ()
+    | res -> Assert.Fail(sprintf "Expected a parenthesized boolean predicand, got %A" res)
 
 [<Fact>]
 let ``IS DISTINCT FROM predicate verification`` () =

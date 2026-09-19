@@ -41,8 +41,24 @@ let ``LANGUAGE and PARAMETER STYLE are closed keyword sets verification`` () =
 
 [<Fact>]
 let ``column collate clause verification`` () =
+    // 6.1 — a <collate clause> directly after a character string type is the TYPE-level
+    // clause; 11.4's column-level slot is reachable after the column constraints.
     match parse "CREATE TABLE t (c VARCHAR(10) COLLATE en_us)" with
-    | CreateTable { Columns = [ { Collation = Some { Kind = Identifier "EN_US" } } ] } -> ()
+    | CreateTable { Columns = [ column ] } ->
+        match column.DataType with
+        | CharacterTypeWithModifiers(Varchar { Value = 10; Unit = None }, modifiers) ->
+            Assert.Equal<ExpressionKind option>(
+                Some(Identifier "EN_US"),
+                modifiers.Collation |> Option.map (fun e -> e.Kind)
+            )
+
+            Assert.True(Option.isNone column.Collation)
+        | res -> Assert.Fail(sprintf "Expected a type-level COLLATE clause, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected CreateTable, got %A" res)
+
+    match parse "CREATE TABLE t (c VARCHAR(10) NOT NULL COLLATE en_us)" with
+    | CreateTable { Columns = [ { DataType = Varchar { Value = 10; Unit = None }
+                                  Collation = Some { Kind = Identifier "EN_US" } } ] } -> ()
     | res -> Assert.Fail(sprintf "Expected a column COLLATE clause, got %A" res)
 
 [<Fact>]
@@ -398,7 +414,7 @@ let ``CREATE TABLE verification`` () =
                                   DataType = Integer
                                   IsPrimaryKey = true }
                                 { Name = { Kind = Identifier "NAME" }
-                                  DataType = Varchar(Some 100)
+                                  DataType = Varchar { Value = 100; Unit = None }
                                   IsNullable = Some false } ] } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateTable, got %A" res)
 
@@ -598,8 +614,9 @@ let ``ALTER TABLE ALTER COLUMN actions verification`` () =
 
     match parse "ALTER TABLE users ALTER COLUMN name SET DATA TYPE VARCHAR(200)" with
     | AlterTable { Table = { Kind = Identifier "USERS" }
-                   Action = AlterColumn({ Kind = Identifier "NAME" }, ColumnAlteration.SetDataType(Varchar(Some 200))) } ->
-        ()
+                   Action = AlterColumn(name, alteration) } ->
+        Assert.Equal(Identifier "NAME", name.Kind)
+        Assert.Equal(ColumnAlteration.SetDataType(Varchar { Value = 200; Unit = None }), alteration)
     | res -> Assert.Fail(sprintf "Expected AlterColumn SetDataType, got %A" res)
 
 [<Fact>]
@@ -857,7 +874,7 @@ let ``CREATE DOMAIN verification`` () =
 
     match parse "CREATE DOMAIN d AS VARCHAR(20) CONSTRAINT c CHECK (x > 0) NOT DEFERRABLE COLLATE en_us" with
     | CreateDomain { Name = { Kind = Identifier "D" }
-                     DataType = Varchar(Some 20)
+                     DataType = Varchar { Value = 20; Unit = None }
                      Constraints = [ c ]
                      Collation = Some { Kind = Identifier "EN_US" } } ->
         Assert.Equal(Some(Identifier "C"), c.Name |> Option.map (fun e -> e.Kind))
@@ -1118,7 +1135,7 @@ let ``CREATE TYPE with member list verification`` () =
               Default = None
               Collate = None }
             { Name = { Kind = Identifier "B" }
-              DataType = Varchar(Some 10)
+              DataType = Varchar { Value = 10; Unit = None }
               Default = None
               Collate = None } ] -> ()
         | _ -> Assert.Fail(sprintf "Unexpected attributes: %A" attrs)
@@ -1432,7 +1449,7 @@ let ``CREATE PROCEDURE verification`` () =
                         Body = SqlRoutine(None, Select _) } ->
         Assert.Equal(Some ParameterMode.In, first.Mode)
         Assert.Equal(Some(Identifier "NAME"), first.Name |> Option.map (fun e -> e.Kind))
-        Assert.Equal(DataTypeParameter(Varchar(Some 100), false), first.ParameterType)
+        Assert.Equal(DataTypeParameter(Varchar { Value = 100; Unit = None }, false), first.ParameterType)
         Assert.False(first.IsResult)
         Assert.Equal(Some ParameterMode.Out, second.Mode)
         Assert.Equal(Some(Identifier "ID"), second.Name |> Option.map (fun e -> e.Kind))
@@ -1464,7 +1481,7 @@ let ``CREATE FUNCTION returns type verification`` () =
             Assert.Equal(Identifier "A", first.Name.Kind)
             Assert.Equal(Integer, first.DataType)
             Assert.Equal(Identifier "B", second.Name.Kind)
-            Assert.Equal(Varchar(Some 2), second.DataType)
+            Assert.Equal(Varchar { Value = 2; Unit = None }, second.DataType)
         | other -> Assert.Fail(sprintf "Expected ReturnsTable, got %A" other)
     | res -> Assert.Fail(sprintf "Expected RETURNS TABLE, got %A" res)
 
@@ -1606,7 +1623,7 @@ let ``ALTER ROUTINE verification`` () =
 [<Fact>]
 let ``CREATE CAST verification`` () =
     match parse "CREATE CAST (INT AS VARCHAR(10)) WITH SPECIFIC FUNCTION f" with
-    | CreateCast(Integer, Varchar(Some 10), designator, false) ->
+    | CreateCast(Integer, Varchar { Value = 10; Unit = None }, designator, false) ->
         Assert.True(designator.IsSpecific)
         Assert.Equal(Some RoutineType.Function, designator.RoutineType)
         Assert.Equal(Identifier "F", designator.Name.Kind)
@@ -1620,7 +1637,7 @@ let ``CREATE CAST verification`` () =
     | res -> Assert.Fail(sprintf "Expected CreateCast AS ASSIGNMENT, got %A" res)
 
     match parse "CREATE CAST (VARCHAR(5) AS VARCHAR(10)) WITH ROUTINE cast_it" with
-    | CreateCast(Varchar(Some 5), Varchar(Some 10), designator, false) ->
+    | CreateCast(Varchar { Value = 5; Unit = None }, Varchar { Value = 10; Unit = None }, designator, false) ->
         Assert.Equal(Some RoutineType.Routine, designator.RoutineType)
         Assert.Equal(Identifier "CAST_IT", designator.Name.Kind)
     | res -> Assert.Fail(sprintf "Expected CreateCast ROUTINE, got %A" res)
@@ -1630,7 +1647,12 @@ let ``CREATE CAST verification`` () =
     | CreateCast(Integer, BigInt, designator, false) ->
         Assert.Equal(Some(RoutineType.Method None), designator.RoutineType)
         Assert.Equal(Identifier "M", designator.Name.Kind)
-        Assert.Equal<DataType list>([ Integer; Varchar(Some 2) ], Option.defaultValue [] designator.DataTypeList)
+
+        Assert.Equal<DataType list>(
+            [ Integer; Varchar { Value = 2; Unit = None } ],
+            Option.defaultValue [] designator.DataTypeList
+        )
+
         Assert.Equal(Some(Identifier "MY_TYPE"), designator.ForType |> Option.map (fun e -> e.Kind))
     | res -> Assert.Fail(sprintf "Expected CreateCast METHOD, got %A" res)
 
@@ -1777,7 +1799,7 @@ let ``DROP CAST verification`` () =
     | res -> Assert.Fail(sprintf "Expected DropCast CASCADE, got %A" res)
 
     match parse "DROP CAST (VARCHAR(5) AS VARCHAR(10)) RESTRICT" with
-    | DropCast(Varchar(Some 5), Varchar(Some 10), false) -> ()
+    | DropCast(Varchar { Value = 5; Unit = None }, Varchar { Value = 10; Unit = None }, false) -> ()
     | res -> Assert.Fail(sprintf "Expected DropCast RESTRICT, got %A" res)
 
     parseFails "DROP CAST (INT AS BIGINT)"

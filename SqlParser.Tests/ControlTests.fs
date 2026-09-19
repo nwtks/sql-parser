@@ -15,32 +15,51 @@ let parseStatementFails (sql: string) =
     | Ok _ -> failwithf "Expected parse failure for %s" sql
     | Error _ -> ()
 
+// 10.4 — an <SQL argument list> whose arguments are all plain <value expression>s, unwrapped
+// for assertions (the second element is the <copartition clause>, usually None).
+let (|SqlValueArguments|_|) (arguments: SqlArgumentList) =
+    let values =
+        arguments.Arguments
+        |> List.map (function
+            | SqlArgumentValue e -> Some e
+            | _ -> None)
+
+    if List.forall Option.isSome values then
+        Some(values |> List.map Option.get, arguments.Copartition)
+    else
+        None
+
 [<Fact>]
 let ``CALL statement verification`` () =
     match parseStatement "CALL cleanup_logs()" with
-    | Call({ Kind = Identifier "CLEANUP_LOGS" }, []) -> ()
+    | Call({ Kind = Identifier "CLEANUP_LOGS" }, SqlValueArguments([], None)) -> ()
     | res -> Assert.Fail(sprintf "Expected Call, got %A" res)
 
     match parseStatement "CALL app.prune(30, 'days')" with
     | Call({ Kind = ColumnReference [ "APP"; "PRUNE" ] },
-           [ { Kind = Literal(Number 30m) }; { Kind = Literal(String "days") } ]) -> ()
+           SqlValueArguments([ { Kind = Literal(Number 30m) }; { Kind = Literal(String "days") } ], None)) -> ()
     | res -> Assert.Fail(sprintf "Expected Call with args, got %A" res)
 
     // 6.5 <contextually typed value specification> — NULL is a legal <SQL argument>.
     match parseStatement "CALL write_log(NULL)" with
-    | Call({ Kind = Identifier "WRITE_LOG" }, [ { Kind = Literal Null } ]) -> ()
+    | Call({ Kind = Identifier "WRITE_LOG" }, SqlValueArguments([ { Kind = Literal Null } ], None)) -> ()
     | res -> Assert.Fail(sprintf "Expected Call with NULL argument, got %A" res)
 
     // 10.4 <descriptor argument> — DESCRIPTOR ( <descriptor column list> ) and
     // CAST ( NULL AS DESCRIPTOR ).
     match parseStatement "CALL describe_columns(DESCRIPTOR (a INT, b))" with
-    | Call({ Kind = Identifier "DESCRIBE_COLUMNS" },
-           [ { Kind = DescriptorValueConstructor [ ({ Kind = Identifier "A" }, Some Integer)
-                                                   ({ Kind = Identifier "B" }, None) ] } ]) -> ()
+    | Call({ Kind = Identifier "DESCRIBE_COLUMNS" }, arguments) ->
+        match arguments.Arguments with
+        | [ SqlArgumentDescriptor { Kind = DescriptorValueConstructor [ ({ Kind = Identifier "A" }, Some Integer)
+                                                                        ({ Kind = Identifier "B" }, None) ] } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected a descriptor value constructor argument, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Call with a descriptor value constructor, got %A" res)
 
     match parseStatement "CALL describe_columns(CAST(NULL AS DESCRIPTOR))" with
-    | Call({ Kind = Identifier "DESCRIBE_COLUMNS" }, [ { Kind = DescriptorCast } ]) -> ()
+    | Call({ Kind = Identifier "DESCRIBE_COLUMNS" }, arguments) ->
+        match arguments.Arguments with
+        | [ SqlArgumentDescriptor { Kind = DescriptorCast } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected a CAST ( NULL AS DESCRIPTOR ) argument, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Call with CAST ( NULL AS DESCRIPTOR ), got %A" res)
 
 [<Fact>]

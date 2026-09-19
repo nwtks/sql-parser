@@ -471,7 +471,7 @@ let ``JSON_TABLE formatted column verification`` () =
         | [ { Kind = JsonTable(stmt, Some _) } ] ->
             match stmt.Columns with
             | [ JsonFormatted { Name = { Kind = Identifier "C" }
-                                DataType = Varchar(Some 100)
+                                DataType = Varchar { Value = 100; Unit = None }
                                 Format = JsonEncoding None
                                 Path = None
                                 Wrapper = Some { WithWrapper = true
@@ -525,7 +525,7 @@ let ``JSON_TABLE nested columns verification`` () =
                              Columns = nested } ] ->
                 match nested with
                 | [ JsonRegular { Name = { Kind = Identifier "B" }
-                                  DataType = Varchar(Some 10)
+                                  DataType = Varchar { Value = 10; Unit = None }
                                   Path = None
                                   OnEmpty = None
                                   OnError = None } ] -> ()
@@ -625,7 +625,7 @@ let ``JSON_TABLE verification`` () =
             match stmt.Columns with
             | [ JsonOrdinality { Kind = Identifier "ID" }
                 JsonRegular { Name = { Kind = Identifier "NAME" }
-                              DataType = Varchar(Some 50)
+                              DataType = Varchar { Value = 50; Unit = None }
                               Path = Some "$.name"
                               OnEmpty = Some JsonColumnNull
                               OnError = Some JsonColumnError } ] -> ()

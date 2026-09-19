@@ -154,19 +154,45 @@ type NullsOrder =
     | NullsFirst
     | NullsLast
 
+// 6.1 <char length units> ::= CHARACTERS | OCTETS
+type CharLengthUnit =
+    | Characters
+    | Octets
+
+// 6.1 <multiplier> ::= K | M | G | T | P
+type LengthMultiplier =
+    | Kilo
+    | Mega
+    | Giga
+    | Tera
+    | Peta
+
+// 6.1 <length> ::= <unsigned integer>
+// 6.1 <character length> ::= <length> [ <char length units> ]
+type CharacterLength =
+    { Value: int
+      Unit: CharLengthUnit option }
+
+// 6.1 <large object length> ::= <unsigned integer> [ <multiplier> ] | <large object length token>
+// 6.1 <character large object length> ::= <large object length> [ <char length units> ]
+type LargeObjectLength =
+    { Value: int
+      Multiplier: LengthMultiplier option
+      Unit: CharLengthUnit option }
+
 // 6.1 <data type> ::= <predefined type> | <row type> | <reference type> | <collection type>
 // <predefined type> ::= <character string type> | <binary string type> | <numeric type>
 //     | <boolean type> | <datetime type> | <interval type>
 type DataType =
-    | Character of int option
-    | Varchar of int option
-    | CharacterLargeObject of int option
-    | NationalCharacter of int option
-    | NationalVarchar of int option
-    | NationalCharacterLargeObject of int option
+    | Character of CharacterLength option
+    | Varchar of CharacterLength
+    | CharacterLargeObject of LargeObjectLength option
+    | NationalCharacter of CharacterLength option
+    | NationalVarchar of CharacterLength
+    | NationalCharacterLargeObject of LargeObjectLength option
     | Binary of int option
-    | VarBinary of int option
-    | BinaryLargeObject of int option
+    | VarBinary of int
+    | BinaryLargeObject of LargeObjectLength option
     | Numeric of int option * int option
     | Decimal of int option * int option
     | DecFloat of int option
@@ -191,6 +217,19 @@ type DataType =
     | UserDefinedType of Expression
     // 6.1 <reference type> ::= REF ( <referenced type> ) [ SCOPE <table name> ]
     | ReferenceType of DataType * Expression option
+    // 6.1 <predefined type> — a character string type carrying its type-level
+    // `[ CHARACTER SET <character set specification> ] [ <collate clause> ]` modifiers.
+    // A <national character string type> admits the <collate clause> only.
+    | CharacterTypeWithModifiers of DataType * CharacterTypeModifiers
+
+// 6.1 <character string type> [ CHARACTER SET <character set specification> ] [ <collate clause> ]
+// 6.1 <national character string type> [ <collate clause> ]
+// The type-level modifiers of a character string type: a <character set specification> (10.5)
+// and/or a <collate clause> (10.7). The parser decides which clause is admissible —
+// CHARACTER SET is not a <national character string type> modifier.
+and CharacterTypeModifiers =
+    { CharacterSet: Expression option
+      Collation: Expression option }
 
 // 6.9 / 6.26 <running or final> ::= RUNNING | FINAL
 // (qualify as RunningOrFinal.Running / RunningOrFinal.Final — the bare case names
@@ -306,19 +345,19 @@ and ExpressionKind =
     // 6.16 <subtype treatment>
     | Treat of Expression * DataType
     // 6.17 <method invocation>
-    | MethodInvocation of Expression * Expression * Expression list
+    | MethodInvocation of Expression * Expression * SqlArgumentList
     // 6.17 <generalized invocation> ::= ( <value expression primary> AS <data type> ) <period> <method name> [ <SQL argument list> ]
-    | GeneralizedInvocation of Expression * DataType * Expression * Expression list option
+    | GeneralizedInvocation of Expression * DataType * Expression * SqlArgumentList option
     // 6.18 <static method invocation>
-    | StaticMethodInvocation of Expression * Expression * Expression list
+    | StaticMethodInvocation of Expression * Expression * SqlArgumentList
     // 6.19 <new specification>
-    | NewSpecification of Expression * Expression list
+    | NewSpecification of Expression * SqlArgumentList
     // 6.20 <attribute or method reference>
     // 6.21 <dereference operation>
     // 6.22 <method reference>
     //   <value expression primary> <dereference operator> <qualified identifier> [ <SQL argument list> ]
     //   (no argument list = 6.21 attribute access, argument list = 6.22 method reference)
-    | Dereference of Expression * Expression * Expression list option
+    | Dereference of Expression * Expression * SqlArgumentList option
     // 6.23 <reference resolution>
     | Deref of Expression
     // 6.24 <array element reference> ::= <array value expression> [ <numeric value expression> ]
@@ -479,7 +518,7 @@ and ExpressionKind =
     | FunctionCall of
         Expression *
         bool *
-        Expression list *
+        SqlArgumentList *
         WindowDefinition option *
         Expression option *
         (Expression * bool * NullsOrder option) list option
@@ -498,6 +537,59 @@ and ExpressionKind =
 
 // 6.28 <value expression> — wrapper carrying source position
 and Expression = { Kind: ExpressionKind; Pos: Position }
+
+// 10.4 <SQL argument> ::= <value expression> | <generalized expression> | <target specification>
+//     | <contextually typed value specification> | <named argument specification>
+//     | <table argument> | <descriptor argument>
+and SqlArgument =
+    // <value expression> / <target specification> (20.4) / <contextually typed value
+    // specification> (6.5, i.e. NULL) — the alternatives that are also expressions.
+    | SqlArgumentValue of Expression
+    // <generalized expression> ::= <value expression> AS <path-resolved user-defined type name>
+    | SqlArgumentGeneralized of Expression * DataType
+    // <named argument specification> ::=
+    //     <SQL parameter name> <named argument assignment token> <named argument SQL argument>
+    | SqlArgumentNamed of Expression * SqlArgument
+    // <table argument>
+    | SqlArgumentTable of TableArgument
+    // <descriptor argument> ::= <descriptor value constructor> | CAST ( NULL AS DESCRIPTOR )
+    | SqlArgumentDescriptor of Expression
+
+// 10.4 <SQL argument list> ::=
+//     ( [ <SQL argument> [ { <comma> <SQL argument> }... ] [ <copartition clause> ] ] )
+and SqlArgumentList =
+    { Arguments: SqlArgument list
+      // <copartition clause> ::= COPARTITION <copartition list> — each specification is a
+      // ( <range variable> [ , ... ] ) group.
+      Copartition: Expression list list option }
+
+// 10.4 <table argument> ::= <table argument proper>
+//     [ [ AS ] <table argument correlation name> [ ( <derived column list> ) ] ]
+//     [ PARTITION BY <table argument partitioning list> ]
+//     [ PRUNE WHEN EMPTY | KEEP WHEN EMPTY ]
+//     [ ORDER BY <table argument ordering list> ]
+and TableArgument =
+    { Table: TableArgumentProper
+      // [ [ AS ] <table argument correlation name> [ ( <derived column list> ) ] ]
+      Correlation: (Expression * Expression list option) option
+      // PARTITION BY <column reference> | ( [ <column reference> [ , ... ] ] )
+      PartitionBy: Expression list option
+      // PRUNE WHEN EMPTY | KEEP WHEN EMPTY
+      Pruning: TableArgumentPruning option
+      // ORDER BY <table argument ordering column> | ( <ordering column> [ , ... ] )
+      OrderBy: (Expression * bool * NullsOrder option) list option }
+
+// 10.4 <table argument proper> ::= TABLE ( <table or query name> ) | TABLE <table subquery>
+//     | <table function invocation>
+and TableArgumentProper =
+    | TableArgumentName of Expression
+    | TableArgumentTableQuery of Query
+    | TableArgumentInvocation of Expression
+
+// 10.4 <table argument pruning> ::= PRUNE WHEN EMPTY | KEEP WHEN EMPTY
+and TableArgumentPruning =
+    | PruneWhenEmpty
+    | KeepWhenEmpty
 
 // 6.30 <length expression> ::= <char length expression> | <octet length expression>
 and LengthFunction =
@@ -2215,7 +2307,7 @@ and StatementKind =
     // 14.18 <hold locator statement>
     | HoldLocator of Expression list
     // 16.1 <call statement> ::= CALL <routine invocation>
-    | Call of Expression * Expression list
+    | Call of Expression * SqlArgumentList
     // 16.2 <return statement> ::= RETURN <return value>
     | Return of Expression
     // 17.1 <start transaction statement> ::= START TRANSACTION ...
