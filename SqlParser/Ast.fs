@@ -297,8 +297,8 @@ and ExpressionKind =
     | ValueOf of Expression * RowMarkerExpression * Expression option
     // 6.12 <case expression> ::= CASE ... END
     | Case of Expression option * (Expression * Expression) list * Expression option
-    // 6.13 <cast specification> ::= CAST ( <value expression> AS <data type> )
-    | Cast of Expression * DataType
+    // 6.13 <cast specification> ::= CAST ( <cast operand> AS <cast target> [ FORMAT <cast template> ] )
+    | Cast of Expression * DataType * string option
     // 6.14 <next value expression> ::= NEXT VALUE FOR <sequence generator name>
     | NextValueFor of Expression
     // 6.15 <field reference>
@@ -492,6 +492,9 @@ and ExpressionKind =
         JsonOutput option
     // 20.16 <descriptor value constructor> ::= DESCRIPTOR ( <descriptor column list> )
     | DescriptorValueConstructor of (Expression * DataType option) list
+    // 10.4 <descriptor argument> ::= <descriptor value constructor> | CAST ( NULL AS DESCRIPTOR )
+    // — the CAST form carries no value (its operand is always NULL).
+    | DescriptorCast
 
 // 6.28 <value expression> — wrapper carrying source position
 and Expression = { Kind: ExpressionKind; Pos: Position }

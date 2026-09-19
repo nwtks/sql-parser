@@ -104,6 +104,28 @@ let ``PERIOD value expression verification`` () =
     | res -> Assert.Fail(sprintf "Expected PeriodEquals, got %A" res)
 
 [<Fact>]
+let ``Comparison operands are row value predicands (8.2)`` () =
+    // Both operands of a comparison are <row value predicand>s, so the left-associative
+    // `opp` must not chain (`a = b = c`) or take a predicate operand (`x = EXISTS (...)`).
+    parseFails "SELECT 1 FROM t WHERE a = b = c"
+    parseFails "SELECT 1 FROM t WHERE 1 = 2 < 3"
+    parseFails "SELECT 1 FROM t WHERE x = EXISTS (SELECT 1 FROM u)"
+
+    // PARENTHESIZED booleans are 6.39 <boolean predicand>s and stay legal.
+    match parse "(a = b) = c" with
+    | BinaryOp(Equal, { Kind = Parenthesized _ }, { Kind = Identifier "C" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected a parenthesized left operand, got %A" res)
+
+    match parse "a = (b = c)" with
+    | BinaryOp(Equal, { Kind = Identifier "A" }, { Kind = Parenthesized _ }) -> ()
+    | res -> Assert.Fail(sprintf "Expected a parenthesized right operand, got %A" res)
+
+    // The DESUGARED `=` of 6.12 NULLIF and the IsNull of COALESCE must not be caught by
+    // the comparison-operand / predicate-left-operand checks.
+    parse "NULLIF(1 = 2, 3)" |> ignore
+    parse "COALESCE(1 = 2, TRUE)" |> ignore
+
+[<Fact>]
 let ``BETWEEN verification`` () =
     match parse "SELECT x BETWEEN 1 AND 10" with
     | ExpressionKind.Between({ Kind = Identifier "X" },
@@ -148,6 +170,83 @@ let ``When operands are row value predicands (6.12)`` () =
     match parse "SELECT CASE x WHEN (1 + 2) THEN 1 ELSE 0 END" with
     | Case(Some { Kind = Identifier "X" }, _, _) -> ()
     | res -> Assert.Fail(sprintf "Expected simple CASE, got %A" res)
+
+[<Fact>]
+let ``When operand predicate part-2 forms are applied to the case operand (6.12)`` () =
+    // 6.12 <when operand> includes the 8.x predicate part-2 forms; the <case operand>
+    // supplies the missing part 1, so the case is represented as a searched case.
+    match parse "CASE x WHEN = 1 THEN 2 END" with
+    | Case(None,
+           [ ({ Kind = BinaryOp(Equal, { Kind = Identifier "X" }, { Kind = Literal(Number 1m) }) },
+              { Kind = Literal(Number 2m) }) ],
+           None) -> ()
+    | res -> Assert.Fail(sprintf "Expected the comparison part 2 applied to the case operand, got %A" res)
+
+    match parse "CASE x WHEN IS NULL THEN 2 END" with
+    | Case(None, [ ({ Kind = IsNull({ Kind = Identifier "X" }, false) }, { Kind = Literal(Number 2m) }) ], None) -> ()
+    | res -> Assert.Fail(sprintf "Expected the null predicate part 2, got %A" res)
+
+    match parse "CASE x WHEN BETWEEN 1 AND 2 THEN 2 END" with
+    | Case(None, [ ({ Kind = ExpressionKind.Between({ Kind = Identifier "X" }, false, false, _, _) }, _) ], None) -> ()
+    | res -> Assert.Fail(sprintf "Expected the between predicate part 2, got %A" res)
+
+    match parse "CASE x WHEN LIKE 'a%' THEN 2 END" with
+    | Case(None, [ ({ Kind = Like({ Kind = Identifier "X" }, false, _, _) }, _) ], None) -> ()
+    | res -> Assert.Fail(sprintf "Expected the like predicate part 2, got %A" res)
+
+    match parse "CASE x WHEN = ANY (SELECT 1 FROM u) THEN 2 END" with
+    | Case(None, [ ({ Kind = QuantifiedComparison(Equal, Any, { Kind = Identifier "X" }, _) }, _) ], None) -> ()
+    | res -> Assert.Fail(sprintf "Expected the quantified comparison part 2, got %A" res)
+
+    // A when operand list distributes: `WHEN 1, = 2` ≡ `WHEN x = 1 OR x = 2`.
+    match parse "CASE x WHEN 1, = 2 THEN 3 END" with
+    | Case(None,
+           [ ({ Kind = BinaryOp(Or, { Kind = BinaryOp(Equal, _, _) }, { Kind = BinaryOp(Equal, _, _) }) }, _) ],
+           None) -> ()
+    | res -> Assert.Fail(sprintf "Expected the OR of the distributed operands, got %A" res)
+
+    // The alternatives 6.12 does not list stay rejected.
+    parseFails "SELECT CASE x WHEN IS TRUE THEN 2 END FROM t"
+    parseFails "SELECT CASE x WHEN IS DISTINCT FROM 1 THEN 2 END FROM t"
+    parseFails "SELECT CASE x WHEN IS A SET THEN 2 END FROM t"
+
+    // A bare boolean when operand / case operand is not a <row value predicand>.
+    parseFails "SELECT CASE x WHEN 1 = 1 THEN 2 END FROM t"
+    parseFails "SELECT CASE 1 = 2 WHEN 1 THEN 2 END FROM t"
+
+[<Fact>]
+let ``Predicate part-1 left operands are row value predicands (8.x)`` () =
+    // Every 8.x predicate's left operand is a <row value predicand>, so a predicate may not
+    // sit on a boolean result. 6.39 `IS [NOT] TRUE|FALSE|UNKNOWN` is the exception — its
+    // <boolean primary> legitimately includes a predicate.
+    parseFails "SELECT 1 FROM t WHERE 1 = 2 IS NULL"
+    parseFails "SELECT 1 FROM t WHERE 1 = 2 BETWEEN 1 AND 2"
+    parseFails "SELECT 1 FROM t WHERE 1 = 2 LIKE 'a'"
+    parseFails "SELECT 1 FROM t WHERE x LIKE 'a' IS NULL"
+    parseFails "SELECT 1 FROM t WHERE 1 BETWEEN 1 AND 2 IS NULL"
+    parseFails "SELECT 1 FROM t WHERE x IS NULL IS NULL"
+    parseFails "SELECT 1 FROM t WHERE EXISTS (SELECT 1 FROM u) IS NULL"
+    parseFails "SELECT 1 FROM t WHERE 1 = 2 COLLATE c"
+    parseFails "SELECT 1 FROM t WHERE 1 = 2 IS JSON"
+    parseFails "SELECT 1 FROM t WHERE 1 = 2 OVERLAPS x"
+    parseFails "SELECT 1 FROM t WHERE 1 = 2 MEMBER OF m"
+    parseFails "SELECT 1 FROM t WHERE JSON_EXISTS(doc, '$.a') IS NULL"
+
+    match parse "(1 = 2) IS NULL" with
+    | IsNull({ Kind = Parenthesized _ }, false) -> ()
+    | res -> Assert.Fail(sprintf "Expected a parenthesized boolean left operand, got %A" res)
+
+    match parse "x IS NULL IS TRUE" with
+    | IsBoolean({ Kind = IsNull _ }, false, Some true) -> ()
+    | res -> Assert.Fail(sprintf "Expected a boolean test on a predicate, got %A" res)
+
+    match parse "EXISTS (SELECT 1 FROM u) IS TRUE" with
+    | IsBoolean({ Kind = ExpressionKind.Exists _ }, false, Some true) -> ()
+    | res -> Assert.Fail(sprintf "Expected a boolean test on EXISTS, got %A" res)
+
+    match parse "JSON_EXISTS(doc, '$.a') IS TRUE" with
+    | IsBoolean({ Kind = JsonExists _ }, false, Some true) -> ()
+    | res -> Assert.Fail(sprintf "Expected a boolean test on JSON_EXISTS, got %A" res)
 
 [<Fact>]
 let ``IN list verification`` () =
@@ -222,6 +321,11 @@ let ``SIMILAR TO predicate verification`` () =
     match parse "SELECT x NOT SIMILAR TO 'a%' ESCAPE '!'" with
     | SimilarTo({ Kind = Identifier "X" }, true, _, Some _) -> ()
     | res -> Assert.Fail(sprintf "Expected SimilarTo NOT ESCAPE, got %A" res)
+
+    // Both operands are <character value expression>s, so the part-2 operand check applies
+    // (the LIKE branch already used it; SIMILAR TO used the raw expression parser).
+    parseFails "SELECT x SIMILAR TO 1 = 1"
+    parseFails "SELECT x SIMILAR TO 'a%' ESCAPE 1 = 1"
 
 [<Fact>]
 let ``COLLATE verification`` () =
@@ -339,6 +443,12 @@ let ``Period predicate verification`` () =
     match parse "SELECT p1 SUCCEEDS p2" with
     | PeriodPredicate(PeriodSucceeds, { Kind = Identifier "P1" }, { Kind = Identifier "P2" }) -> ()
     | res -> Assert.Fail(sprintf "Expected PeriodSucceeds, got %A" res)
+
+    // The left operand of a <period predicate> is a <period predicand> — a <period
+    // reference> (a plain identifier chain) or PERIOD ( start, end ).
+    parseFails "SELECT p1 FROM t WHERE 3 EQUALS PERIOD (s, e)"
+    parseFails "SELECT p1 FROM t WHERE 1 + 2 PRECEDES PERIOD (s, e)"
+    parseFails "SELECT p1 FROM t WHERE 1 = 2 SUCCEEDS PERIOD (s, e)"
 
 [<Fact>]
 let ``EXISTS predicate verification`` () =

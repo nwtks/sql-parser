@@ -357,14 +357,15 @@ gaps below. Each is a breaking change: SQL that previously parsed is now rejecte
 
 **Remaining deliberate deviations (documented, not fixed):**
 
-- Predicate part-2 operands (`BETWEEN`/`IN`/`LIKE`/... right-hand sides), `<when operand>`s
-  and the left operand of a period predicate accept the full `<value expression>` chain —
-  the precedence-parser architecture applies predicates as postfix to the full `opp`
-  expression. The top-level check (`isBooleanTopLevel`) approximates the
-  `<row value predicand>` requirement; a parenthesized boolean operand is legal
-  (`Parenthesized` keeps the parens), a bare one is rejected.
-- The `<binary position expression>` form admits `USING <char length units>` — binary and
-  character operands are syntactically indistinguishable, so one parser serves both.
+- Predicate part-2 operands accept the full `<value expression>` chain (only a TOP-LEVEL
+  boolean is rejected, via `isBooleanTopLevel`); they are not true `<row value predicand>`
+  parsers, so a row constructor is accepted where a `<character pattern>` is required
+  (`'a' LIKE (1, 2)`). Part-1 left operands and comparison operands ARE checked since
+  2026-09-19 (see below).
+- The `<binary position expression>` has no `USING` slot — it is the *character* position
+  expression (6.30) that admits `USING <char length units>`. Binary and character operands
+  are usually syntactically indistinguishable, so one parser serves both and the slot is
+  accepted in either case.
 - `GRANT ... ON <name>` without a kind keyword is parsed as a table grant even when the
   name is meant for another object kind (syntactically unavoidable).
 
@@ -388,12 +389,16 @@ Four of the remaining deliberate deviations were closed:
   keeps a `Parenthesized` node (see that section below).
 - **6.37** — `<interval term>`'s `*`/`/` right operand is now `pIntervalFactor`
   (`[ <sign> ] <interval primary>`), which covers both the `<factor>` form (no qualifier)
-  and the 4th alternative's `<interval factor>` (optional qualifier):
-  `INTERVAL '1' DAY * ? DAY` now parses.
+  and a qualified `<interval factor>`: `INTERVAL '1' DAY * ? DAY` now parses **in the
+  contexts that run `pIntervalValueExpression`** (6.35 `<point in time>` and 19.4
+  `SET TIME ZONE`); a general `<value expression>` still rejects it (see the 6.37 note
+  under "Still open" below).
 
 Still open (syntactically indistinguishable or semantic): interval vs datetime operands,
 calendar validity, binary `POSITION ... USING`, kind-less `GRANT ON <name>`,
 `TABLE (expr)` PTF classification, and the JSON path grammar (kept opaque by design).
+The predicate/operand and 6.12/6.13/10.4 items of the 2026-09-19 audit were closed in
+the same session — see the sections below.
 
 ## NULL is a null specification, not a literal (2026-09-19)
 
@@ -467,3 +472,96 @@ The spec-faithful parser is now named `pValueExpressionPrimary` (the grammar's
 `pValueExpressionPrimaryStrict` name was misleading — "strict" suggested a
 deviation, when it was in fact the conforming parser. Pure rename, no behavior
 change.
+
+## Predicate, comparison and period operands are checked (2026-09-19)
+
+The §8 predicate postfix is now conditioned on the accumulated expression: after a
+TOP-LEVEL boolean (a comparison or a predicate) only 6.39's `IS [ NOT ] { TRUE | FALSE |
+UNKNOWN }` remains available, so `1 = 2 IS NULL`, `1 = 2 BETWEEN 1 AND 2`,
+`x LIKE 'a' IS NULL`, `1 BETWEEN 1 AND 2 IS NULL`, `x IS NULL IS NULL`,
+`EXISTS ( … ) IS NULL` and `1 = 2 COLLATE c` are rejected. `pBooleanTestSuffixes`
+(`ExpressionParser.fs`) chooses between the full 8.1 suffix parser and the new
+`pBooleanTestPart2` (the boolean test alone) at each step — which is why it applies one
+suffix at a time instead of folding a `many`. The boolean test itself stays permissive:
+`x IS NULL IS TRUE` and `EXISTS ( … ) IS TRUE` are legal (`<boolean primary> ::=
+<predicate> | <boolean predicand>`), while a second boolean test (`x IS TRUE IS FALSE`)
+is rejected. A `<period predicate>`'s left operand is checked after the whole expression is
+parsed (`findExpressionViolationIn`), because the operand is parsed before the suffix
+parser runs: `3 EQUALS PERIOD (s, e)` is rejected, `p1 EQUALS PERIOD (s, e)` and
+`PERIOD (a, b) EQUALS PERIOD (c, d)` stay legal.
+
+Comparison operands (8.2/8.9) are checked from the other side: `pValueExpressionChecked`
+rejects a TOP-LEVEL boolean operand of a comparison (`a = b = c`, `x = EXISTS ( … )`, a
+boolean left operand of `= ANY ( … )`), while parenthesized booleans stay legal
+(`(a = b) = c`, `a = (b = c)`). `SIMILAR TO`'s pattern and escape now use `pOperand` like
+the LIKE branch, so `'a' SIMILAR TO 1 = 1` is rejected.
+
+Two DESUGARED nodes make the checks deliberately narrow:
+
+- `COALESCE` expands to a searched case whose conditions are `IsNull` of its arguments, so
+a post-parse `IsNull` check would reject the legal `COALESCE(1 = 2, TRUE)`. The
+<null predicate> left-operand rule is therefore enforced at parse time (suffix gating),
+and `findExpressionViolationIn` checks only the standalone quantified subquery and the
+period left operand.
+- `NULLIF` expands to `BinaryOp(Equal, …)`, so the comparison check reads only the TOP node
+of an `opp` parse — a chain always surfaces there, while the desugared `=` sits inside its
+`Case` (`NULLIF(1 = 2, 3)` and `NULLIF(1 = 2, 3) = 4` stay legal).
+
+**Still open (type-level):** the part-2 slots still accept every non-boolean expression
+(a row constructor where a `<character pattern>` is required), and the boolean test's own
+left operand is approximated (`1 + 1 IS TRUE` is accepted although the grammar's
+`<boolean primary>` allows only a predicate or a value expression primary).
+
+## 6.12 <when operand> predicate part-2 forms (2026-09-19)
+
+`<when operand>` includes the 8.x predicate part-2 forms, which were unimplemented:
+`CASE x WHEN = 1`, `WHEN IS NULL`, `WHEN BETWEEN 1 AND 2`, `WHEN LIKE 'a%'`,
+`WHEN IN (1, 2)`, `WHEN OVERLAPS y`, `WHEN MATCH ( … )` and `WHEN = ANY ( … )` now parse.
+The `<case operand>` supplies the missing part 1 (6.12 General Rules), so such a case is
+represented as a **searched case**: each simple when clause becomes the OR of its operands'
+predicates (`CASE x WHEN 1, = 2 THEN …` ≡ `CASE WHEN x = 1 OR x = 2 THEN …`).
+
+- 6.12's alternative list is narrower than 8.1's, so `PredicateParser.pPredicateImpl`
+takes a `forWhenOperand` flag: `<comparison predicate part 2>` /
+`<quantified comparison predicate part 2>` (infix operators under 8.1, hence the two new
+parsers `pComparisonPart2` / `pComparisonOperator`) replace the alternatives 6.12
+excludes — 6.39 <boolean test>, <distinct>, <collate>, <type>, <JSON>, <member>,
+<submultiset>, <set> and <period> stay rejected (`WHEN IS TRUE`,
+`WHEN IS DISTINCT FROM 1`).
+- A `<case operand>` is a `<row value predicand>` too, so a bare boolean is rejected
+(`CASE 1 = 2 WHEN 1 THEN …`); `(1 = 2)` stays legal.
+
+**Trade-off:** the AST of a part-2 case is the searched form, so the surface syntax is not
+round-trippable — no AST case was added.
+
+## CAST FORMAT and the 10.4 descriptor argument (2026-09-19)
+
+- **6.13** — `CAST ( x AS INT FORMAT '999' )` parses: `ExpressionKind.Cast` gained a third
+field, `string option` (the `<cast template>`). `pCastSpecification` rejects
+`AS DESCRIPTOR` — a `<cast target>` is a `<domain name>` or a `<data type>`, and the
+grammar's only descriptor cast is the `CAST ( NULL AS DESCRIPTOR )` form below.
+- **10.4** — `pDescriptorArgument` accepts both `<descriptor argument>` forms as an
+`<SQL argument>`: `DESCRIPTOR ( a INT, b )` (the 20.16 `<descriptor value constructor>`,
+now shared with 11.60 `<parameter default>` — SchemaParser's local copy is gone) and
+`CAST ( NULL AS DESCRIPTOR )` (new `ExpressionKind.DescriptorCast`). `pSqlArgument`
+(the argument approximation + the descriptor argument + the 6.5 contextually typed NULL)
+is used by routine invocations, method invocations, `NEW`, dereferences and `CALL`.
+A standalone `CAST ( NULL AS DESCRIPTOR )` stays rejected — it is not a
+<cast specification>.
+
+**Still open:** PTF `<copartition clause>` / `<table argument>` are unimplemented.
+
+## Still open after the 2026-09-19 fixes
+
+- **6.37 in a general `<value expression>`.** `INTERVAL '1' DAY * ? DAY` parses under
+6.35 `<point in time>` and 19.4 `SET TIME ZONE` (both run `pIntervalValueExpression`)
+but is rejected in a select list, where `INTERVAL '1' DAY` is a literal primary and `*`
+is numeric multiplication. Interval-vs-numeric operands are a type distinction
+(`<numeric primary>` → `<value expression primary>` admits interval literals), so
+`INTERVAL '1' DAY * INTERVAL '2' DAY` also stays accepted.
+- **`<in value list>`** elements accept any expression (`x IN ((1), 2)`, `x IN (1 + 1)`),
+where the grammar's `<row value expression>` is the narrow rule (nonparenthesized primary
+or explicit row constructor).
+- The semantic items are unchanged: interval vs datetime operands, calendar validity,
+binary `POSITION ... USING` (the *character* form is the one with the slot), kind-less
+`GRANT ON <name>`, `TABLE (expr)` PTF classification, JSON path opacity.

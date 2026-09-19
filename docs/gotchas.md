@@ -149,14 +149,14 @@ Single-use sub-parsers are nested inside their consumer, so they add no inversio
 
 ### Forward-reference wiring happens in `SqlParser.fs`
 
-`pDataChangeStatementRef`, `pPredicateRef`, `pPredicatePrimaryRef` and
-`pStatementRef` are assigned in `SqlParser.fs` *after* the target is defined
-(`pStatement`/`pStatementRef` are declared in `SchemaParser.fs` and reused there);
-wiring them inside their own module fails. Use the forwarding **parser**, never
-`…Ref.Value` — reading `.Value` at module-initialisation time captures FParsec's
-dummy parser. The two §8 refs must also be assigned there: nothing else references
-`PredicateParser`, so its initialiser would not run and the refs would stay dummy.
-`SqlParser.fs` (initialised before `parse`) forces the module to load.
+`pDataChangeStatementRef`, `pPredicateRef`, `pBooleanTestPart2Ref`,
+`pWhenOperandPart2Ref`, `pPredicatePrimaryRef` and `pStatementRef` are assigned in
+`SqlParser.fs` *after* the target is defined (`pStatement`/`pStatementRef` are declared in
+`SchemaParser.fs` and reused there); wiring them inside their own module fails. Use the
+forwarding **parser**, never `…Ref.Value` — reading `.Value` at module-initialisation time
+captures FParsec's dummy parser. The §8 refs must also be assigned there: nothing else
+references `PredicateParser`, so its initialiser would not run and the refs would stay
+dummy. `SqlParser.fs` (initialised before `parse`) forces the module to load.
 
 ### An optional-looking sub-rule must not match empty input
 
@@ -187,6 +187,39 @@ apart. The pairs that must be ordered:
 - 6.37's interval alternative **before**, and inside the same `attempt` as, the
   plain parenthesized `pExpression` branch.
 - The NESTED branch before the regular-column branch in `pJsonTableColumnDefinition`.
+
+### A predicate suffix is conditioned on the accumulated expression
+
+`pBooleanTestSuffixes` applies suffixes one at a time and selects the suffix parser from the
+*current* expression: only 6.39's `pBooleanTestPart2` (`IS [NOT] { TRUE | FALSE | UNKNOWN }`)
+is offered once the expression is a top-level boolean, because every 8.x predicate takes a
+`<row value predicand>` left operand and a second boolean test would need the previous one to
+be a `<boolean primary>`. A new predicate added to `PredicateParser.pPredicateImpl`
+therefore needs two decisions: whether it belongs to the boolean-primary set (only the
+boolean test does), and whether 6.12 `<when operand>` includes it (`forWhenOperand = true`
+carries the narrower list — comparison / quantified comparison part 2 are
+when-operand-only). Do not re-organise the suffixes back into a `many ( … )` fold: the
+gating needs the accumulated expression at each step.
+
+### Desugared nodes must not be re-checked by post-parse validators
+
+`COALESCE` expands to a searched `Case` whose conditions are `IsNull` of its arguments, and
+`NULLIF` expands to `BinaryOp(Equal, …)`. A post-parse traversal that rejected "IsNull with
+a boolean left operand" (or "= with a boolean operand") would therefore reject the *legal*
+`COALESCE(1 = 2, TRUE)` / `NULLIF(1 = 2, 3)`. That is why the predicate left-operand rule
+is enforced at parse time by the suffix gating and `findExpressionViolationIn` checks only
+the standalone `QuantifiedSubquery` and the `<period predicate>` left operand; the
+comparison check reads only the top node of an `opp` parse.
+
+### `<cast specification>` vs the 10.4 `<descriptor argument>`
+
+`CAST ( NULL AS DESCRIPTOR )` is not a cast: `<cast target>` is a `<domain name>` or a
+`<data type>`, so `pCastSpecification` rejects `AS DESCRIPTOR` and the form is parsed as
+`ExpressionKind.DescriptorCast` by `pDescriptorArgument` in the `<SQL argument>` slots
+(`pSqlArgument`). `ExpressionKind.Cast` carries the optional `FORMAT <cast template>` as a
+third field. `DESCRIPTOR ( … )` in the same slots is the shared 20.16
+`pDescriptorValueConstructor` — also used by 11.60 `<parameter default>`, so do not
+re-declare it in `SchemaParser.fs`.
 
 ### Do not reuse a parser whose grammar does not cover the slot
 

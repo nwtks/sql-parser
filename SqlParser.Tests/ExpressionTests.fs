@@ -89,7 +89,7 @@ let ``NULL is a null specification, not a literal`` () =
     parseFails "SELECT x FROM t WHERE x = NULL"
 
     match parse "SELECT CAST(NULL AS INT)" with
-    | Cast({ Kind = Literal Null }, Integer) -> ()
+    | Cast({ Kind = Literal Null }, Integer, _) -> ()
     | res -> Assert.Fail(sprintf "Expected CAST(NULL AS INT), got %A" res)
 
     // 10.4 <SQL argument> admits a <contextually typed value specification>.
@@ -100,69 +100,69 @@ let ``NULL is a null specification, not a literal`` () =
 [<Fact>]
 let ``Exact numeric type variants are parsed`` () =
     match parse "SELECT CAST(x AS DECIMAL(10,2))" with
-    | Cast(_, Decimal(Some 10, Some 2)) -> ()
+    | Cast(_, Decimal(Some 10, Some 2), _) -> ()
     | res -> Assert.Fail(sprintf "Expected DECIMAL(10,2), got %A" res)
 
     match parse "SELECT CAST(x AS DEC(5))" with
-    | Cast(_, Decimal(Some 5, None)) -> ()
+    | Cast(_, Decimal(Some 5, None), _) -> ()
     | res -> Assert.Fail(sprintf "Expected DEC(5), got %A" res)
 
     match parse "SELECT CAST(x AS DECFLOAT(34))" with
-    | Cast(_, DecFloat(Some 34)) -> ()
+    | Cast(_, DecFloat(Some 34), _) -> ()
     | res -> Assert.Fail(sprintf "Expected DECFLOAT(34), got %A" res)
 
     match parse "SELECT CAST(x AS NUMERIC)" with
-    | Cast(_, Numeric(None, None)) -> ()
+    | Cast(_, Numeric(None, None), _) -> ()
     | res -> Assert.Fail(sprintf "Expected NUMERIC, got %A" res)
 
 [<Fact>]
 let ``Approximate numeric type variants are parsed`` () =
     match parse "SELECT CAST(x AS FLOAT)" with
-    | Cast(_, Float None) -> ()
+    | Cast(_, Float None, _) -> ()
     | res -> Assert.Fail(sprintf "Expected FLOAT, got %A" res)
 
     match parse "SELECT CAST(x AS FLOAT(24))" with
-    | Cast(_, Float(Some 24)) -> ()
+    | Cast(_, Float(Some 24), _) -> ()
     | res -> Assert.Fail(sprintf "Expected FLOAT(24), got %A" res)
 
     match parse "SELECT CAST(x AS REAL)" with
-    | Cast(_, Real) -> ()
+    | Cast(_, Real, _) -> ()
     | res -> Assert.Fail(sprintf "Expected REAL, got %A" res)
 
     match parse "SELECT CAST(x AS DOUBLE PRECISION)" with
-    | Cast(_, DoublePrecision) -> ()
+    | Cast(_, DoublePrecision, _) -> ()
     | res -> Assert.Fail(sprintf "Expected DOUBLE PRECISION, got %A" res)
 
 [<Fact>]
 let ``Datetime type variants are parsed`` () =
     match parse "SELECT CAST(x AS TIME)" with
-    | Cast(_, TimeType(None, false)) -> ()
+    | Cast(_, TimeType(None, false), _) -> ()
     | res -> Assert.Fail(sprintf "Expected TIME, got %A" res)
 
     match parse "SELECT CAST(x AS TIME(3))" with
-    | Cast(_, TimeType(Some 3, false)) -> ()
+    | Cast(_, TimeType(Some 3, false), _) -> ()
     | res -> Assert.Fail(sprintf "Expected TIME(3), got %A" res)
 
     match parse "SELECT CAST(x AS TIME WITH TIME ZONE)" with
-    | Cast(_, TimeType(None, true)) -> ()
+    | Cast(_, TimeType(None, true), _) -> ()
     | res -> Assert.Fail(sprintf "Expected TIME WITH TIME ZONE, got %A" res)
 
     match parse "SELECT CAST(x AS TIME WITHOUT TIME ZONE)" with
-    | Cast(_, TimeType(None, false)) -> ()
+    | Cast(_, TimeType(None, false), _) -> ()
     | res -> Assert.Fail(sprintf "Expected TIME WITHOUT TIME ZONE, got %A" res)
 
     match parse "SELECT CAST(x AS TIMESTAMP(3) WITH TIME ZONE)" with
-    | Cast(_, TimestampType(Some 3, true)) -> ()
+    | Cast(_, TimestampType(Some 3, true), _) -> ()
     | res -> Assert.Fail(sprintf "Expected TIMESTAMP(3) WITH TIME ZONE, got %A" res)
 
 [<Fact>]
 let ``Interval type keeps its qualifier structure`` () =
     match parse "SELECT CAST(x AS INTERVAL YEAR TO MONTH)" with
-    | Cast(_, IntervalType(IntervalQualifier.Range(Year, Month, None))) -> ()
+    | Cast(_, IntervalType(IntervalQualifier.Range(Year, Month, None)), _) -> ()
     | res -> Assert.Fail(sprintf "Expected structured interval type, got %A" res)
 
     match parse "SELECT CAST(x AS INTERVAL SECOND(2,3))" with
-    | Cast(_, IntervalType(IntervalQualifier.SingleField(Second, Some prec))) ->
+    | Cast(_, IntervalType(IntervalQualifier.SingleField(Second, Some prec)), _) ->
         Assert.Equal(Some 2, prec.Leading)
         Assert.Equal(Some 3, prec.FractionalSeconds)
     | res -> Assert.Fail(sprintf "Expected fractional precision, got %A" res)
@@ -464,6 +464,44 @@ let ``Simple CASE expression verification`` () =
              ({ Kind = Literal(Number 3m) }, { Kind = Literal(String "b") }) ],
            Some { Kind = Literal(String "c") }) -> ()
     | res -> Assert.Fail(sprintf "Expected simple CASE, got %A" res)
+
+[<Fact>]
+let ``CAST FORMAT template verification (6.13)`` () =
+    match parse "SELECT CAST(x AS INT FORMAT '999') FROM t" with
+    | Cast({ Kind = Identifier "X" }, Integer, Some "999") -> ()
+    | res -> Assert.Fail(sprintf "Expected a formatted cast, got %A" res)
+
+    match parse "SELECT CAST(x AS INT)" with
+    | Cast(_, Integer, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected a cast without FORMAT, got %A" res)
+
+    // <cast target> is a <domain name> or a <data type> — DESCRIPTOR is neither; the
+    // CAST ( NULL AS DESCRIPTOR ) form is the 10.4 <descriptor argument> (see below).
+    parseFails "SELECT CAST(x AS DESCRIPTOR) FROM t"
+
+[<Fact>]
+let ``Descriptor arguments in SQL argument lists (10.4)`` () =
+    match parse "SELECT my_func(DESCRIPTOR (a INT, b)) FROM t" with
+    | FunctionCall(_,
+                   _,
+                   [ { Kind = DescriptorValueConstructor [ ({ Kind = Identifier "A" }, Some Integer)
+                                                           ({ Kind = Identifier "B" }, None) ] } ],
+                   _,
+                   _,
+                   _) -> ()
+    | res -> Assert.Fail(sprintf "Expected a descriptor value constructor argument, got %A" res)
+
+    match parse "SELECT my_func(CAST(NULL AS DESCRIPTOR)) FROM t" with
+    | FunctionCall(_, _, [ { Kind = DescriptorCast } ], _, _, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected a CAST ( NULL AS DESCRIPTOR ) argument, got %A" res)
+
+    // The CAST form is a <descriptor argument> only — it is not a <cast specification>.
+    parseFails "SELECT CAST(NULL AS DESCRIPTOR) FROM t"
+
+    // A routine named DESCRIPTOR still parses as a plain identifier argument.
+    match parse "SELECT my_func(DESCRIPTOR) FROM t" with
+    | FunctionCall(_, _, [ { Kind = Identifier "DESCRIPTOR" } ], _, _, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected a plain DESCRIPTOR argument, got %A" res)
 
 [<Fact>]
 let ``NEXT VALUE FOR verification`` () =

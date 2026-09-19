@@ -7,11 +7,12 @@ open SqlParser.ExpressionParser
 // 8 Predicates
 //
 // This module is compiled after QueryParser.fs (clause order §6 → §7 → §8), but §6.3
-// <value expression primary> and §6.39 <boolean test> consume these parsers. The reverse
-// dependency is resolved with two forward refs declared in ExpressionParser.fs and wired in
-// SqlParser.fs: pPredicate (the 8.1 postfix) and pPredicatePrimary (the 8.9/8.10/8.11/8.20/
-// 8.23 atoms bundled into one). The local definitions shadow the opened forward refs of the
-// same name — the `Ref` cells are the same objects.
+// <value expression primary>, §6.39 <boolean test> and §6.12 <when operand> consume these
+// parsers. The reverse dependency is resolved with four forward refs declared in
+// ExpressionParser.fs and wired in SqlParser.fs: pPredicate (the 8.1 postfix),
+// pBooleanTestPart2 (6.39), pWhenOperandPart2 (6.12) and pPredicatePrimary (the
+// 8.9/8.10/8.11/8.20/8.23 atoms bundled into one). The local definitions shadow the opened
+// forward refs of the same name — the `Ref` cells are the same objects.
 module PredicateParser =
     // 8.20 <period predicate> operators (OVERLAPS is covered by the existing Overlaps case).
     // Module-level because pPredicatePrimary needs a lookahead of it.
@@ -31,11 +32,44 @@ module PredicateParser =
         |>> (fun (start, finish) -> PeriodValue(start, finish))
         |> withExprPosition
 
+    // 6.39 <boolean test> ::= <boolean primary> IS [ NOT ] { TRUE | FALSE | UNKNOWN }
+    // The only predicate suffix that may follow a boolean primary, so ExpressionParser's
+    // pBooleanTestSuffixes offers it alone once the accumulated expression is a top-level
+    // boolean. `IS [ NOT ] NULL` (8.8) is a separate alternative (pNullPart2 below).
+    let pBooleanTestPart2 =
+        attempt (
+            pKeyword "IS" >>. opt (pKeyword "NOT")
+            .>>. (pKeyword "TRUE" >>% Some true
+                  <|> (pKeyword "FALSE" >>% Some false)
+                  <|> (pKeyword "UNKNOWN" >>% None))
+            |>> fun (isNot, b) ->
+                fun e ->
+                    { Expression.Kind = IsBoolean(e, Option.isSome isNot, b)
+                      Pos = e.Pos }
+        )
+
+    // 8.2 <comp op> — used by the 6.12 <when operand> comparison part 2 only: under 8.1 a
+    // comparison is an `opp` infix operator (ExpressionParser.fs), not a predicate suffix.
+    let pComparisonOperator =
+        choice
+            [ attempt (token (pstring "<=")) >>% BinaryOperator.LessThanOrEqual
+              attempt (token (pstring "<>")) >>% BinaryOperator.NotEqual
+              attempt (token (pstring ">=")) >>% BinaryOperator.GreaterThanOrEqual
+              attempt (token (pstring "=")) >>% BinaryOperator.Equal
+              attempt (token (pstring "<")) >>% BinaryOperator.LessThan
+              attempt (token (pstring ">")) >>% BinaryOperator.GreaterThan ]
+
     // 8.1 <predicate> — a postfix predicate applied to a <value expression primary>:
     //   <between predicate>, <in predicate>, <null predicate>, <distinct predicate>,
     //   <overlaps predicate>, <like predicate>, <similar predicate>, plus <collate clause>.
-    // The 8.19/8.20 sub-parsers are local because this is their only consumer.
-    let pPredicate pExpr =
+    // Returns the suffix as a function applied to the part-1 operand.
+    // `forWhenOperand = true` selects the subset 6.12 <when operand> lists: the
+    // <comparison predicate part 2> / <quantified comparison predicate part 2> forms (infix
+    // operators under 8.1) replace the alternatives 6.12 does not list (6.39 <boolean test>,
+    // <distinct predicate>, <collate clause>, <type predicate>, <JSON predicate>,
+    // <member>/<submultiset>/<set>/<period> predicates). The 8.19/8.20 sub-parsers are local
+    // because this is their only consumer.
+    let pPredicateImpl forWhenOperand pExpr =
         // A predicate part-2 operand is a <row value predicand>: a TOP-LEVEL
         // boolean-producing expression (comparison, AND/OR/NOT, or another predicate)
         // is rejected. A PARENTHESIZED expression is a 6.39 <boolean predicand> and stays
@@ -54,215 +88,315 @@ module PredicateParser =
                 [ pKeyword "ONLY" >>. pSchemaQualifiedNameExpression |>> Exclusive
                   pSchemaQualifiedNameExpression |>> Inclusive ]
 
-        choice
-            [ // 8.3 <between predicate> ::= <row value predicand> [ NOT ] BETWEEN [ ASYMMETRIC | SYMMETRIC ] <row value predicand> AND <row value predicand>
-              attempt (
-                  opt (pKeyword "NOT") .>> pKeyword "BETWEEN"
-                  .>>. opt (pKeyword "ASYMMETRIC" <|> pKeyword "SYMMETRIC")
-                  .>>. pOperand
-                  .>> pKeyword "AND"
-                  .>>. pOperand
-                  |>> fun (((isNot, sym), start), endBound) ->
-                      fun e ->
-                          { Expression.Kind =
-                              ExpressionKind.Between(e, Option.isSome isNot, Option.isSome sym, start, endBound)
-                            Pos = e.Pos }
-              )
-              // 8.4 <in predicate> ::= <row value predicand> [ NOT ] IN { <table subquery> | <in predicate value list> }
-              attempt (
-                  opt (pKeyword "NOT") .>> pKeyword "IN"
-                  .>>. between
-                      (token (pstring "("))
-                      (token (pstring ")"))
-                      (attempt pQuery |>> Choice1Of2
-                       <|> (sepBy1 pOperand (token (pstring ",")) |>> Choice2Of2))
-                  |>> fun (isNot, res) ->
-                      fun e ->
-                          let kind =
-                              match res with
-                              | Choice1Of2 q -> InSubquery(e, Option.isSome isNot, q)
-                              | Choice2Of2 l -> InList(e, Option.isSome isNot, l)
+        // 8.3 <between predicate part 2> ::= [ NOT ] BETWEEN [ ASYMMETRIC | SYMMETRIC ]
+        //     <row value predicand> AND <row value predicand>
+        let pBetweenPart2 =
+            attempt (
+                opt (pKeyword "NOT") .>> pKeyword "BETWEEN"
+                .>>. opt (pKeyword "ASYMMETRIC" <|> pKeyword "SYMMETRIC")
+                .>>. pOperand
+                .>> pKeyword "AND"
+                .>>. pOperand
+                |>> fun (((isNot, sym), start), endBound) ->
+                    fun e ->
+                        { Expression.Kind =
+                            ExpressionKind.Between(e, Option.isSome isNot, Option.isSome sym, start, endBound)
+                          Pos = e.Pos }
+            )
 
-                          { Expression.Kind = kind; Pos = e.Pos }
-              )
-              // 8.8 <null predicate> ::= <row value predicand> IS [ NOT ] NULL — 6.39 <boolean test> ::= <boolean primary> IS [ NOT ] { TRUE | FALSE | UNKNOWN }
-              attempt (
-                  pKeyword "IS" >>. opt (pKeyword "NOT")
-                  .>>. (pKeyword "NULL" >>% Choice1Of2()
-                        <|> (pKeyword "TRUE" >>% Choice2Of2(Some true))
-                        <|> (pKeyword "FALSE" >>% Choice2Of2(Some false))
-                        <|> (pKeyword "UNKNOWN" >>% Choice2Of2 None))
-                  |>> fun (isNot, res) ->
-                      fun e ->
-                          let kind =
-                              match res with
-                              | Choice1Of2() -> IsNull(e, Option.isSome isNot)
-                              | Choice2Of2 b -> IsBoolean(e, Option.isSome isNot, b)
+        // 8.4 <in predicate part 2> ::= [ NOT ] IN { <table subquery> | <in predicate value> }
+        let pInPart2 =
+            attempt (
+                opt (pKeyword "NOT") .>> pKeyword "IN"
+                .>>. between
+                    (token (pstring "("))
+                    (token (pstring ")"))
+                    (attempt pQuery |>> Choice1Of2
+                     <|> (sepBy1 pOperand (token (pstring ",")) |>> Choice2Of2))
+                |>> fun (isNot, res) ->
+                    fun e ->
+                        let kind =
+                            match res with
+                            | Choice1Of2 q -> InSubquery(e, Option.isSome isNot, q)
+                            | Choice2Of2 l -> InList(e, Option.isSome isNot, l)
 
-                          { Expression.Kind = kind; Pos = e.Pos }
-              )
-              // 8.15 <distinct predicate> ::= <row value predicand> IS [ NOT ] DISTINCT FROM <row value predicand>
-              attempt (
-                  pKeyword "IS" >>. opt (pKeyword "NOT")
-                  .>> pKeyword "DISTINCT"
-                  .>> pKeyword "FROM"
-                  .>>. pOperand
-                  |>> fun (isNot, r) ->
-                      fun l ->
-                          { Expression.Kind = IsDistinctFrom(l, Option.isSome isNot, r)
-                            Pos = l.Pos }
-              )
-              // 8.14 <overlaps predicate> ::= <row value predicand 1> OVERLAPS <row value predicand 2>
-              attempt (
-                  pKeyword "OVERLAPS" >>. pOperand
-                  |>> fun r ->
-                      fun l ->
-                          { Expression.Kind = Overlaps(l, r)
-                            Pos = l.Pos }
-              )
-              // 8.5 <like predicate> ::= <character string value expression> [ NOT ] LIKE <character string pattern> [ ESCAPE <escape character> ]
-              attempt (
-                  opt (pKeyword "NOT") .>> pKeyword "LIKE"
-                  .>>. pOperand
-                  .>>. opt (pKeyword "ESCAPE" >>. pOperand)
-                  |>> fun ((isNot, pattern), escape) ->
-                      fun l ->
-                          { Expression.Kind = Like(l, Option.isSome isNot, pattern, escape)
-                            Pos = l.Pos }
-              )
-              // 8.6 <similar predicate> ::= <character string value expression> [ NOT ] SIMILAR TO <character string pattern> [ ESCAPE <escape character> ]
-              attempt (
-                  opt (pKeyword "NOT") .>> attempt (pKeyword "SIMILAR" .>> pKeyword "TO")
-                  .>>. pExpr
-                  .>>. opt (pKeyword "ESCAPE" >>. pExpr)
-                  |>> fun ((isNot, pattern), escape) ->
-                      fun l ->
-                          { Expression.Kind = SimilarTo(l, Option.isSome isNot, pattern, escape)
-                            Pos = l.Pos }
-              )
-              // 10.7 <collate clause> ::= COLLATE <collation name>
-              attempt (
-                  pKeyword "COLLATE" >>. pIdentifierExpression
-                  |>> fun collation ->
-                      fun e ->
-                          { Expression.Kind = Collate(e, collation)
-                            Pos = e.Pos }
-              )
-              // 8.12 <normalized predicate> ::= IS [ NOT ] [ <normal form> ] NORMALIZED
-              attempt (
-                  pKeyword "IS" >>. opt (pKeyword "NOT") .>>. opt pNormalForm
-                  .>> pKeyword "NORMALIZED"
-                  |>> fun (isNot, form) ->
-                      fun e ->
-                          { Expression.Kind = IsNormalized(e, Option.isSome isNot, form)
-                            Pos = e.Pos }
-              )
-              // 8.19 <type predicate> ::= IS [ NOT ] OF ( <type list> )
-              attempt (
-                  pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "OF"
-                  .>>. between
-                      (token (pstring "("))
-                      (token (pstring ")"))
-                      (sepBy1 pUserDefinedTypeSpecification (token (pstring ",")))
-                  |>> fun (isNot, types) ->
-                      fun e ->
-                          { Expression.Kind = IsOfType(e, Option.isSome isNot, types)
-                            Pos = e.Pos }
-              )
-              // 8.22 <JSON predicate> ::= IS [ NOT ] JSON [ VALUE | ARRAY | OBJECT | SCALAR ]
-              //     [ WITH | WITHOUT UNIQUE [ KEYS ] ]
-              attempt (
-                  pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "JSON"
-                  .>>. opt (
-                      pKeyword "VALUE" >>% JsonTypeValue
-                      <|> (pKeyword "ARRAY" >>% JsonTypeArray)
-                      <|> (pKeyword "OBJECT" >>% JsonTypeObject)
-                      <|> (pKeyword "SCALAR" >>% JsonTypeScalar)
-                  )
-                  .>>. opt (
-                      attempt (
-                          pKeyword "WITH" >>% Some true <|> (pKeyword "WITHOUT" >>% Some false)
-                          .>> pKeyword "UNIQUE"
-                          .>> opt (pKeyword "KEYS")
-                      )
-                  )
-                  |>> fun ((isNot, typeConstraint), unique) ->
-                      fun e ->
-                          { Expression.Kind = IsJson(e, Option.isSome isNot, typeConstraint, Option.flatten unique)
-                            Pos = e.Pos }
-              )
-              // 8.7 <regex like predicate> ::= [ NOT ] LIKE_REGEX <XQuery pattern>
-              //     [ FLAG <XQuery option flag> ]
-              attempt (
-                  opt (pKeyword "NOT") .>> pKeyword "LIKE_REGEX"
-                  .>>. pOperand
-                  .>>. opt (pKeyword "FLAG" >>. pOperand)
-                  |>> fun ((isNot, pattern), flag) ->
-                      fun e ->
-                          { Expression.Kind = RegexLike(e, Option.isSome isNot, pattern, flag)
-                            Pos = e.Pos }
-              )
-              // 8.13 <match predicate> ::= MATCH [ UNIQUE ] [ SIMPLE | PARTIAL | FULL ]
-              //     <table subquery>
-              attempt (
-                  pKeyword "MATCH" >>. opt (pKeyword "UNIQUE" >>% true)
-                  .>>. opt (
-                      pKeyword "SIMPLE" >>% Simple
-                      <|> (pKeyword "PARTIAL" >>% Partial)
-                      <|> (pKeyword "FULL" >>% Full)
-                  )
-                  .>>. between (token (pstring "(")) (token (pstring ")")) pQuery
-                  |>> fun ((isUnique, matchOption), q) ->
-                      fun e ->
-                          { Expression.Kind = Match(e, Option.isSome isUnique, matchOption, q)
-                            Pos = e.Pos }
-              )
-              // 8.16 <member predicate> ::= [ NOT ] MEMBER [ OF ] <multiset value expression>
-              attempt (
-                  opt (pKeyword "NOT") .>> pKeyword "MEMBER" .>> opt (pKeyword "OF") .>>. pOperand
-                  |>> fun (isNot, multiset) ->
-                      fun e ->
-                          { Expression.Kind = MemberOf(e, Option.isSome isNot, multiset)
-                            Pos = e.Pos }
-              )
-              // 8.17 <submultiset predicate> ::= [ NOT ] SUBMULTISET [ OF ] <multiset value expression>
-              attempt (
-                  opt (pKeyword "NOT") .>> pKeyword "SUBMULTISET" .>> opt (pKeyword "OF")
-                  .>>. pOperand
-                  |>> fun (isNot, multiset) ->
-                      fun e ->
-                          { Expression.Kind = SubmultisetOf(e, Option.isSome isNot, multiset)
-                            Pos = e.Pos }
-              )
-              // 8.18 <set predicate> ::= IS [ NOT ] A SET
-              attempt (
-                  pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "A" .>> pKeyword "SET"
-                  |>> fun isNot ->
-                      fun e ->
-                          { Expression.Kind = IsSet(e, Option.isSome isNot)
-                            Pos = e.Pos }
-              )
-              // 8.20 <period predicate> ::= <period predicate operator> <period predicand>
-              // EQUALS / PRECEDES / SUCCEEDS / IMMEDIATELY ... require a <period predicand>
-              // on the right; only CONTAINS admits a <point in time> (<datetime value
-              // expression>). The LEFT operand's kind is not re-checked here — the postfix
-              // is applied to any primary (see docs/trade-off.md).
-              attempt (
-                  pPeriodPredicateOperator
-                  >>= fun kind ->
-                      (if kind = PeriodContains then
-                           // CONTAINS admits a <point in time> (<datetime value expression>).
-                           attempt pPeriodPredicand <|> pOperand |>> fun right -> kind, right
-                       else
-                           // EQUALS / PRECEDES / SUCCEEDS / IMMEDIATELY ... require a
-                           // <period predicand>: PERIOD ( ... ) or a <period reference>
-                           // (a plain name).
-                           attempt pPeriodPredicand <|> pIdentifierExpression |>> fun right -> kind, right)
-                      |>> fun (kind, right) ->
-                          fun left ->
-                              { Expression.Kind = PeriodPredicate(kind, left, right)
-                                Pos = left.Pos }
-              ) ]
+                        { Expression.Kind = kind; Pos = e.Pos }
+            )
+
+        // 8.8 <null predicate part 2> ::= IS [ NOT ] NULL
+        let pNullPart2 =
+            attempt (
+                pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "NULL"
+                |>> fun isNot ->
+                    fun e ->
+                        { Expression.Kind = IsNull(e, Option.isSome isNot)
+                          Pos = e.Pos }
+            )
+
+        // 8.15 <distinct predicate> ::= <row value predicand> IS [ NOT ] DISTINCT FROM <row value predicand>
+        let pDistinctPart2 =
+            attempt (
+                pKeyword "IS" >>. opt (pKeyword "NOT")
+                .>> pKeyword "DISTINCT"
+                .>> pKeyword "FROM"
+                .>>. pOperand
+                |>> fun (isNot, r) ->
+                    fun l ->
+                        { Expression.Kind = IsDistinctFrom(l, Option.isSome isNot, r)
+                          Pos = l.Pos }
+            )
+
+        // 8.14 <overlaps predicate> ::= <row value predicand 1> OVERLAPS <row value predicand 2>
+        let pOverlapsPart2 =
+            attempt (
+                pKeyword "OVERLAPS" >>. pOperand
+                |>> fun r ->
+                    fun l ->
+                        { Expression.Kind = Overlaps(l, r)
+                          Pos = l.Pos }
+            )
+
+        // 8.5 <like predicate> ::= <character string value expression> [ NOT ] LIKE <character string pattern> [ ESCAPE <escape character> ]
+        let pLikePart2 =
+            attempt (
+                opt (pKeyword "NOT") .>> pKeyword "LIKE"
+                .>>. pOperand
+                .>>. opt (pKeyword "ESCAPE" >>. pOperand)
+                |>> fun ((isNot, pattern), escape) ->
+                    fun l ->
+                        { Expression.Kind = Like(l, Option.isSome isNot, pattern, escape)
+                          Pos = l.Pos }
+            )
+
+        // 8.6 <similar predicate> ::= <character string value expression> [ NOT ] SIMILAR TO <character string pattern> [ ESCAPE <escape character> ]
+        // Both operands are <character value expression>s, so they take the same
+        // <row value predicand> check as the LIKE operands (pOperand).
+        let pSimilarPart2 =
+            attempt (
+                opt (pKeyword "NOT") .>> attempt (pKeyword "SIMILAR" .>> pKeyword "TO")
+                .>>. pOperand
+                .>>. opt (pKeyword "ESCAPE" >>. pOperand)
+                |>> fun ((isNot, pattern), escape) ->
+                    fun l ->
+                        { Expression.Kind = SimilarTo(l, Option.isSome isNot, pattern, escape)
+                          Pos = l.Pos }
+            )
+
+        // 10.7 <collate clause> ::= COLLATE <collation name>
+        let pCollatePart2 =
+            attempt (
+                pKeyword "COLLATE" >>. pIdentifierExpression
+                |>> fun collation ->
+                    fun e ->
+                        { Expression.Kind = Collate(e, collation)
+                          Pos = e.Pos }
+            )
+
+        // 8.12 <normalized predicate> ::= IS [ NOT ] [ <normal form> ] NORMALIZED
+        let pNormalizedPart2 =
+            attempt (
+                pKeyword "IS" >>. opt (pKeyword "NOT") .>>. opt pNormalForm
+                .>> pKeyword "NORMALIZED"
+                |>> fun (isNot, form) ->
+                    fun e ->
+                        { Expression.Kind = IsNormalized(e, Option.isSome isNot, form)
+                          Pos = e.Pos }
+            )
+
+        // 8.19 <type predicate> ::= IS [ NOT ] OF ( <type list> )
+        let pTypePart2 =
+            attempt (
+                pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "OF"
+                .>>. between
+                    (token (pstring "("))
+                    (token (pstring ")"))
+                    (sepBy1 pUserDefinedTypeSpecification (token (pstring ",")))
+                |>> fun (isNot, types) ->
+                    fun e ->
+                        { Expression.Kind = IsOfType(e, Option.isSome isNot, types)
+                          Pos = e.Pos }
+            )
+
+        // 8.22 <JSON predicate> ::= IS [ NOT ] JSON [ VALUE | ARRAY | OBJECT | SCALAR ]
+        //     [ WITH | WITHOUT UNIQUE [ KEYS ] ]
+        let pJsonPart2 =
+            attempt (
+                pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "JSON"
+                .>>. opt (
+                    pKeyword "VALUE" >>% JsonTypeValue
+                    <|> (pKeyword "ARRAY" >>% JsonTypeArray)
+                    <|> (pKeyword "OBJECT" >>% JsonTypeObject)
+                    <|> (pKeyword "SCALAR" >>% JsonTypeScalar)
+                )
+                .>>. opt (
+                    attempt (
+                        pKeyword "WITH" >>% Some true <|> (pKeyword "WITHOUT" >>% Some false)
+                        .>> pKeyword "UNIQUE"
+                        .>> opt (pKeyword "KEYS")
+                    )
+                )
+                |>> fun ((isNot, typeConstraint), unique) ->
+                    fun e ->
+                        { Expression.Kind = IsJson(e, Option.isSome isNot, typeConstraint, Option.flatten unique)
+                          Pos = e.Pos }
+            )
+
+        // 8.7 <regex like predicate> ::= [ NOT ] LIKE_REGEX <XQuery pattern>
+        //     [ FLAG <XQuery option flag> ]
+        let pRegexLikePart2 =
+            attempt (
+                opt (pKeyword "NOT") .>> pKeyword "LIKE_REGEX"
+                .>>. pOperand
+                .>>. opt (pKeyword "FLAG" >>. pOperand)
+                |>> fun ((isNot, pattern), flag) ->
+                    fun e ->
+                        { Expression.Kind = RegexLike(e, Option.isSome isNot, pattern, flag)
+                          Pos = e.Pos }
+            )
+
+        // 8.13 <match predicate> ::= MATCH [ UNIQUE ] [ SIMPLE | PARTIAL | FULL ]
+        //     <table subquery>
+        let pMatchPart2 =
+            attempt (
+                pKeyword "MATCH" >>. opt (pKeyword "UNIQUE" >>% true)
+                .>>. opt (
+                    pKeyword "SIMPLE" >>% Simple
+                    <|> (pKeyword "PARTIAL" >>% Partial)
+                    <|> (pKeyword "FULL" >>% Full)
+                )
+                .>>. between (token (pstring "(")) (token (pstring ")")) pQuery
+                |>> fun ((isUnique, matchOption), q) ->
+                    fun e ->
+                        { Expression.Kind = Match(e, Option.isSome isUnique, matchOption, q)
+                          Pos = e.Pos }
+            )
+
+        // 8.16 <member predicate> ::= [ NOT ] MEMBER [ OF ] <multiset value expression>
+        let pMemberPart2 =
+            attempt (
+                opt (pKeyword "NOT") .>> pKeyword "MEMBER" .>> opt (pKeyword "OF") .>>. pOperand
+                |>> fun (isNot, multiset) ->
+                    fun e ->
+                        { Expression.Kind = MemberOf(e, Option.isSome isNot, multiset)
+                          Pos = e.Pos }
+            )
+
+        // 8.17 <submultiset predicate> ::= [ NOT ] SUBMULTISET [ OF ] <multiset value expression>
+        let pSubmultisetPart2 =
+            attempt (
+                opt (pKeyword "NOT") .>> pKeyword "SUBMULTISET" .>> opt (pKeyword "OF")
+                .>>. pOperand
+                |>> fun (isNot, multiset) ->
+                    fun e ->
+                        { Expression.Kind = SubmultisetOf(e, Option.isSome isNot, multiset)
+                          Pos = e.Pos }
+            )
+
+        // 8.18 <set predicate> ::= IS [ NOT ] A SET
+        let pSetPart2 =
+            attempt (
+                pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "A" .>> pKeyword "SET"
+                |>> fun isNot ->
+                    fun e ->
+                        { Expression.Kind = IsSet(e, Option.isSome isNot)
+                          Pos = e.Pos }
+            )
+
+        // 8.20 <period predicate> ::= <period predicate operator> <period predicand>
+        // EQUALS / PRECEDES / SUCCEEDS / IMMEDIATELY ... require a <period predicand>
+        // on the right; only CONTAINS admits a <point in time> (<datetime value
+        // expression>). The LEFT operand is re-checked once the whole expression is parsed
+        // (ExpressionParser.findExpressionViolationIn).
+        let pPeriodPart2 =
+            attempt (
+                pPeriodPredicateOperator
+                >>= fun kind ->
+                    (if kind = PeriodContains then
+                         // CONTAINS admits a <point in time> (<datetime value expression>).
+                         attempt pPeriodPredicand <|> pOperand |>> fun right -> kind, right
+                     else
+                         // EQUALS / PRECEDES / SUCCEEDS / IMMEDIATELY ... require a
+                         // <period predicand>: PERIOD ( ... ) or a <period reference>
+                         // (a plain name).
+                         attempt pPeriodPredicand <|> pIdentifierExpression |>> fun right -> kind, right)
+                    |>> fun (kind, right) ->
+                        fun left ->
+                            { Expression.Kind = PeriodPredicate(kind, left, right)
+                              Pos = left.Pos }
+            )
+
+        // 8.2 <comparison predicate part 2> ::= <comp op> <row value predicand>
+        // 8.9 <quantified comparison predicate part 2> ::= <comp op> <quantifier> <table subquery>
+        // 6.12 <when operand> only (see the `forWhenOperand` note above); the <case operand>
+        // becomes the left-hand <row value predicand>.
+        let pQuantifier =
+            choice
+                [ pKeyword "ANY" >>% Quantifier.Any
+                  pKeyword "SOME" >>% Quantifier.SomeQuantifier
+                  pKeyword "ALL" >>% Quantifier.All ]
+
+        let pComparisonPart2 =
+            attempt (
+                pComparisonOperator
+                .>>. (attempt (pQuantifier .>>. between (token (pstring "(")) (token (pstring ")")) pQuery)
+                      |>> Choice1Of2
+                      <|> (pOperand |>> Choice2Of2))
+                |>> fun (op, operand) ->
+                    fun e ->
+                        match operand with
+                        | Choice1Of2(quant, q) ->
+                            { Expression.Kind = QuantifiedComparison(op, quant, e, q)
+                              Pos = e.Pos }
+                        | Choice2Of2 value ->
+                            { Expression.Kind = BinaryOp(op, e, value)
+                              Pos = e.Pos }
+            )
+
+        let pPredicateBranches =
+            [ pBetweenPart2
+              pInPart2
+              pNullPart2
+              pBooleanTestPart2
+              pDistinctPart2
+              pOverlapsPart2
+              pLikePart2
+              pSimilarPart2
+              pCollatePart2
+              pNormalizedPart2
+              pTypePart2
+              pJsonPart2
+              pRegexLikePart2
+              pMatchPart2
+              pMemberPart2
+              pSubmultisetPart2
+              pSetPart2
+              pPeriodPart2 ]
+
+        let pWhenOperandBranches =
+            [ pComparisonPart2
+              pBetweenPart2
+              pInPart2
+              pLikePart2
+              pSimilarPart2
+              pRegexLikePart2
+              pNullPart2
+              pNormalizedPart2
+              pMatchPart2
+              pOverlapsPart2 ]
+
+        choice (
+            if forWhenOperand then
+                pWhenOperandBranches
+            else
+                pPredicateBranches
+        )
+
+    // 8.1 <predicate> suffix — all alternatives (ExpressionParser.pBooleanTestSuffixes).
+    let pPredicate (pExpr: Parser<Expression, unit>) = pPredicateImpl false pExpr
+
+    // 6.12 <when operand> — the predicate part-2 alternatives as a function applied to the
+    // <case operand> (ExpressionParser.pCaseExpression, via the pWhenOperandPart2 forward ref).
+    let pWhenOperandPart2 (pExpr: Parser<Expression, unit>) = pPredicateImpl true pExpr
 
     // 8.10 <exists predicate> ::= EXISTS ( <subquery> )
     let pExistsPredicate =

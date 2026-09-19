@@ -46,6 +46,8 @@ module SqlParser =
     // in PredicateParser.fs. Assigning here (rather than in PredicateParser.fs itself) forces
     // PredicateParser's module initialiser to run before the first parse.
     pPredicateRef.Value <- PredicateParser.pPredicate opp.ExpressionParser
+    pBooleanTestPart2Ref.Value <- PredicateParser.pBooleanTestPart2
+    pWhenOperandPart2Ref.Value <- PredicateParser.pWhenOperandPart2 opp.ExpressionParser
     pPredicatePrimaryRef.Value <- PredicateParser.pPredicatePrimary
 
     // 11 <SQL-schema statement> — DDL dispatcher

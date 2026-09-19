@@ -1165,19 +1165,9 @@ module SchemaParser =
     // The optional <SQL parameter name> must backtrack: for `IN mytype` the identifier after
     // the mode could be either the parameter name (followed by a type) or the type itself.
     let pParameterDeclaration =
-        // 20.16 <descriptor value constructor> ::= DESCRIPTOR ( <descriptor column list> )
-        // 20.16 <descriptor column specification> ::= <column name> [ <data type> ]
-        // (only reachable here from <parameter default>; <descriptor argument> / PTF
-        //  copartition is not implemented — see docs/trade-off.md.)
-        let pDescriptorValueConstructor =
-            pKeyword "DESCRIPTOR"
-            >>. between
-                    (token (pstring "("))
-                    (token (pstring ")"))
-                    (sepBy1 (pIdentifierExpression .>>. opt pDataType) (token (pstring ",")))
-            |>> DescriptorValueConstructor
-            |> withExprPosition
-
+        // <parameter default> is a 6.5 <default specification>, an 11.60 <descriptor value
+        // constructor> (pDescriptorValueConstructor, shared with 10.4 <SQL argument>) or an
+        // expression. PTF copartition is not implemented — see docs/trade-off.md.
         let pWithName =
             opt pParameterMode .>>. pIdentifierExpression .>>. pParameterType
             |>> fun ((mode, name), paramType) -> mode, Some name, paramType

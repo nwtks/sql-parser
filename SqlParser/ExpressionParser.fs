@@ -42,6 +42,15 @@ module ExpressionParser =
     // 8.1 <predicate> — the postfix predicate suffix (Expression -> Expression)
     let pPredicate, pPredicateRef =
         createParserForwardedToRef<Expression -> Expression, unit> ()
+    // 6.39 <boolean test> — the `IS [ NOT ] { TRUE | FALSE | UNKNOWN }` suffix, the ONLY
+    // predicate suffix that may follow a boolean primary (defined in PredicateParser.fs).
+    let pBooleanTestPart2, pBooleanTestPart2Ref =
+        createParserForwardedToRef<Expression -> Expression, unit> ()
+    // 6.12 <when operand> — the 8.2/8.3/8.4/8.5/8.6/8.7/8.8/8.9/8.12/8.13/8.14 predicate
+    // part-2 forms as a function applied to the <case operand> (defined in
+    // PredicateParser.fs, wired in SqlParser.fs).
+    let pWhenOperandPart2, pWhenOperandPart2Ref =
+        createParserForwardedToRef<Expression -> Expression, unit> ()
     // 8.9 ANY/SOME/ALL (subquery) / 8.10 EXISTS / 8.11 UNIQUE / 8.20 PERIOD () / 8.23
     // JSON_EXISTS — the §8 parsers that are also <value expression primary> alternatives,
     // bundled into one parser.
@@ -787,9 +796,19 @@ module ExpressionParser =
         | IsSet _
         | IsOfType _
         | PeriodPredicate _
-        | IsJson _ -> true
+        | IsJson _
+        | JsonExists _ -> true
         | _ -> false
 
+    // 6.12 <case expression> ::= CASE <case operand> <simple when clause>... [ <else clause> ] END
+    //     | CASE <searched when clause>... [ <else clause> ] END
+    // A <case operand> / <when operand> is a <row value predicand>: a TOP-LEVEL
+    // boolean-producing expression is rejected, a PARENTHESIZED one is a 6.39
+    // <boolean predicand> and stays legal. A <when operand> may also be a predicate
+    // part 2 (8.2/8.3/8.4/8.5/8.6/8.7/8.8/8.9/8.12/8.13/8.14) — the <case operand> then
+    // supplies the missing part 1 (6.12 General Rules), so such a case is represented as a
+    // searched case: each simple when clause becomes the OR of its operands' predicates
+    // (`WHEN 1, = 2` ≡ `WHEN x = 1 OR x = 2`).
     let pCaseExpression =
         getPosition
         >>= fun pos ->
@@ -799,7 +818,7 @@ module ExpressionParser =
                      >>% { Kind = Literal Null
                            Pos = { Line = pos.Line; Column = pos.Column } })
 
-            let pWhenOperand =
+            let pWhenOperandExpr =
                 pExpression
                 >>= fun e ->
                     if isBooleanTopLevel e then
@@ -807,22 +826,72 @@ module ExpressionParser =
                     else
                         preturn e
 
-            let pSimpleWhenClause =
-                pKeyword "WHEN" >>. sepBy1 pWhenOperand (token (pstring ","))
+            let pWhenOperand caseOp =
+                attempt (pWhenOperandPart2 |>> fun applyToCaseOp -> Choice2Of2(applyToCaseOp caseOp))
+                <|> (pWhenOperandExpr |>> Choice1Of2)
+
+            let pSimpleWhenClause caseOp =
+                pKeyword "WHEN" >>. sepBy1 (pWhenOperand caseOp) (token (pstring ","))
                 .>> pKeyword "THEN"
                 .>>. pResultExpr
+
+            let pSimpleCase =
+                attempt (
+                    pExpression
+                    >>= fun caseOp ->
+                        if isBooleanTopLevel caseOp then
+                            fail "a <case operand> must be a <row value predicand> (6.12)"
+                        else
+                            many1 (pSimpleWhenClause caseOp)
+                            |>> fun clauses ->
+                                let hasPart2 =
+                                    clauses
+                                    |> List.exists (fun (operands, _) ->
+                                        operands
+                                        |> List.exists (function
+                                            | Choice2Of2 _ -> true
+                                            | Choice1Of2 _ -> false))
+
+                                if hasPart2 then
+                                    let searched =
+                                        clauses
+                                        |> List.map (fun (operands, result) ->
+                                            let conditions =
+                                                operands
+                                                |> List.map (function
+                                                    | Choice1Of2 w ->
+                                                        { Expression.Kind = BinaryOp(Equal, caseOp, w)
+                                                          Pos = caseOp.Pos }
+                                                    | Choice2Of2 predicate -> predicate)
+
+                                            let condition =
+                                                conditions
+                                                |> List.reduce (fun l r ->
+                                                    { Expression.Kind = BinaryOp(Or, l, r)
+                                                      Pos = l.Pos })
+
+                                            condition, result)
+
+                                    Case(None, searched, None)
+                                else
+                                    let flattened =
+                                        clauses
+                                        |> List.collect (fun (operands, result) ->
+                                            operands
+                                            |> List.map (fun operand ->
+                                                match operand with
+                                                | Choice1Of2 w -> w, result
+                                                | Choice2Of2 predicate -> predicate, result))
+
+                                    Case(Some caseOp, flattened, None)
+                )
 
             let pSearchedWhenClause =
                 pKeyword "WHEN" >>. pExpression .>> pKeyword "THEN" .>>. pResultExpr
 
             pKeyword "CASE"
             >>. choice
-                    [ attempt (pExpression .>>. many1 pSimpleWhenClause)
-                      |>> fun (op, whens) ->
-                          let flattened =
-                              whens |> List.collect (fun (vals, res) -> vals |> List.map (fun v -> v, res))
-
-                          Case(Some op, flattened, None)
+                    [ pSimpleCase
                       many1 pSearchedWhenClause |>> fun whens -> Case(None, whens, None) ]
             .>>. opt (pKeyword "ELSE" >>. pResultExpr)
             .>> pKeyword "END"
@@ -832,15 +901,26 @@ module ExpressionParser =
                 | kind -> kind
             |> withExprPosition
 
-    // 6.13 <cast specification> ::= CAST ( <cast operand> AS <cast target> )
+    // 6.13 <cast specification> ::= CAST ( <cast operand> AS <cast target> [ FORMAT <cast template> ] )
     // <cast operand> ::= <value expression> | <implicitly typed value specification> (6.5)
+    // <cast template> ::= <character string literal>
+    // A <cast target> is a <domain name> or a <data type> — DESCRIPTOR is neither (the
+    // CAST ( NULL AS DESCRIPTOR ) form is the 10.4 <descriptor argument>, parsed in
+    // pDescriptorArgument below).
     let pCastSpecification =
         pKeyword "CAST"
         >>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                ((pExpression <|> pNullSpecification) .>> pKeyword "AS" .>>. pDataType)
-        |>> Cast
+                (pExpression <|> pNullSpecification .>> pKeyword "AS"
+                 .>>. pDataType
+                 .>>. opt (attempt (pKeyword "FORMAT" >>. pCharacterStringLiteral))
+                 >>= fun ((operand, target), template) ->
+                     match target with
+                     | UserDefinedType { Kind = Identifier "DESCRIPTOR" } ->
+                         fail
+                             "6.13 <cast target> cannot be DESCRIPTOR (use CAST ( NULL AS DESCRIPTOR ), 10.4 <descriptor argument>)"
+                     | _ -> preturn (Cast(operand, target, template)))
         |> withExprPosition
 
     // 6.14 <next value expression> ::= NEXT VALUE FOR <sequence generator name>
@@ -859,14 +939,42 @@ module ExpressionParser =
         |>> (fun (e, t) -> Treat(e, t))
         |> withExprPosition
 
-    // 10.4 <SQL argument list> (plain — no DISTINCT/ALL; used by <method invocation>,
-    // <static method invocation> and <new specification>). <SQL argument> also admits a
-    // 6.5 <contextually typed value specification>, so NULL is a legal argument.
+    // 20.16 <descriptor value constructor> ::= DESCRIPTOR ( <descriptor column list> )
+    // 20.16 <descriptor column specification> ::= <column name> [ <data type> ]
+    // Shared with 11.60 <parameter default> (SchemaParser.fs).
+    let pDescriptorValueConstructor =
+        pKeyword "DESCRIPTOR"
+        >>. between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (sepBy1 (pIdentifierExpression .>>. opt pDataType) (token (pstring ",")))
+        |>> DescriptorValueConstructor
+        |> withExprPosition
+
+    // 10.4 <descriptor argument> ::= <descriptor value constructor> | CAST ( NULL AS DESCRIPTOR )
+    let pDescriptorArgument =
+        let pDescriptorCast =
+            attempt (
+                pKeyword "CAST"
+                >>. between
+                        (token (pstring "("))
+                        (token (pstring ")"))
+                        (pKeyword "NULL" >>. pKeyword "AS" >>. pKeyword "DESCRIPTOR")
+                >>% DescriptorCast
+            )
+            |> withExprPosition
+
+        attempt pDescriptorCast <|> pDescriptorValueConstructor
+
+    // 10.4 <SQL argument> — the value-expression approximation plus the 10.4
+    // <descriptor argument> and the 6.5 <contextually typed value specification> (NULL).
+    let pSqlArgument =
+        attempt pDescriptorArgument <|> pExpression <|> pNullSpecification
+
+    // 10.4 <SQL argument list> (plain — no DISTINCT/ALL; used by <routine invocation>,
+    // <method invocation>, <static method invocation> and <new specification>).
     let pSqlArgumentList =
-        between
-            (token (pstring "("))
-            (token (pstring ")"))
-            (sepBy (pExpression <|> pNullSpecification) (token (pstring ",")))
+        between (token (pstring "(")) (token (pstring ")")) (sepBy pSqlArgument (token (pstring ",")))
 
     let pMethodOrFieldReference =
         // 6.32 <specific type method> ::= <user-defined type value expression> <period> SPECIFICTYPE [ ( ) ]
@@ -1634,8 +1742,7 @@ module ExpressionParser =
                 (token (pstring "("))
                 (token (pstring ")"))
                 (opt (pKeyword "DISTINCT" >>% true <|> (pKeyword "ALL" >>% false))
-                 .>>. (attempt pStarArg
-                       <|> sepBy (pExpression <|> pNullSpecification) (token (pstring ","))))
+                 .>>. (attempt pStarArg <|> sepBy pSqlArgument (token (pstring ","))))
 
         let pFilter =
             pKeyword "FILTER"
@@ -2192,10 +2299,41 @@ module ExpressionParser =
     addInfix ">" 5 Associativity.Left (comparisonOp GreaterThan)
     addInfix ">=" 5 Associativity.Left (comparisonOp GreaterThanOrEqual)
 
+    // 8.2/8.9 — both operands of a comparison are <row value predicand>s, so a TOP-LEVEL
+    // boolean operand is rejected: left-associative `opp` would otherwise chain
+    // (`a = b = c` ≡ `(a = b) = c`) and a predicate could stand on either side
+    // (`x = EXISTS (...)`). The check reads the parser result's top node — a chain always
+    // surfaces there, while a parenthesized boolean (`(a = b) = c`) stays legal; the `=`
+    // DESUGARED by 6.12 NULLIF is nested inside its Case and must not be flagged.
+    let isComparisonOperator =
+        function
+        | BinaryOperator.Equal
+        | BinaryOperator.NotEqual
+        | BinaryOperator.LessThan
+        | BinaryOperator.LessThanOrEqual
+        | BinaryOperator.GreaterThan
+        | BinaryOperator.GreaterThanOrEqual -> true
+        | _ -> false
+
+    let invalidComparisonOperands (e: Expression) =
+        match e.Kind with
+        | BinaryOp(op, l, r) when isComparisonOperator op -> isBooleanTopLevel l || isBooleanTopLevel r
+        | QuantifiedComparison(_, _, x, _) -> isBooleanTopLevel x
+        | _ -> false
+
+    // 6.28 <value expression> — `opp` plus the 8.2/8.9 comparison-operand check.
+    let pValueExpressionChecked =
+        opp.ExpressionParser
+        >>= fun e ->
+            if invalidComparisonOperands e then
+                fail "the operands of a comparison must be <row value predicand>s (8.2)"
+            else
+                preturn e
+
     // 6.28 <value expression> without boolean operators or predicates — used where the
     // grammar requires a non-boolean <value expression> (e.g. <point in time> in
     // <query system time period specification>, 7.6). Stops before AND/OR.
-    pValueExpressionNoBooleanRef.Value <- opp.ExpressionParser
+    pValueExpressionNoBooleanRef.Value <- pValueExpressionChecked
 
     // 6.29 <numeric value expression> — arithmetic-only opp (no comparisons, no predicates).
     // Used where the grammar requires <numeric value expression> (TABLESAMPLE percentage,
@@ -2222,17 +2360,36 @@ module ExpressionParser =
     // → pArrayElementReference → pNumericValueExpression → pValueExpressionPrimary → pValueExpressionPrimaryImpl).
     pNumericValueExpressionRef.Value <- oppNumeric.ExpressionParser
 
-    // 6.39 <boolean test> ::= <boolean primary> IS [ NOT ] { TRUE | FALSE | UNKNOWN } — combined here with
-    // 8.x <predicate> / 6.24 <array element reference> postfix applied to a <value expression>
-    let pBooleanTest =
-        opp.ExpressionParser
-        .>>. many (
-            pPredicate
-            <|> pArrayElementReference
-            <|> attempt pMultisetSetOperatorSuffix
-            <|> attempt pTimeZoneSuffix
-        )
-        |>> fun (e, suffixes) -> List.fold (fun acc f -> f acc) e suffixes
+    // 6.39 <boolean test> / 8.x <predicate> / 6.24 <array element reference> / 6.35 AT TIME ZONE /
+    // 6.43 multiset set operators — postfix suffixes applied to a <value expression>. The
+    // predicate suffix is conditioned on the accumulated expression: after a TOP-LEVEL boolean
+    // (a comparison or a predicate) only the 6.39 `IS [ NOT ] { TRUE | FALSE | UNKNOWN }` test
+    // may follow — every 8.x predicate takes a <row value predicand> left operand, which a
+    // predicate is not, and a second boolean test would need the previous one to be a
+    // <boolean primary> (a <boolean test> is not one).
+    let rec pBooleanTestSuffixes e =
+        let allowBooleanTestOnly =
+            isBooleanTopLevel e
+            && match e.Kind with
+               | IsBoolean _ -> false
+               | _ -> true
+
+        let predicate =
+            (if allowBooleanTestOnly then
+                 pBooleanTestPart2
+             else
+                 pPredicate)
+            |>> fun applySuffix -> applySuffix e
+
+        let suffix =
+            predicate
+            <|> (pArrayElementReference |>> fun applySuffix -> applySuffix e)
+            <|> attempt (pMultisetSetOperatorSuffix |>> fun applySuffix -> applySuffix e)
+            <|> attempt (pTimeZoneSuffix |>> fun applySuffix -> applySuffix e)
+
+        suffix >>= pBooleanTestSuffixes <|> preturn e
+
+    let pBooleanTest = pValueExpressionChecked >>= pBooleanTestSuffixes
 
     // 6.39 <boolean factor> ::= [ NOT ] <boolean test>
     let pBooleanFactor, pNotExprRef = createParserForwardedToRef<Expression, unit> ()
@@ -2262,16 +2419,29 @@ module ExpressionParser =
                  { Expression.Kind = BinaryOp(Or, l, r)
                    Pos = l.Pos })
 
-    // ANY/SOME/ALL (subquery) is only valid as the right operand of a comparison operator,
-    // where `comparisonOp` rewrites it into QuantifiedComparison. Any QuantifiedSubquery that
-    // survives (i.e. was not rewritten) is standalone and must be rejected.
+    // 8.20 <period reference> ::= <basic identifier chain> — the only left operand a
+    // <period predicate> admits besides PERIOD ( <start>, <end> ).
+    let private isPeriodReference (e: Expression) =
+        match e.Kind with
+        | Identifier _
+        | ColumnReference _
+        | PeriodValue _ -> true
+        | _ -> false
+
+    // Post-parse violations: a standalone 8.9 ANY/SOME/ALL (subquery) term (`comparisonOp`
+    // rewrites it into QuantifiedComparison when a comparison operator precedes it; one that
+    // survives is standalone) and a 8.20 <period predicate> whose left operand is not a
+    // <period predicand>. Every other predicate left operand is enforced while parsing —
+    // pBooleanTestSuffixes only offers a predicand-taking suffix when the accumulated
+    // expression is not a boolean, because a desugared COALESCE builds IsNull nodes that
+    // must not be re-checked here.
     //
     // The traversal uses an explicit work list so it is tail-recursive: an expression tree can
     // be arbitrarily deep, and a boolean short-circuit (`a || b`) cannot put both recursive
     // calls in tail position. The child collectors sit at module level (rather than inside the
     // search) so they are not rebuilt on every visited node.
     [<TailCall>]
-    let rec private containsStandaloneQuantifiedSubqueryIn (work: Expression list) =
+    let rec private findExpressionViolationIn (work: Expression list) =
         let jsonCommonChildren c =
             [ yield c.Context
               yield! Option.toList c.PathName
@@ -2304,7 +2474,7 @@ module ExpressionParser =
                   yield! args
                   yield! Option.toList filter
                   yield! withinGroup |> Option.defaultValue [] |> List.map (fun (e, _, _) -> e) ]
-            | Cast(x, _) -> [ x ]
+            | Cast(x, _, _) -> [ x ]
             | Case(cond, whens, elseExpr) ->
                 [ yield! Option.toList cond
                   yield! whens |> List.collect (fun (w, t) -> [ w; t ])
@@ -2401,22 +2571,20 @@ module ExpressionParser =
             | _ -> []
 
         match work with
-        | [] -> false
+        | [] -> None
         | e :: rest ->
             match e.Kind with
-            | QuantifiedSubquery _ -> true
-            | _ -> containsStandaloneQuantifiedSubqueryIn (expressionChildren e @ rest)
-
-    let containsStandaloneQuantifiedSubquery root =
-        containsStandaloneQuantifiedSubqueryIn [ root ]
+            | QuantifiedSubquery _ -> Some "quantified subquery requires a comparison operator"
+            | PeriodPredicate(_, left, _) when not (isPeriodReference left) ->
+                Some "the left operand of a <period predicate> must be a <period predicand> (8.20)"
+            | _ -> findExpressionViolationIn (expressionChildren e @ rest)
 
     pExpressionRef.Value <-
         pBooleanValueExpression
         >>= fun e ->
-            if containsStandaloneQuantifiedSubquery e then
-                fail "quantified subquery requires a comparison operator"
-            else
-                preturn e
+            match findExpressionViolationIn [ e ] with
+            | Some message -> fail message
+            | None -> preturn e
 
     // 10.6 <routine type> / 11.51 <partial method specification> — [ INSTANCE | STATIC | CONSTRUCTOR ]
     // Shared by 10.6 (<routine type>), 11.60 (<method specification designator>) and

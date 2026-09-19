@@ -31,6 +31,18 @@ let ``CALL statement verification`` () =
     | Call({ Kind = Identifier "WRITE_LOG" }, [ { Kind = Literal Null } ]) -> ()
     | res -> Assert.Fail(sprintf "Expected Call with NULL argument, got %A" res)
 
+    // 10.4 <descriptor argument> — DESCRIPTOR ( <descriptor column list> ) and
+    // CAST ( NULL AS DESCRIPTOR ).
+    match parseStatement "CALL describe_columns(DESCRIPTOR (a INT, b))" with
+    | Call({ Kind = Identifier "DESCRIBE_COLUMNS" },
+           [ { Kind = DescriptorValueConstructor [ ({ Kind = Identifier "A" }, Some Integer)
+                                                   ({ Kind = Identifier "B" }, None) ] } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected Call with a descriptor value constructor, got %A" res)
+
+    match parseStatement "CALL describe_columns(CAST(NULL AS DESCRIPTOR))" with
+    | Call({ Kind = Identifier "DESCRIBE_COLUMNS" }, [ { Kind = DescriptorCast } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected Call with CAST ( NULL AS DESCRIPTOR ), got %A" res)
+
 [<Fact>]
 let ``CALL without routine is rejected`` () = parseStatementFails "CALL"
 
