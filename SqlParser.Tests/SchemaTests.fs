@@ -152,6 +152,165 @@ let ``schema elements are restricted to the CREATE family and GRANT`` () =
     parseFails "CREATE SCHEMA s ALTER SEQUENCE q INCREMENT BY 1"
 
 [<Fact>]
+let ``DROP statements verification`` () =
+    match parse "DROP TABLE users CASCADE" with
+    | DropTable({ Kind = Identifier "USERS" }, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropTable CASCADE, got %A" res)
+
+    match parse "DROP TABLE users RESTRICT" with
+    | DropTable({ Kind = Identifier "USERS" }, false) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropTable RESTRICT, got %A" res)
+
+    match parse "DROP VIEW my_view CASCADE" with
+    | DropView({ Kind = Identifier "MY_VIEW" }, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropView CASCADE, got %A" res)
+
+    match parse "DROP VIEW my_view RESTRICT" with
+    | DropView({ Kind = Identifier "MY_VIEW" }, false) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropView RESTRICT, got %A" res)
+
+    match parse "DROP SEQUENCE order_seq CASCADE" with
+    | DropSequence({ Kind = Identifier "ORDER_SEQ" }, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropSequence CASCADE, got %A" res)
+
+    match parse "DROP SEQUENCE order_seq RESTRICT" with
+    | DropSequence({ Kind = Identifier "ORDER_SEQ" }, false) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropSequence RESTRICT, got %A" res)
+
+    match parse "DROP ROLE admin" with
+    | DropRole { Kind = Identifier "ADMIN" } -> ()
+    | res -> Assert.Fail(sprintf "Expected DropRole, got %A" res)
+
+[<Fact>]
+let ``DROP SCHEMA verification`` () =
+    match parse "DROP SCHEMA sales CASCADE" with
+    | DropSchema({ Kind = Identifier "SALES" }, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropSchema CASCADE, got %A" res)
+
+    match parse "DROP SCHEMA sales RESTRICT" with
+    | DropSchema({ Kind = Identifier "SALES" }, false) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropSchema RESTRICT, got %A" res)
+
+[<Fact>]
+let ``DROP DOMAIN verification`` () =
+    match parse "DROP DOMAIN d CASCADE" with
+    | DropDomain({ Kind = Identifier "D" }, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropDomain CASCADE, got %A" res)
+
+    match parse "DROP DOMAIN d RESTRICT" with
+    | DropDomain({ Kind = Identifier "D" }, false) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropDomain RESTRICT, got %A" res)
+
+    parseFails "DROP DOMAIN d"
+
+[<Fact>]
+let ``DROP CHARACTER SET verification`` () =
+    match parse "DROP CHARACTER SET utf8" with
+    | DropCharacterSet { Kind = Identifier "UTF8" } -> ()
+    | res -> Assert.Fail(sprintf "Expected DropCharacterSet, got %A" res)
+
+[<Fact>]
+let ``DROP COLLATION verification`` () =
+    match parse "DROP COLLATION my_coll CASCADE" with
+    | DropCollation({ Kind = Identifier "MY_COLL" }, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropCollation CASCADE, got %A" res)
+
+    match parse "DROP COLLATION my_coll RESTRICT" with
+    | DropCollation({ Kind = Identifier "MY_COLL" }, false) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropCollation RESTRICT, got %A" res)
+
+[<Fact>]
+let ``DROP TRANSLATION verification`` () =
+    match parse "DROP TRANSLATION tr" with
+    | DropTransliteration { Kind = Identifier "TR" } -> ()
+    | res -> Assert.Fail(sprintf "Expected DropTransliteration, got %A" res)
+
+[<Fact>]
+let ``DROP ASSERTION verification`` () =
+    match parse "DROP ASSERTION a CASCADE" with
+    | DropAssertion({ Kind = Identifier "A" }, Some true) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropAssertion CASCADE, got %A" res)
+
+    match parse "DROP ASSERTION a" with
+    | DropAssertion({ Kind = Identifier "A" }, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropAssertion without behavior, got %A" res)
+
+[<Fact>]
+let ``DROP CAST verification`` () =
+    match parse "DROP CAST (INT AS BIGINT) CASCADE" with
+    | DropCast(Integer, BigInt, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropCast CASCADE, got %A" res)
+
+    match parse "DROP CAST (VARCHAR(5) AS VARCHAR(10)) RESTRICT" with
+    | DropCast(Varchar { Value = 5; Unit = None }, Varchar { Value = 10; Unit = None }, false) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropCast RESTRICT, got %A" res)
+
+    parseFails "DROP CAST (INT AS BIGINT)"
+
+[<Fact>]
+let ``DROP ORDERING verification`` () =
+    match parse "DROP ORDERING FOR my_type CASCADE" with
+    | DropOrdering({ Kind = Identifier "MY_TYPE" }, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropOrdering CASCADE, got %A" res)
+
+    match parse "DROP ORDERING FOR my_type RESTRICT" with
+    | DropOrdering({ Kind = Identifier "MY_TYPE" }, false) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropOrdering RESTRICT, got %A" res)
+
+    parseFails "DROP ORDERING FOR my_type"
+
+[<Fact>]
+let ``DROP TRANSFORM verification`` () =
+    match parse "DROP TRANSFORM ALL FOR my_type CASCADE" with
+    | DropTransform({ Kind = Identifier "MY_TYPE" }, TransformDropTarget.AllTransforms, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropTransform ALL CASCADE, got %A" res)
+
+    match parse "DROP TRANSFORMS g1 FOR my_type RESTRICT" with
+    | DropTransform({ Kind = Identifier "MY_TYPE" },
+                    TransformDropTarget.TransformGroup { Kind = Identifier "G1" },
+                    false) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropTransform group RESTRICT, got %A" res)
+
+[<Fact>]
+let ``DROP ROUTINE verification`` () =
+    match parse "DROP FUNCTION add CASCADE" with
+    | DropRoutine({ Kind = Identifier "ADD" }, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropRoutine CASCADE, got %A" res)
+
+    match parse "DROP PROCEDURE p RESTRICT" with
+    | DropRoutine({ Kind = Identifier "P" }, false) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropRoutine RESTRICT, got %A" res)
+
+[<Fact>]
+let ``DROP TRIGGER verification`` () =
+    match parse "DROP TRIGGER trg" with
+    | DropTrigger { Kind = Identifier "TRG" } -> ()
+    | res -> Assert.Fail(sprintf "Expected DropTrigger, got %A" res)
+
+[<Fact>]
+let ``DROP TYPE verification`` () =
+    match parse "DROP TYPE my_type RESTRICT" with
+    | DropType({ Kind = Identifier "MY_TYPE" }, false) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropType RESTRICT, got %A" res)
+
+    match parse "DROP TYPE my_type CASCADE" with
+    | DropType({ Kind = Identifier "MY_TYPE" }, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected DropType CASCADE, got %A" res)
+
+[<Fact>]
+let ``DROP TABLE without drop behavior is rejected`` () = parseFails "DROP TABLE users"
+
+[<Fact>]
+let ``DROP TRANSFORM requires drop behavior`` () =
+    parseFails "DROP TRANSFORM ALL FOR my_type"
+
+[<Fact>]
+let ``DROP TYPE without behavior is rejected`` () = parseFails "DROP TYPE my_type"
+
+[<Fact>]
+let ``DROP INDEX is rejected (not in SQL-2016)`` () = parseFails "DROP INDEX idx"
+
+[<Fact>]
 let ``referential triggered action verification`` () =
     // 11.8 <referential triggered action> — both <update rule> and <delete rule>, in either order
     match parse "CREATE TABLE t (a INT REFERENCES p (x) ON UPDATE CASCADE ON DELETE RESTRICT)" with
@@ -1056,6 +1215,37 @@ let ``CREATE PROCEDURE with DESCRIPTOR parameter default verification`` () =
     | res -> Assert.Fail(sprintf "Expected CreateProcedure, got %A" res)
 
 [<Fact>]
+let ``CREATE TYPE with member list verification`` () =
+    match parse "CREATE TYPE my_type AS (a INT, b VARCHAR(10))" with
+    | CreateType { Name = { Kind = Identifier "MY_TYPE" }
+                   Under = None
+                   Representation = Some(TypeRepresentation.MemberList attrs)
+                   Options = []
+                   Methods = [] } ->
+        match attrs with
+        | [ { Name = { Kind = Identifier "A" }
+              DataType = Integer
+              Default = None
+              Collate = None }
+            { Name = { Kind = Identifier "B" }
+              DataType = Varchar { Value = 10; Unit = None }
+              Default = None
+              Collate = None } ] -> ()
+        | _ -> Assert.Fail(sprintf "Unexpected attributes: %A" attrs)
+    | res -> Assert.Fail(sprintf "Expected CreateType member list, got %A" res)
+
+[<Fact>]
+let ``CREATE TYPE attribute default is a default clause`` () =
+    parseFails "CREATE TYPE my_type AS (a INT DEFAULT 1 + 1)"
+
+    match parse "CREATE TYPE my_type AS (a INT DEFAULT 1)" with
+    | CreateType { Representation = Some(TypeRepresentation.MemberList attrs) } ->
+        match attrs with
+        | [ { Default = Some { Kind = Literal(Number 1m) } } ] -> ()
+        | _ -> Assert.Fail(sprintf "Unexpected attributes: %A" attrs)
+    | res -> Assert.Fail(sprintf "Expected CreateType, got %A" res)
+
+[<Fact>]
 let ``CREATE PROCEDURE with DEFAULT NULL parameter verification`` () =
     // 6.5 <null specification> — a legal <parameter default>.
     match parse "CREATE PROCEDURE p (IN x INT DEFAULT NULL) SELECT 1" with
@@ -1131,37 +1321,6 @@ let ``generic table parameter type verification`` () =
             param.ParameterType
         )
     | res -> Assert.Fail(sprintf "Expected TABLE KEEP ON EMPTY, got %A" res)
-
-[<Fact>]
-let ``CREATE TYPE with member list verification`` () =
-    match parse "CREATE TYPE my_type AS (a INT, b VARCHAR(10))" with
-    | CreateType { Name = { Kind = Identifier "MY_TYPE" }
-                   Under = None
-                   Representation = Some(TypeRepresentation.MemberList attrs)
-                   Options = []
-                   Methods = [] } ->
-        match attrs with
-        | [ { Name = { Kind = Identifier "A" }
-              DataType = Integer
-              Default = None
-              Collate = None }
-            { Name = { Kind = Identifier "B" }
-              DataType = Varchar { Value = 10; Unit = None }
-              Default = None
-              Collate = None } ] -> ()
-        | _ -> Assert.Fail(sprintf "Unexpected attributes: %A" attrs)
-    | res -> Assert.Fail(sprintf "Expected CreateType member list, got %A" res)
-
-[<Fact>]
-let ``CREATE TYPE attribute default is a default clause`` () =
-    parseFails "CREATE TYPE my_type AS (a INT DEFAULT 1 + 1)"
-
-    match parse "CREATE TYPE my_type AS (a INT DEFAULT 1)" with
-    | CreateType { Representation = Some(TypeRepresentation.MemberList attrs) } ->
-        match attrs with
-        | [ { Default = Some { Kind = Literal(Number 1m) } } ] -> ()
-        | _ -> Assert.Fail(sprintf "Unexpected attributes: %A" attrs)
-    | res -> Assert.Fail(sprintf "Expected CreateType, got %A" res)
 
 [<Fact>]
 let ``CREATE TYPE with options verification`` () =
@@ -1739,165 +1898,6 @@ let ``ALTER TRANSFORM verification`` () =
     parseFails "ALTER TRANSFORM FOR t g (DROP (TO SQL, FROM SQL, TO SQL RESTRICT))"
     // 11.69/11.70: the <drop behavior> belongs INSIDE the parens.
     parseFails "ALTER TRANSFORM FOR t g (DROP (TO SQL)) CASCADE"
-
-[<Fact>]
-let ``DROP statements verification`` () =
-    match parse "DROP TABLE users CASCADE" with
-    | DropTable({ Kind = Identifier "USERS" }, true) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropTable CASCADE, got %A" res)
-
-    match parse "DROP TABLE users RESTRICT" with
-    | DropTable({ Kind = Identifier "USERS" }, false) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropTable RESTRICT, got %A" res)
-
-    match parse "DROP VIEW my_view CASCADE" with
-    | DropView({ Kind = Identifier "MY_VIEW" }, true) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropView CASCADE, got %A" res)
-
-    match parse "DROP VIEW my_view RESTRICT" with
-    | DropView({ Kind = Identifier "MY_VIEW" }, false) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropView RESTRICT, got %A" res)
-
-    match parse "DROP SEQUENCE order_seq CASCADE" with
-    | DropSequence({ Kind = Identifier "ORDER_SEQ" }, true) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropSequence CASCADE, got %A" res)
-
-    match parse "DROP SEQUENCE order_seq RESTRICT" with
-    | DropSequence({ Kind = Identifier "ORDER_SEQ" }, false) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropSequence RESTRICT, got %A" res)
-
-    match parse "DROP ROLE admin" with
-    | DropRole { Kind = Identifier "ADMIN" } -> ()
-    | res -> Assert.Fail(sprintf "Expected DropRole, got %A" res)
-
-[<Fact>]
-let ``DROP SCHEMA verification`` () =
-    match parse "DROP SCHEMA sales CASCADE" with
-    | DropSchema({ Kind = Identifier "SALES" }, true) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropSchema CASCADE, got %A" res)
-
-    match parse "DROP SCHEMA sales RESTRICT" with
-    | DropSchema({ Kind = Identifier "SALES" }, false) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropSchema RESTRICT, got %A" res)
-
-[<Fact>]
-let ``DROP DOMAIN verification`` () =
-    match parse "DROP DOMAIN d CASCADE" with
-    | DropDomain({ Kind = Identifier "D" }, true) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropDomain CASCADE, got %A" res)
-
-    match parse "DROP DOMAIN d RESTRICT" with
-    | DropDomain({ Kind = Identifier "D" }, false) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropDomain RESTRICT, got %A" res)
-
-    parseFails "DROP DOMAIN d"
-
-[<Fact>]
-let ``DROP CHARACTER SET verification`` () =
-    match parse "DROP CHARACTER SET utf8" with
-    | DropCharacterSet { Kind = Identifier "UTF8" } -> ()
-    | res -> Assert.Fail(sprintf "Expected DropCharacterSet, got %A" res)
-
-[<Fact>]
-let ``DROP COLLATION verification`` () =
-    match parse "DROP COLLATION my_coll CASCADE" with
-    | DropCollation({ Kind = Identifier "MY_COLL" }, true) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropCollation CASCADE, got %A" res)
-
-    match parse "DROP COLLATION my_coll RESTRICT" with
-    | DropCollation({ Kind = Identifier "MY_COLL" }, false) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropCollation RESTRICT, got %A" res)
-
-[<Fact>]
-let ``DROP TRANSLATION verification`` () =
-    match parse "DROP TRANSLATION tr" with
-    | DropTransliteration { Kind = Identifier "TR" } -> ()
-    | res -> Assert.Fail(sprintf "Expected DropTransliteration, got %A" res)
-
-[<Fact>]
-let ``DROP ASSERTION verification`` () =
-    match parse "DROP ASSERTION a CASCADE" with
-    | DropAssertion({ Kind = Identifier "A" }, Some true) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropAssertion CASCADE, got %A" res)
-
-    match parse "DROP ASSERTION a" with
-    | DropAssertion({ Kind = Identifier "A" }, None) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropAssertion without behavior, got %A" res)
-
-[<Fact>]
-let ``DROP CAST verification`` () =
-    match parse "DROP CAST (INT AS BIGINT) CASCADE" with
-    | DropCast(Integer, BigInt, true) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropCast CASCADE, got %A" res)
-
-    match parse "DROP CAST (VARCHAR(5) AS VARCHAR(10)) RESTRICT" with
-    | DropCast(Varchar { Value = 5; Unit = None }, Varchar { Value = 10; Unit = None }, false) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropCast RESTRICT, got %A" res)
-
-    parseFails "DROP CAST (INT AS BIGINT)"
-
-[<Fact>]
-let ``DROP ORDERING verification`` () =
-    match parse "DROP ORDERING FOR my_type CASCADE" with
-    | DropOrdering({ Kind = Identifier "MY_TYPE" }, true) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropOrdering CASCADE, got %A" res)
-
-    match parse "DROP ORDERING FOR my_type RESTRICT" with
-    | DropOrdering({ Kind = Identifier "MY_TYPE" }, false) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropOrdering RESTRICT, got %A" res)
-
-    parseFails "DROP ORDERING FOR my_type"
-
-[<Fact>]
-let ``DROP TRANSFORM verification`` () =
-    match parse "DROP TRANSFORM ALL FOR my_type CASCADE" with
-    | DropTransform({ Kind = Identifier "MY_TYPE" }, TransformDropTarget.AllTransforms, true) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropTransform ALL CASCADE, got %A" res)
-
-    match parse "DROP TRANSFORMS g1 FOR my_type RESTRICT" with
-    | DropTransform({ Kind = Identifier "MY_TYPE" },
-                    TransformDropTarget.TransformGroup { Kind = Identifier "G1" },
-                    false) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropTransform group RESTRICT, got %A" res)
-
-[<Fact>]
-let ``DROP ROUTINE verification`` () =
-    match parse "DROP FUNCTION add CASCADE" with
-    | DropRoutine({ Kind = Identifier "ADD" }, true) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropRoutine CASCADE, got %A" res)
-
-    match parse "DROP PROCEDURE p RESTRICT" with
-    | DropRoutine({ Kind = Identifier "P" }, false) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropRoutine RESTRICT, got %A" res)
-
-[<Fact>]
-let ``DROP TRIGGER verification`` () =
-    match parse "DROP TRIGGER trg" with
-    | DropTrigger { Kind = Identifier "TRG" } -> ()
-    | res -> Assert.Fail(sprintf "Expected DropTrigger, got %A" res)
-
-[<Fact>]
-let ``DROP TYPE verification`` () =
-    match parse "DROP TYPE my_type RESTRICT" with
-    | DropType({ Kind = Identifier "MY_TYPE" }, false) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropType RESTRICT, got %A" res)
-
-    match parse "DROP TYPE my_type CASCADE" with
-    | DropType({ Kind = Identifier "MY_TYPE" }, true) -> ()
-    | res -> Assert.Fail(sprintf "Expected DropType CASCADE, got %A" res)
-
-[<Fact>]
-let ``DROP TABLE without drop behavior is rejected`` () = parseFails "DROP TABLE users"
-
-[<Fact>]
-let ``DROP TRANSFORM requires drop behavior`` () =
-    parseFails "DROP TRANSFORM ALL FOR my_type"
-
-[<Fact>]
-let ``DROP TYPE without behavior is rejected`` () = parseFails "DROP TYPE my_type"
-
-[<Fact>]
-let ``DROP INDEX is rejected (not in SQL-2016)`` () = parseFails "DROP INDEX idx"
 
 [<Fact>]
 let ``CREATE SEQUENCE verification`` () =

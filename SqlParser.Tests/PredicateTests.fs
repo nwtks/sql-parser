@@ -185,6 +185,258 @@ let ``Predicate part-2 operands are row value predicands (8.x)`` () =
     | res -> Assert.Fail(sprintf "Expected Between with a parenthesized operand, got %A" res)
 
 [<Fact>]
+let ``IN list verification`` () =
+    match parse "SELECT x IN (1, 2, 3)" with
+    | InList({ Kind = Identifier "X" },
+             false,
+             [ { Kind = Literal(Number 1m) }; { Kind = Literal(Number 2m) }; { Kind = Literal(Number 3m) } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected InList, got %A" res)
+
+    // 8.4 <in value list> — an element is a <row value expression>: an explicit row value
+    // constructor is one, a term or a parenthesized value expression is not.
+    match parse "SELECT x IN (ROW(1, 2), 3)" with
+    | InList({ Kind = Identifier "X" },
+             false,
+             [ { Kind = RowValueConstructor [ _; _ ] }; { Kind = Literal(Number 3m) } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected a row value IN list, got %A" res)
+
+    parseFails "SELECT 1 FROM t WHERE x IN (1 + 1)"
+    parseFails "SELECT 1 FROM t WHERE x IN ((1), 2)"
+    parseFails "SELECT 1 FROM t WHERE x IN (-1)"
+
+[<Fact>]
+let ``IN subquery verification`` () =
+    match parse "SELECT x IN (SELECT y FROM t)" with
+    | InSubquery({ Kind = Identifier "X" }, false, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected InSubquery, got %A" res)
+
+    match parse "SELECT x NOT IN (SELECT y FROM t)" with
+    | InSubquery({ Kind = Identifier "X" }, true, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected InSubquery NOT, got %A" res)
+
+[<Fact>]
+let ``LIKE predicate verification`` () =
+    match parse "SELECT x LIKE 'a%'" with
+    | Like({ Kind = Identifier "X" }, false, { Kind = Literal(String "a%") }, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected Like, got %A" res)
+
+    match parse "SELECT x NOT LIKE 'a%' ESCAPE '!'" with
+    | Like({ Kind = Identifier "X" }, true, _, Some { Kind = Literal(String "!") }) -> ()
+    | res -> Assert.Fail(sprintf "Expected Like NOT ESCAPE, got %A" res)
+
+[<Fact>]
+let ``SIMILAR TO predicate verification`` () =
+    match parse "SELECT x SIMILAR TO 'a%'" with
+    | SimilarTo({ Kind = Identifier "X" }, false, _, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected SimilarTo, got %A" res)
+
+    match parse "SELECT x NOT SIMILAR TO 'a%' ESCAPE '!'" with
+    | SimilarTo({ Kind = Identifier "X" }, true, _, Some _) -> ()
+    | res -> Assert.Fail(sprintf "Expected SimilarTo NOT ESCAPE, got %A" res)
+
+    // Both operands are <character value expression>s, so the part-2 operand check applies
+    // (the LIKE branch already used it; SIMILAR TO used the raw expression parser).
+    parseFails "SELECT x SIMILAR TO 1 = 1"
+    parseFails "SELECT x SIMILAR TO 'a%' ESCAPE 1 = 1"
+
+[<Fact>]
+let ``LIKE_REGEX predicate verification`` () =
+    match parse "SELECT x LIKE_REGEX 'a.*'" with
+    | RegexLike({ Kind = Identifier "X" }, false, { Kind = Literal(String "a.*") }, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected RegexLike, got %A" res)
+
+    match parse "SELECT x NOT LIKE_REGEX 'a' FLAG 'i'" with
+    | RegexLike({ Kind = Identifier "X" }, true, { Kind = Literal(String "a") }, Some { Kind = Literal(String "i") }) ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected RegexLike FLAG, got %A" res)
+
+[<Fact>]
+let ``IS NULL verification`` () =
+    match parse "SELECT x IS NOT NULL" with
+    | IsNull({ Kind = Identifier "X" }, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsNull(true), got %A" res)
+
+[<Fact>]
+let ``IS TRUE FALSE UNKNOWN verification`` () =
+    match parse "SELECT x IS TRUE" with
+    | IsBoolean({ Kind = Identifier "X" }, false, Some true) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsBoolean TRUE, got %A" res)
+
+    match parse "SELECT x IS NOT FALSE" with
+    | IsBoolean({ Kind = Identifier "X" }, true, Some false) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsBoolean NOT FALSE, got %A" res)
+
+    match parse "SELECT x IS UNKNOWN" with
+    | IsBoolean({ Kind = Identifier "X" }, false, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsBoolean UNKNOWN, got %A" res)
+
+[<Fact>]
+let ``Boolean test requires a boolean primary (6.39)`` () =
+    // 6.39 <boolean primary> ::= <predicate> | <boolean predicand>
+    //   <boolean predicand> ::= <parenthesized boolean value expression>
+    //                         | <nonparenthesized value expression primary>
+    // A term is neither, so a boolean test cannot follow it …
+    parseFails "SELECT 1 FROM t WHERE 1 + 1 IS TRUE"
+    parseFails "SELECT 1 FROM t WHERE -x IS TRUE"
+    parseFails "SELECT 1 FROM t WHERE a || b IS TRUE"
+
+    // … and a <boolean test> is not a <boolean primary>, so nothing predicate-shaped follows it.
+    parseFails "SELECT 1 FROM t WHERE x IS TRUE IS FALSE"
+    parseFails "SELECT 1 FROM t WHERE x IS TRUE IS NULL"
+
+    // A parenthesized boolean value expression is a <boolean predicand>.
+    match parse "(a = b) IS TRUE" with
+    | IsBoolean({ Kind = Parenthesized _ }, false, Some true) -> ()
+    | res -> Assert.Fail(sprintf "Expected a parenthesized boolean predicand, got %A" res)
+
+[<Fact>]
+let ``IS NORMALIZED predicate verification`` () =
+    match parse "SELECT x IS NORMALIZED" with
+    | IsNormalized({ Kind = Identifier "X" }, false, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsNormalized, got %A" res)
+
+    match parse "SELECT x IS NOT NFC NORMALIZED" with
+    | IsNormalized({ Kind = Identifier "X" }, true, Some Nfc) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsNormalized NFC, got %A" res)
+
+    match parse "SELECT x IS NFKD NORMALIZED" with
+    | IsNormalized({ Kind = Identifier "X" }, false, Some Nfkd) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsNormalized NFKD, got %A" res)
+
+[<Fact>]
+let ``MATCH predicate verification`` () =
+    match parse "SELECT x MATCH (SELECT y FROM t)" with
+    | Match({ Kind = Identifier "X" }, false, None, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected Match, got %A" res)
+
+    match parse "SELECT x MATCH UNIQUE FULL (SELECT y FROM t)" with
+    | Match({ Kind = Identifier "X" }, true, Some Full, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected Match UNIQUE FULL, got %A" res)
+
+[<Fact>]
+let ``OVERLAPS predicate verification`` () =
+    match parse "SELECT x OVERLAPS y" with
+    | Overlaps({ Kind = Identifier "X" }, { Kind = Identifier "Y" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected Overlaps, got %A" res)
+
+[<Fact>]
+let ``IS DISTINCT FROM predicate verification`` () =
+    match parse "SELECT x IS DISTINCT FROM y FROM t" with
+    | IsDistinctFrom({ Kind = Identifier "X" }, false, { Kind = Identifier "Y" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsDistinctFrom, got %A" res)
+
+    match parse "SELECT x IS NOT DISTINCT FROM y FROM t" with
+    | IsDistinctFrom({ Kind = Identifier "X" }, true, { Kind = Identifier "Y" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsDistinctFrom NOT, got %A" res)
+
+[<Fact>]
+let ``MEMBER OF predicate verification`` () =
+    match parse "SELECT x MEMBER OF m" with
+    | MemberOf({ Kind = Identifier "X" }, false, { Kind = Identifier "M" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected MemberOf, got %A" res)
+
+    match parse "SELECT x NOT MEMBER m" with
+    | MemberOf({ Kind = Identifier "X" }, true, { Kind = Identifier "M" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected MemberOf NOT, got %A" res)
+
+[<Fact>]
+let ``SUBMULTISET OF predicate verification`` () =
+    match parse "SELECT x SUBMULTISET OF m" with
+    | SubmultisetOf({ Kind = Identifier "X" }, false, { Kind = Identifier "M" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected SubmultisetOf, got %A" res)
+
+    match parse "SELECT x NOT SUBMULTISET m" with
+    | SubmultisetOf({ Kind = Identifier "X" }, true, { Kind = Identifier "M" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected SubmultisetOf NOT, got %A" res)
+
+[<Fact>]
+let ``IS A SET predicate verification`` () =
+    match parse "SELECT x IS A SET" with
+    | IsSet({ Kind = Identifier "X" }, false) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsSet, got %A" res)
+
+    match parse "SELECT x IS NOT A SET" with
+    | IsSet({ Kind = Identifier "X" }, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsSet NOT, got %A" res)
+
+[<Fact>]
+let ``IS OF type predicate verification`` () =
+    match parse "SELECT x IS OF (t)" with
+    | IsOfType({ Kind = Identifier "X" }, false, [ Inclusive { Kind = Identifier "T" } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsOfType, got %A" res)
+
+    match parse "SELECT x IS NOT OF (ONLY t1, t2)" with
+    | IsOfType({ Kind = Identifier "X" },
+               true,
+               [ Exclusive { Kind = Identifier "T1" }; Inclusive { Kind = Identifier "T2" } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsOfType ONLY, got %A" res)
+
+[<Fact>]
+let ``Period predicate verification`` () =
+    match parse "SELECT p1 EQUALS p2" with
+    | PeriodPredicate(PeriodEquals, { Kind = Identifier "P1" }, { Kind = Identifier "P2" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected PeriodEquals, got %A" res)
+
+    match parse "SELECT p1 CONTAINS PERIOD (s, e)" with
+    | PeriodPredicate(PeriodContains,
+                      { Kind = Identifier "P1" },
+                      { Kind = PeriodValue({ Kind = Identifier "S" }, { Kind = Identifier "E" }) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected PeriodContains, got %A" res)
+
+    // 8.20 — the slots are <datetime value expression>s, so the 6.35 chains stay legal.
+    match parse "SELECT p1 CONTAINS PERIOD (s + INTERVAL '1' DAY, e)" with
+    | PeriodPredicate(PeriodContains, { Kind = Identifier "P1" }, { Kind = PeriodValue _ }) -> ()
+    | res -> Assert.Fail(sprintf "Expected PeriodContains with datetime bounds, got %A" res)
+
+    match parse "SELECT p1 IMMEDIATELY PRECEDES p2" with
+    | PeriodPredicate(PeriodImmediatelyPrecedes, { Kind = Identifier "P1" }, { Kind = Identifier "P2" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected PeriodImmediatelyPrecedes, got %A" res)
+
+    match parse "SELECT p1 SUCCEEDS p2" with
+    | PeriodPredicate(PeriodSucceeds, { Kind = Identifier "P1" }, { Kind = Identifier "P2" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected PeriodSucceeds, got %A" res)
+
+    // The left operand of a <period predicate> is a <period predicand> — a <period
+    // reference> (a plain identifier chain) or PERIOD ( start, end ).
+    parseFails "SELECT p1 FROM t WHERE 3 EQUALS PERIOD (s, e)"
+    parseFails "SELECT p1 FROM t WHERE 1 + 2 PRECEDES PERIOD (s, e)"
+    parseFails "SELECT p1 FROM t WHERE 1 = 2 SUCCEEDS PERIOD (s, e)"
+
+    // 8.20 <period start value>/<period end value> are <datetime value expression>s —
+    // boolean predicates and other non-datetime operators are rejected in both slots.
+    parseFails "SELECT PERIOD (s = e, f) EQUALS p FROM t"
+    parseFails "SELECT p CONTAINS PERIOD (s IS NULL, f) FROM t"
+
+[<Fact>]
+let ``IS JSON predicate verification`` () =
+    match parse "SELECT x IS JSON" with
+    | IsJson({ Kind = Identifier "X" }, None, false, None, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsJson, got %A" res)
+
+    match parse "SELECT x IS NOT JSON VALUE WITH UNIQUE KEYS" with
+    | IsJson({ Kind = Identifier "X" }, None, true, Some JsonTypeValue, Some true) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsJson VALUE, got %A" res)
+
+    match parse "SELECT x IS JSON ARRAY WITHOUT UNIQUE" with
+    | IsJson({ Kind = Identifier "X" }, None, false, Some JsonTypeArray, Some false) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsJson ARRAY, got %A" res)
+
+    // 8.22 <JSON predicate> ::= <string value expression> [ <JSON input clause> ] IS ...
+    match parse "SELECT x FORMAT JSON IS JSON" with
+    | IsJson({ Kind = Identifier "X" }, Some(JsonEncoding None), false, None, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsJson with input clause, got %A" res)
+
+    match parse "SELECT x FORMAT JSON ENCODING UTF16 IS NOT JSON SCALAR" with
+    | IsJson({ Kind = Identifier "X" }, Some(JsonEncoding(Some Utf16)), true, Some JsonTypeScalar, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected IsJson UTF16, got %A" res)
+
+[<Fact>]
+let ``COLLATE verification`` () =
+    match parse "SELECT name COLLATE \"C\"" with
+    | Collate({ Kind = Identifier "NAME" }, { Kind = Identifier "C" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected Collate, got %A" res)
+
+[<Fact>]
 let ``When operands are row value predicands (6.12)`` () =
     parseFails "SELECT CASE x WHEN 1 AND 2 THEN 1 END"
 
@@ -275,258 +527,6 @@ let ``Predicate part-1 left operands are row value predicands (8.x)`` () =
     match parse "JSON_EXISTS(doc, '$.a') IS TRUE" with
     | IsBoolean({ Kind = JsonExists _ }, false, Some true) -> ()
     | res -> Assert.Fail(sprintf "Expected a boolean test on JSON_EXISTS, got %A" res)
-
-[<Fact>]
-let ``IN list verification`` () =
-    match parse "SELECT x IN (1, 2, 3)" with
-    | InList({ Kind = Identifier "X" },
-             false,
-             [ { Kind = Literal(Number 1m) }; { Kind = Literal(Number 2m) }; { Kind = Literal(Number 3m) } ]) -> ()
-    | res -> Assert.Fail(sprintf "Expected InList, got %A" res)
-
-    // 8.4 <in value list> — an element is a <row value expression>: an explicit row value
-    // constructor is one, a term or a parenthesized value expression is not.
-    match parse "SELECT x IN (ROW(1, 2), 3)" with
-    | InList({ Kind = Identifier "X" },
-             false,
-             [ { Kind = RowValueConstructor [ _; _ ] }; { Kind = Literal(Number 3m) } ]) -> ()
-    | res -> Assert.Fail(sprintf "Expected a row value IN list, got %A" res)
-
-    parseFails "SELECT 1 FROM t WHERE x IN (1 + 1)"
-    parseFails "SELECT 1 FROM t WHERE x IN ((1), 2)"
-    parseFails "SELECT 1 FROM t WHERE x IN (-1)"
-
-[<Fact>]
-let ``IN subquery verification`` () =
-    match parse "SELECT x IN (SELECT y FROM t)" with
-    | InSubquery({ Kind = Identifier "X" }, false, _) -> ()
-    | res -> Assert.Fail(sprintf "Expected InSubquery, got %A" res)
-
-    match parse "SELECT x NOT IN (SELECT y FROM t)" with
-    | InSubquery({ Kind = Identifier "X" }, true, _) -> ()
-    | res -> Assert.Fail(sprintf "Expected InSubquery NOT, got %A" res)
-
-[<Fact>]
-let ``IS NULL verification`` () =
-    match parse "SELECT x IS NOT NULL" with
-    | IsNull({ Kind = Identifier "X" }, true) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsNull(true), got %A" res)
-
-[<Fact>]
-let ``IS TRUE FALSE UNKNOWN verification`` () =
-    match parse "SELECT x IS TRUE" with
-    | IsBoolean({ Kind = Identifier "X" }, false, Some true) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsBoolean TRUE, got %A" res)
-
-    match parse "SELECT x IS NOT FALSE" with
-    | IsBoolean({ Kind = Identifier "X" }, true, Some false) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsBoolean NOT FALSE, got %A" res)
-
-    match parse "SELECT x IS UNKNOWN" with
-    | IsBoolean({ Kind = Identifier "X" }, false, None) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsBoolean UNKNOWN, got %A" res)
-
-[<Fact>]
-let ``Boolean test requires a boolean primary (6.39)`` () =
-    // 6.39 <boolean primary> ::= <predicate> | <boolean predicand>
-    //   <boolean predicand> ::= <parenthesized boolean value expression>
-    //                         | <nonparenthesized value expression primary>
-    // A term is neither, so a boolean test cannot follow it …
-    parseFails "SELECT 1 FROM t WHERE 1 + 1 IS TRUE"
-    parseFails "SELECT 1 FROM t WHERE -x IS TRUE"
-    parseFails "SELECT 1 FROM t WHERE a || b IS TRUE"
-
-    // … and a <boolean test> is not a <boolean primary>, so nothing predicate-shaped follows it.
-    parseFails "SELECT 1 FROM t WHERE x IS TRUE IS FALSE"
-    parseFails "SELECT 1 FROM t WHERE x IS TRUE IS NULL"
-
-    // A parenthesized boolean value expression is a <boolean predicand>.
-    match parse "(a = b) IS TRUE" with
-    | IsBoolean({ Kind = Parenthesized _ }, false, Some true) -> ()
-    | res -> Assert.Fail(sprintf "Expected a parenthesized boolean predicand, got %A" res)
-
-[<Fact>]
-let ``IS DISTINCT FROM predicate verification`` () =
-    match parse "SELECT x IS DISTINCT FROM y FROM t" with
-    | IsDistinctFrom({ Kind = Identifier "X" }, false, { Kind = Identifier "Y" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsDistinctFrom, got %A" res)
-
-    match parse "SELECT x IS NOT DISTINCT FROM y FROM t" with
-    | IsDistinctFrom({ Kind = Identifier "X" }, true, { Kind = Identifier "Y" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsDistinctFrom NOT, got %A" res)
-
-[<Fact>]
-let ``OVERLAPS predicate verification`` () =
-    match parse "SELECT x OVERLAPS y" with
-    | Overlaps({ Kind = Identifier "X" }, { Kind = Identifier "Y" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected Overlaps, got %A" res)
-
-[<Fact>]
-let ``LIKE predicate verification`` () =
-    match parse "SELECT x LIKE 'a%'" with
-    | Like({ Kind = Identifier "X" }, false, { Kind = Literal(String "a%") }, None) -> ()
-    | res -> Assert.Fail(sprintf "Expected Like, got %A" res)
-
-    match parse "SELECT x NOT LIKE 'a%' ESCAPE '!'" with
-    | Like({ Kind = Identifier "X" }, true, _, Some { Kind = Literal(String "!") }) -> ()
-    | res -> Assert.Fail(sprintf "Expected Like NOT ESCAPE, got %A" res)
-
-[<Fact>]
-let ``SIMILAR TO predicate verification`` () =
-    match parse "SELECT x SIMILAR TO 'a%'" with
-    | SimilarTo({ Kind = Identifier "X" }, false, _, None) -> ()
-    | res -> Assert.Fail(sprintf "Expected SimilarTo, got %A" res)
-
-    match parse "SELECT x NOT SIMILAR TO 'a%' ESCAPE '!'" with
-    | SimilarTo({ Kind = Identifier "X" }, true, _, Some _) -> ()
-    | res -> Assert.Fail(sprintf "Expected SimilarTo NOT ESCAPE, got %A" res)
-
-    // Both operands are <character value expression>s, so the part-2 operand check applies
-    // (the LIKE branch already used it; SIMILAR TO used the raw expression parser).
-    parseFails "SELECT x SIMILAR TO 1 = 1"
-    parseFails "SELECT x SIMILAR TO 'a%' ESCAPE 1 = 1"
-
-[<Fact>]
-let ``COLLATE verification`` () =
-    match parse "SELECT name COLLATE \"C\"" with
-    | Collate({ Kind = Identifier "NAME" }, { Kind = Identifier "C" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected Collate, got %A" res)
-
-[<Fact>]
-let ``IS NORMALIZED predicate verification`` () =
-    match parse "SELECT x IS NORMALIZED" with
-    | IsNormalized({ Kind = Identifier "X" }, false, None) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsNormalized, got %A" res)
-
-    match parse "SELECT x IS NOT NFC NORMALIZED" with
-    | IsNormalized({ Kind = Identifier "X" }, true, Some Nfc) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsNormalized NFC, got %A" res)
-
-    match parse "SELECT x IS NFKD NORMALIZED" with
-    | IsNormalized({ Kind = Identifier "X" }, false, Some Nfkd) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsNormalized NFKD, got %A" res)
-
-[<Fact>]
-let ``IS OF type predicate verification`` () =
-    match parse "SELECT x IS OF (t)" with
-    | IsOfType({ Kind = Identifier "X" }, false, [ Inclusive { Kind = Identifier "T" } ]) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsOfType, got %A" res)
-
-    match parse "SELECT x IS NOT OF (ONLY t1, t2)" with
-    | IsOfType({ Kind = Identifier "X" },
-               true,
-               [ Exclusive { Kind = Identifier "T1" }; Inclusive { Kind = Identifier "T2" } ]) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsOfType ONLY, got %A" res)
-
-[<Fact>]
-let ``IS JSON predicate verification`` () =
-    match parse "SELECT x IS JSON" with
-    | IsJson({ Kind = Identifier "X" }, None, false, None, None) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsJson, got %A" res)
-
-    match parse "SELECT x IS NOT JSON VALUE WITH UNIQUE KEYS" with
-    | IsJson({ Kind = Identifier "X" }, None, true, Some JsonTypeValue, Some true) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsJson VALUE, got %A" res)
-
-    match parse "SELECT x IS JSON ARRAY WITHOUT UNIQUE" with
-    | IsJson({ Kind = Identifier "X" }, None, false, Some JsonTypeArray, Some false) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsJson ARRAY, got %A" res)
-
-    // 8.22 <JSON predicate> ::= <string value expression> [ <JSON input clause> ] IS ...
-    match parse "SELECT x FORMAT JSON IS JSON" with
-    | IsJson({ Kind = Identifier "X" }, Some(JsonEncoding None), false, None, None) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsJson with input clause, got %A" res)
-
-    match parse "SELECT x FORMAT JSON ENCODING UTF16 IS NOT JSON SCALAR" with
-    | IsJson({ Kind = Identifier "X" }, Some(JsonEncoding(Some Utf16)), true, Some JsonTypeScalar, None) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsJson UTF16, got %A" res)
-
-[<Fact>]
-let ``LIKE_REGEX predicate verification`` () =
-    match parse "SELECT x LIKE_REGEX 'a.*'" with
-    | RegexLike({ Kind = Identifier "X" }, false, { Kind = Literal(String "a.*") }, None) -> ()
-    | res -> Assert.Fail(sprintf "Expected RegexLike, got %A" res)
-
-    match parse "SELECT x NOT LIKE_REGEX 'a' FLAG 'i'" with
-    | RegexLike({ Kind = Identifier "X" }, true, { Kind = Literal(String "a") }, Some { Kind = Literal(String "i") }) ->
-        ()
-    | res -> Assert.Fail(sprintf "Expected RegexLike FLAG, got %A" res)
-
-[<Fact>]
-let ``MATCH predicate verification`` () =
-    match parse "SELECT x MATCH (SELECT y FROM t)" with
-    | Match({ Kind = Identifier "X" }, false, None, _) -> ()
-    | res -> Assert.Fail(sprintf "Expected Match, got %A" res)
-
-    match parse "SELECT x MATCH UNIQUE FULL (SELECT y FROM t)" with
-    | Match({ Kind = Identifier "X" }, true, Some Full, _) -> ()
-    | res -> Assert.Fail(sprintf "Expected Match UNIQUE FULL, got %A" res)
-
-[<Fact>]
-let ``MEMBER OF predicate verification`` () =
-    match parse "SELECT x MEMBER OF m" with
-    | MemberOf({ Kind = Identifier "X" }, false, { Kind = Identifier "M" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected MemberOf, got %A" res)
-
-    match parse "SELECT x NOT MEMBER m" with
-    | MemberOf({ Kind = Identifier "X" }, true, { Kind = Identifier "M" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected MemberOf NOT, got %A" res)
-
-[<Fact>]
-let ``SUBMULTISET OF predicate verification`` () =
-    match parse "SELECT x SUBMULTISET OF m" with
-    | SubmultisetOf({ Kind = Identifier "X" }, false, { Kind = Identifier "M" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected SubmultisetOf, got %A" res)
-
-    match parse "SELECT x NOT SUBMULTISET m" with
-    | SubmultisetOf({ Kind = Identifier "X" }, true, { Kind = Identifier "M" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected SubmultisetOf NOT, got %A" res)
-
-[<Fact>]
-let ``IS A SET predicate verification`` () =
-    match parse "SELECT x IS A SET" with
-    | IsSet({ Kind = Identifier "X" }, false) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsSet, got %A" res)
-
-    match parse "SELECT x IS NOT A SET" with
-    | IsSet({ Kind = Identifier "X" }, true) -> ()
-    | res -> Assert.Fail(sprintf "Expected IsSet NOT, got %A" res)
-
-[<Fact>]
-let ``Period predicate verification`` () =
-    match parse "SELECT p1 EQUALS p2" with
-    | PeriodPredicate(PeriodEquals, { Kind = Identifier "P1" }, { Kind = Identifier "P2" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected PeriodEquals, got %A" res)
-
-    match parse "SELECT p1 CONTAINS PERIOD (s, e)" with
-    | PeriodPredicate(PeriodContains,
-                      { Kind = Identifier "P1" },
-                      { Kind = PeriodValue({ Kind = Identifier "S" }, { Kind = Identifier "E" }) }) -> ()
-    | res -> Assert.Fail(sprintf "Expected PeriodContains, got %A" res)
-
-    // 8.20 — the slots are <datetime value expression>s, so the 6.35 chains stay legal.
-    match parse "SELECT p1 CONTAINS PERIOD (s + INTERVAL '1' DAY, e)" with
-    | PeriodPredicate(PeriodContains, { Kind = Identifier "P1" }, { Kind = PeriodValue _ }) -> ()
-    | res -> Assert.Fail(sprintf "Expected PeriodContains with datetime bounds, got %A" res)
-
-    match parse "SELECT p1 IMMEDIATELY PRECEDES p2" with
-    | PeriodPredicate(PeriodImmediatelyPrecedes, { Kind = Identifier "P1" }, { Kind = Identifier "P2" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected PeriodImmediatelyPrecedes, got %A" res)
-
-    match parse "SELECT p1 SUCCEEDS p2" with
-    | PeriodPredicate(PeriodSucceeds, { Kind = Identifier "P1" }, { Kind = Identifier "P2" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected PeriodSucceeds, got %A" res)
-
-    // The left operand of a <period predicate> is a <period predicand> — a <period
-    // reference> (a plain identifier chain) or PERIOD ( start, end ).
-    parseFails "SELECT p1 FROM t WHERE 3 EQUALS PERIOD (s, e)"
-    parseFails "SELECT p1 FROM t WHERE 1 + 2 PRECEDES PERIOD (s, e)"
-    parseFails "SELECT p1 FROM t WHERE 1 = 2 SUCCEEDS PERIOD (s, e)"
-
-    // 8.20 <period start value>/<period end value> are <datetime value expression>s —
-    // boolean predicates and other non-datetime operators are rejected in both slots.
-    parseFails "SELECT PERIOD (s = e, f) EQUALS p FROM t"
-    parseFails "SELECT p CONTAINS PERIOD (s IS NULL, f) FROM t"
 
 [<Fact>]
 let ``EXISTS predicate verification`` () =

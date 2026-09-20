@@ -3,33 +3,46 @@ namespace SqlParser
 open FParsec
 open SqlParser.Lexer
 open SqlParser.ExpressionParser
-open SqlParser.QueryParser
 
 module DataManipulationParser =
-    // 14.2 <cursor sensitivity> ::= SENSITIVE | INSENSITIVE | ASENSITIVE
-    let pCursorSensitivity =
-        attempt (pKeyword "ASENSITIVE" >>% CursorSensitivity.Asensitive)
-        <|> attempt (pKeyword "INSENSITIVE" >>% CursorSensitivity.Insensitive)
-        <|> (pKeyword "SENSITIVE" >>% CursorSensitivity.Sensitive)
-
-    // 14.2 <cursor scrollability> ::= SCROLL | NO SCROLL
-    let pCursorScrollability =
-        attempt (pKeyword "NO" >>. pKeyword "SCROLL" >>% CursorScrollability.NoScroll)
-        <|> (pKeyword "SCROLL" >>% CursorScrollability.Scroll)
-
-    // 14.2 <cursor holdability> ::= WITH HOLD | WITHOUT HOLD
-    let pCursorHoldability =
-        attempt (pKeyword "WITHOUT" >>. pKeyword "HOLD" >>% CursorHoldability.WithoutHold)
-        <|> (pKeyword "WITH" >>. pKeyword "HOLD" >>% CursorHoldability.WithHold)
-
-    // 14.2 <cursor returnability> ::= WITH RETURN | WITHOUT RETURN
-    let pCursorReturnability =
-        attempt (pKeyword "WITHOUT" >>. pKeyword "RETURN" >>% CursorReturnability.WithoutReturn)
-        <|> (pKeyword "WITH" >>. pKeyword "RETURN" >>% CursorReturnability.WithReturn)
+    // 5.4 <local qualified name> ::= [ <local qualifier> <period> ] <qualified identifier>
+    // 14.1 <cursor name> ::= <local qualified name>; <local qualifier> ::= MODULE is the only
+    // qualifier a cursor name admits, so `DECLARE a.b CURSOR ...` is rejected.
+    let private pLocalQualifiedNameExpression =
+        getPosition
+        .>>. opt (attempt (pKeyword "MODULE" >>. token (pstring ".")))
+        .>>. pIdentifier
+        |>> fun ((pos, qualifier), name) ->
+            { Expression.Kind =
+                (match qualifier with
+                 | Some _ -> ColumnReference [ "MODULE"; name ]
+                 | None -> Identifier name)
+              Pos = { Line = pos.Line; Column = pos.Column } }
 
     // 14.2 <cursor properties> ::= [ <cursor sensitivity> ] [ <cursor scrollability> ] CURSOR
     //     [ <cursor holdability> ] [ <cursor returnability> ]
     let pCursorProperties =
+        // 14.2 <cursor sensitivity> ::= SENSITIVE | INSENSITIVE | ASENSITIVE
+        let pCursorSensitivity =
+            attempt (pKeyword "ASENSITIVE" >>% CursorSensitivity.Asensitive)
+            <|> attempt (pKeyword "INSENSITIVE" >>% CursorSensitivity.Insensitive)
+            <|> (pKeyword "SENSITIVE" >>% CursorSensitivity.Sensitive)
+
+        // 14.2 <cursor scrollability> ::= SCROLL | NO SCROLL
+        let pCursorScrollability =
+            attempt (pKeyword "NO" >>. pKeyword "SCROLL" >>% CursorScrollability.NoScroll)
+            <|> (pKeyword "SCROLL" >>% CursorScrollability.Scroll)
+
+        // 14.2 <cursor holdability> ::= WITH HOLD | WITHOUT HOLD
+        let pCursorHoldability =
+            attempt (pKeyword "WITHOUT" >>. pKeyword "HOLD" >>% CursorHoldability.WithoutHold)
+            <|> (pKeyword "WITH" >>. pKeyword "HOLD" >>% CursorHoldability.WithHold)
+
+        // 14.2 <cursor returnability> ::= WITH RETURN | WITHOUT RETURN
+        let pCursorReturnability =
+            attempt (pKeyword "WITHOUT" >>. pKeyword "RETURN" >>% CursorReturnability.WithoutReturn)
+            <|> (pKeyword "WITH" >>. pKeyword "RETURN" >>% CursorReturnability.WithReturn)
+
         opt (attempt pCursorSensitivity) .>>. opt (attempt pCursorScrollability)
         .>> pKeyword "CURSOR"
         .>>. opt (attempt pCursorHoldability)
@@ -45,9 +58,19 @@ module DataManipulationParser =
     // The <updatability clause> belongs to the <cursor specification>, NOT to the
     // <query expression> (7.17 has no such slot).
     let pDeclareCursor =
+        // 14.3 <updatability clause> ::= FOR { READ ONLY | UPDATE [ OF <column name list> ] }
+        let pUpdatabilityClause =
+            pKeyword "FOR"
+            >>. (attempt (
+                     pKeyword "UPDATE"
+                     >>. opt (attempt (pKeyword "OF" >>. sepBy1 pIdentifierExpression (token (pstring ","))))
+                     |>> ForUpdate
+                 )
+                 <|> (pKeyword "READ" >>. pKeyword "ONLY" >>% ForReadOnly))
+
         pKeyword "DECLARE" >>. pLocalQualifiedNameExpression .>>. pCursorProperties
         .>> pKeyword "FOR"
-        .>>. pQuery
+        .>>. QueryParser.pQueryExpression
         .>>. opt (attempt pUpdatabilityClause)
         |>> fun (((name, properties), specification), updatability) ->
             { Name = name
@@ -56,16 +79,28 @@ module DataManipulationParser =
               Updatability = updatability }
             |> DeclareCursor
 
+    // 20.4/23.1 <simple target specification> ::= <host parameter name> | <SQL parameter reference>
+    //     | <column reference> | <embedded variable name>
+    // (<embedded variable name> is a host-language construct and degrades to <host parameter name>,
+    //  as elsewhere — see docs/trade-off.md.)
+    let pSimpleTargetSpecification =
+        choice
+            [ pColumnReferenceExpression
+              getPosition .>>. (pQuestionMark >>% "?" <|> pHostParameter)
+              |>> fun (pos, name) ->
+                  { Expression.Kind = Parameter name
+                    Pos = { Line = pos.Line; Column = pos.Column } } ]
+
+    // 20.10 <using descriptor> / 20.12 <into descriptor>
+    // The `[ SQL ] DESCRIPTOR <descriptor name>` tail shared by both.
+    let private pDescriptorName =
+        opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR" >>. pIdentifierExpression
+
     // 20.11 <input using clause> / 20.12 <output using clause> — shared by
     // 20.19 <dynamic open statement>, 20.20 <dynamic fetch statement> and
     // 20.13 <execute statement>. Defined here (and not in DynamicParser.fs)
     // because this module is compiled before DynamicParser.fs. Clause order is
     // inverted for 14.4 pOpenStatement / 14.5 pFetchStatement, which consume them.
-
-    // 20.10 <using descriptor> / 20.12 <into descriptor>
-    // The `[ SQL ] DESCRIPTOR <descriptor name>` tail shared by both.
-    let pDescriptorName =
-        opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR" >>. pIdentifierExpression
 
     // 20.11 <input using clause> ::= <using arguments> | <using input descriptor>
     // <using arguments> ::= USING <using argument> [ { <comma> <using argument> }... ]
@@ -89,20 +124,20 @@ module DataManipulationParser =
         .>>. opt (attempt pInputUsingClause)
         |>> Open
 
-    // 14.5 <fetch orientation> ::= NEXT | PRIOR | FIRST | LAST | { ABSOLUTE | RELATIVE } <simple value specification>
-    let pFetchOrientation =
-        pKeyword "NEXT" >>% Next
-        <|> (pKeyword "PRIOR" >>% Prior)
-        <|> (pKeyword "FIRST" >>% First)
-        <|> (pKeyword "LAST" >>% Last)
-        <|> (pKeyword "ABSOLUTE" >>. pSimpleValueSpecification |>> Absolute)
-        <|> (pKeyword "RELATIVE" >>. pSimpleValueSpecification |>> Relative)
-
     // 14.5 <fetch statement> ::= FETCH [ [ <fetch orientation> ] FROM ]
     //                                <cursor name> INTO <fetch target list>
     // 20.20 <dynamic fetch statement> ::= FETCH [ [ <fetch orientation> ] FROM ]
     //                                <dynamic cursor name> <output using clause>
     let pFetchStatement =
+        // 14.5 <fetch orientation> ::= NEXT | PRIOR | FIRST | LAST | { ABSOLUTE | RELATIVE } <simple value specification>
+        let pFetchOrientation =
+            pKeyword "NEXT" >>% Next
+            <|> (pKeyword "PRIOR" >>% Prior)
+            <|> (pKeyword "FIRST" >>% First)
+            <|> (pKeyword "LAST" >>% Last)
+            <|> (pKeyword "ABSOLUTE" >>. pSimpleValueSpecification |>> Absolute)
+            <|> (pKeyword "RELATIVE" >>. pSimpleValueSpecification |>> Relative)
+
         pKeyword "FETCH" >>. opt (attempt pFetchOrientation)
         .>>. opt (attempt (pKeyword "FROM" >>% ()))
         .>>. pLocalQualifiedNameExpression
@@ -118,20 +153,20 @@ module DataManipulationParser =
     // The <table expression> (FROM/WHERE/GROUP BY/HAVING/WINDOW) reuses the
     // QueryParser clause parsers; INTO sits between the select list and FROM.
     let pSelectStatementSingleRow =
-        pKeyword "SELECT" >>. pSetQuantifier
-        .>>. sepBy1 pSelectSublist (token (pstring ","))
+        pKeyword "SELECT" >>. QueryParser.pSetQuantifier
+        .>>. sepBy1 QueryParser.pSelectSublist (token (pstring ","))
         >>= fun (dist, cols) ->
             pKeyword "INTO" >>. sepBy1 pSchemaQualifiedNameExpression (token (pstring ","))
             >>= fun into ->
-                pFromClause
+                QueryParser.pFromClause
                 >>= fun from ->
-                    opt (attempt pWhereClause)
+                    opt (attempt QueryParser.pWhereClause)
                     >>= fun whr ->
-                        opt (attempt pGroupByClause)
+                        opt (attempt QueryParser.pGroupByClause)
                         >>= fun grp ->
-                            opt (attempt pHavingClause)
+                            opt (attempt QueryParser.pHavingClause)
                             >>= fun hav ->
-                                opt (attempt pWindowClause)
+                                opt (attempt QueryParser.pWindowClause)
                                 |>> fun win ->
                                     let grpDistinct, grpList =
                                         match grp with
@@ -153,7 +188,7 @@ module DataManipulationParser =
     //   positioned: WHERE CURRENT OF <cursor name>
     //   searched:   WHERE <search condition>
     // Returns (cursor, search condition) — exactly one is Some.
-    let pWhereClause =
+    let private pWhereClause =
         pKeyword "WHERE"
         >>. (attempt (
                  pKeyword "CURRENT" >>. pKeyword "OF" >>. pSchemaQualifiedNameExpression
@@ -163,7 +198,7 @@ module DataManipulationParser =
 
     // 14.8/14.9/14.13/14.14 <target table> ::= <table name> | ONLY ( <table name> )
     // Returns (name, isOnly).
-    let pTargetTable =
+    let private pTargetTable =
         attempt (
             pKeyword "ONLY"
             >>. between (token (pstring "(")) (token (pstring ")")) pSchemaQualifiedNameExpression
@@ -173,7 +208,7 @@ module DataManipulationParser =
 
     // 14.9/14.14 FOR PORTION OF <application time period name> FROM <point in time 1> TO <point in time 2>
     //     FROM <point in time 1> TO <point in time 2>
-    let pPortionOf =
+    let private pPortionOf =
         pKeyword "FOR"
         >>. pKeyword "PORTION"
         >>. pKeyword "OF"
@@ -188,7 +223,7 @@ module DataManipulationParser =
     // 20.25/20.27 — the omitted target form is only valid when the statement is
     // positioned through a dynamic cursor and carries no <portion of>, correlation
     // name or search condition.
-    let pOmittedTargetGuard clause target cursor where portion alias =
+    let private pOmittedTargetGuard clause target cursor where portion alias =
         let isPositioned =
             Option.isSome cursor
             && Option.isNone where
@@ -206,7 +241,7 @@ module DataManipulationParser =
 
     // 14.8/14.13 are the positioned forms (WHERE CURRENT OF) and 14.9/14.14 the searched forms
     // (FOR PORTION OF); the two clause sets are mutually exclusive.
-    let pPositionedPortionGuard portion cursor =
+    let private pPositionedPortionGuard portion cursor =
         if Option.isSome portion && Option.isSome cursor then
             fail "FOR PORTION OF cannot be combined with WHERE CURRENT OF."
         else
@@ -263,7 +298,7 @@ module DataManipulationParser =
 
     // 14.11 <override clause> ::= OVERRIDING USER VALUE | OVERRIDING SYSTEM VALUE
     // (None when absent; Some true = USER, Some false = SYSTEM)
-    let pOverrideClause =
+    let private pOverrideClause =
         opt (
             pKeyword "OVERRIDING"
             >>. (pKeyword "USER" >>% true <|> (pKeyword "SYSTEM" >>% false))
@@ -296,7 +331,7 @@ module DataManipulationParser =
         )
         .>>. pOverrideClause
         .>>. (pContextuallyTypedTableValueConstructor
-              <|> (pQuery |>> Query)
+              <|> (QueryParser.pQueryExpression |>> Query)
               <|> (pKeyword "DEFAULT" >>. pKeyword "VALUES" >>% DefaultValues))
         >>= fun (((table, cols), ovr), source) ->
             // 14.11 <from default> has neither an <insert column list> nor an <override clause>.
@@ -375,7 +410,7 @@ module DataManipulationParser =
         pKeyword "MERGE" >>. pKeyword "INTO" >>. pTargetTable
         .>>. opt (opt (pKeyword "AS") >>. pIdentifierExpression)
         .>> pKeyword "USING"
-        .>>. pTableReference
+        .>>. QueryParser.pTableReference
         .>> pKeyword "ON"
         .>>. pExpression
         .>>. many1 pWhenMatch
@@ -391,16 +426,10 @@ module DataManipulationParser =
     // 14.13 <update statement: positioned> ::= UPDATE <target table> [ [ AS ] <correlation name> ] SET <set clause list> WHERE CURRENT OF <cursor name>
     // 14.14 <update statement: searched>   ::= UPDATE <target table> [ FOR PORTION OF <application time period name> FROM <point in time 1> TO <point in time 2> ]
     //     [ [ AS ] <correlation name> ] SET <set clause list> [ WHERE <search condition> ]
+    // 14.15 <set clause list> ::= <set clause> [ { <comma> <set clause> }... ]
     // 20.27 <preparable dynamic update statement: positioned> ::= UPDATE [ <target table> ] SET <set clause list>
     //     WHERE CURRENT OF <preparable dynamic cursor name>
-    // 14.15 <set clause list> ::= <set clause> [ { <comma> <set clause> }... ]
     let pUpdateStatement =
-        // 20.25 <preparable dynamic delete statement: positioned> /
-        // 20.27 <preparable dynamic update statement: positioned> omit the <target table>.
-        let pOptionalDmlTarget =
-            attempt pTargetTable |>> DmlTarget.TableTarget
-            <|> preturn DmlTarget.OmittedTarget
-
         // 14.15 <set clause> ::= <set target> <equals operator> <update source>
         //     | <multiple column assignment> | <mutated set clause>
         let pSetClause =
@@ -441,6 +470,12 @@ module DataManipulationParser =
             pIdentifierExpression .>> token (pstring "=")
             .>>. (pDefaultSpecification <|> pNullSpecification <|> pExpression)
             |>> SingleSet)
+
+        // 20.25 <preparable dynamic delete statement: positioned> /
+        // 20.27 <preparable dynamic update statement: positioned> omit the <target table>.
+        let pOptionalDmlTarget =
+            attempt pTargetTable |>> DmlTarget.TableTarget
+            <|> preturn DmlTarget.OmittedTarget
 
         pKeyword "UPDATE" >>. pOptionalDmlTarget
         .>>. opt (attempt pPortionOf)
@@ -515,7 +550,7 @@ module DataManipulationParser =
     // 14.17 <locator reference> ::= <host parameter name> | <embedded variable name> | <dynamic parameter specification>
     // (<embedded variable name> is a host-language construct and is not modelled;
     //  the embedded form degrades to <host parameter name> — see docs/trade-off.md.)
-    let pLocatorReference =
+    let private pLocatorReference =
         pQuestionMark >>% "?" <|> pHostParameter |>> Parameter |> withExprPosition
 
     // 14.17 <free locator statement> ::= FREE LOCATOR <locator reference> [ { <comma> <locator reference> }... ]

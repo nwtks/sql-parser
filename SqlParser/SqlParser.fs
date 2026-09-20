@@ -15,7 +15,7 @@ open SqlParser.DynamicParser
 open SqlParser.DiagnosticsParser
 
 module SqlParser =
-    let withStmtPosition p =
+    let private withStmtPosition p =
         getPosition .>>. p
         |>> fun (pos, kind) ->
             { Kind = kind
@@ -25,7 +25,7 @@ module SqlParser =
     // (`pStatement` / `pStatementRef`) and wired at the bottom of this module.
 
     // 5.1 <semicolon> ::= ;
-    let pSemicolon = token (pstring ";")
+    let private pSemicolon = token (pstring ";")
 
     // <data change statement> (7.6) — the DML statements allowed inside a
     // <data change delta table> (FINAL|NEW|OLD TABLE ( ... )). Wired here because
@@ -36,8 +36,8 @@ module SqlParser =
     // <query expression body>. The body is a query only: <with clause> is a prefix of
     // <query expression> (7.17), so `WITH ... INSERT/UPDATE/DELETE/MERGE` is not a valid
     // <SQL statement> and is rejected by both entry points.
-    let pWithStatement =
-        pWithClause .>>. (pQuery |>> Select |> withStmtPosition)
+    let private pWithStatement =
+        pWithClause .>>. (pQueryExpression |>> Select |> withStmtPosition)
         |>> fun ((recu, ctes), stmt) ->
             { Kind = WithStatement(recu, ctes, stmt.Kind)
               Pos = stmt.Pos }
@@ -47,9 +47,7 @@ module SqlParser =
     // PredicateParser's module initialiser to run before the first parse.
     pPredicateRef.Value <- PredicateParser.pPredicate opp.ExpressionParser
     pPredicateNoBooleanTestRef.Value <- PredicateParser.pPredicateNoBooleanTest opp.ExpressionParser
-    pBooleanTestPart2Ref.Value <- PredicateParser.pBooleanTestPart2
     pWhenOperandPart2Ref.Value <- PredicateParser.pWhenOperandPart2 opp.ExpressionParser
-    pPredicatePrimaryRef.Value <- PredicateParser.pPredicatePrimary
 
     // 11 <SQL-schema statement> — DDL dispatcher
     // 11.1 <schema element> ::= <table definition> | <view definition> | <domain definition>
@@ -61,7 +59,7 @@ module SqlParser =
     // Only CREATE-family elements and GRANT are schema elements — DROP / ALTER /
     // TRUNCATE / REVOKE are NOT. It is a local binding because the CREATE SCHEMA parser
     // (SchemaParser.fs) takes it as a parameter and is its only consumer.
-    let pSqlSchemaStatement =
+    let private pSqlSchemaStatement =
         let pSchemaElement =
             choice
                 [ attempt pTableDefinition
@@ -116,7 +114,7 @@ module SqlParser =
     // 14.1 <declare cursor> / 14.4 <open statement> / 14.5 <fetch statement> / 14.6 <close statement>
     // 14.7 <select statement: single row> / 14.16 <temporary table declaration>
     // 14.17 <free locator statement> / 14.18 <hold locator statement>
-    let pSqlDataStatement =
+    let private pSqlDataStatement =
         choice
             [ attempt pTemporaryTableDeclaration
               attempt pDeclareCursor
@@ -128,22 +126,22 @@ module SqlParser =
               attempt pSelectStatementSingleRow ]
 
     // 14.8-14.15 <DML statement> ::= <insert statement> | <update statement> | <delete statement> | <merge statement> | <query expression>
-    let pSqlDataChangeStatement =
+    let private pSqlDataChangeStatement =
         choice
-            [ attempt (pQuery |>> Select)
+            [ attempt (pQueryExpression |>> Select)
               pInsertStatement
               pUpdateStatement
               pDeleteStatement
               pMergeStatement ]
 
     // 16 <SQL control statement> ::= <call statement> | <return statement>
-    let pSqlControlStatement =
+    let private pSqlControlStatement =
         choice [ attempt pCallStatement; attempt pReturnStatement ]
 
     // 17 <SQL-transaction statement> ::= <start transaction statement> | <set transaction statement>
     //     | <set constraints mode statement> | <savepoint statement> | <release savepoint statement>
     //     | <commit statement> | <rollback statement> — dispatcher
-    let pSqlTransactionStatement =
+    let private pSqlTransactionStatement =
         choice
             [ attempt pStartTransactionStatement
               attempt pSetTransactionStatement
@@ -154,14 +152,14 @@ module SqlParser =
               attempt pRollbackStatement ]
 
     // 18.1 <connect statement> / 18.2 <set connection statement> / 18.3 <disconnect statement>
-    let pSqlConnectionStatement =
+    let private pSqlConnectionStatement =
         choice
             [ attempt pConnectStatement
               attempt pSetConnectionStatement
               attempt pDisconnectStatement ]
 
     // 19 <SQL-session statement> — dispatcher
-    let pSqlSessionStatement =
+    let private pSqlSessionStatement =
         choice
             [ attempt pSetRoleStatement
               attempt pSetSessionUserIdentifierStatement
@@ -175,7 +173,7 @@ module SqlParser =
               attempt pSetSessionCollationStatement ]
 
     // 20 <SQL-dynamic statement> — dispatcher
-    let pSqlDynamicStatement =
+    let private pSqlDynamicStatement =
         choice
             [ attempt pDynamicDeclareCursorStatement
               attempt pExecuteImmediateStatement
@@ -196,7 +194,7 @@ module SqlParser =
     // (14.14) and <delete statement> (14.9) are directly executable. The positioned forms
     // (14.13 / 14.8, entered through WHERE CURRENT OF) are reachable only from a
     // <SQL procedure statement> (13.4), so they are excluded from pDirectSqlStatement.
-    let pSearchedUpdateStatement =
+    let private pSearchedUpdateStatement =
         pUpdateStatement
         >>= fun stmt ->
             match stmt with
@@ -204,7 +202,7 @@ module SqlParser =
                 fail "a positioned <update statement> (14.13) is not directly executable (22.1)."
             | _ -> preturn stmt
 
-    let pSearchedDeleteStatement =
+    let private pSearchedDeleteStatement =
         pDeleteStatement
         >>= fun stmt ->
             match stmt with
@@ -223,10 +221,10 @@ module SqlParser =
     // it is omitted. OPEN/FETCH/CLOSE, SELECT INTO, FREE/HOLD LOCATOR, DECLARE CURSOR,
     // CALL/RETURN, GET DIAGNOSTICS and every dynamic-SQL statement are NOT directly executable
     // — use `parseStatement` (13.4) for those.
-    let pDirectSqlStatement =
+    let private pDirectSqlStatement =
         choice
             [ attempt pWithStatement
-              attempt (pQuery |>> Select |> withStmtPosition)
+              attempt (pQueryExpression |>> Select |> withStmtPosition)
               attempt (pInsertStatement |> withStmtPosition)
               attempt (pSearchedUpdateStatement |> withStmtPosition)
               attempt (pSearchedDeleteStatement |> withStmtPosition)
@@ -239,7 +237,7 @@ module SqlParser =
         .>> pSemicolon
 
     // 23.1 <get diagnostics statement> ::= GET DIAGNOSTICS <SQL diagnostics information>
-    let pSqlDiagnosticsStatement = choice [ attempt pGetDiagnosticsStatement ]
+    let private pSqlDiagnosticsStatement = choice [ attempt pGetDiagnosticsStatement ]
 
     pStatementRef.Value <-
         choice

@@ -6,7 +6,7 @@ module Lexer =
     let ws = spaces
 
     // 5.1 <quote> ::= '
-    let pQuote: Parser<char, unit> = pchar '\''
+    let private pQuote: Parser<char, unit> = pchar '\''
 
     // ---- 5.1 <SQL special character> -----------------------------------------
     // Terminal characters that have no other home. <simple Latin letter>,
@@ -16,23 +16,23 @@ module Lexer =
     // <percent> and <reverse solidus> are deliberately absent: they occur only
     // inside the embedded XQuery-regex (8.6) and SQL/JSON-path (9.38/9.39)
     // languages, whose text is kept opaque — see docs/trade-off.md.
-    // 5.1 <left brace> ::= {
-    let pLeftBrace: Parser<char, unit> = pchar '{'
-    // 5.1 <right brace> ::= }
-    let pRightBrace: Parser<char, unit> = pchar '}'
-    // 5.1 <circumflex> ::= ^
-    let pCircumflex: Parser<char, unit> = pchar '^'
-    // 5.1 <vertical bar> ::= |
-    let pVerticalBar: Parser<char, unit> = pchar '|'
-    // 5.1 <dollar sign> ::= $
-    let pDollarSign: Parser<char, unit> = pchar '$'
     // 5.1 <left bracket> ::= [ | ??(
     let pLeftBracket: Parser<string, unit> = pstring "[" <|> pstring "??("
     // 5.1 <right bracket> ::= ] | ??)
     let pRightBracket: Parser<string, unit> = pstring "]" <|> pstring "??)"
+    // 5.1 <circumflex> ::= ^
+    let pCircumflex: Parser<char, unit> = pchar '^'
+    // 5.1 <vertical bar> ::= |
+    let pVerticalBar: Parser<char, unit> = pchar '|'
+    // 5.1 <left brace> ::= {
+    let pLeftBrace: Parser<char, unit> = pchar '{'
+    // 5.1 <right brace> ::= }
+    let pRightBrace: Parser<char, unit> = pchar '}'
+    // 5.1 <dollar sign> ::= $
+    let pDollarSign: Parser<char, unit> = pchar '$'
 
     // 5.2 <reserved word> — keywords that cannot be used as <regular identifier>
-    let reservedWords =
+    let private reservedWords =
         Set.ofList
             [ "ABS"
               "ACOS"
@@ -421,42 +421,65 @@ module Lexer =
         attempt (pstringCI s .>> notFollowedBy (asciiLetter <|> digit <|> pchar '_'))
         .>> ws
 
-    // 5.2 <Unicode escape value> helper — reads one Unicode scalar value (handles surrogate pairs)
-    let pAnyRune =
-        anyChar
-        >>= fun c1 ->
-            if System.Char.IsHighSurrogate c1 then
-                anyChar
-                >>= fun c2 ->
-                    if System.Char.IsLowSurrogate c2 then
-                        System.Text.Rune(c1, c2) |> string |> preturn
-                    else
-                        fail "invalid surrogate pair."
-            elif System.Char.IsLowSurrogate c1 then
-                fail "unexpected low surrogate."
-            else
-                System.Text.Rune c1 |> string |> preturn
+    // 5.2 <Unicode escape specifier> ::= [ UESCAPE <quote> <Unicode escape character> <quote> ]
+    let private pUnicodeEscapeSpecifier =
+        // 5.2 <Unicode escape value> helper — reads one Unicode scalar value (handles surrogate pairs)
+        let pAnyRune =
+            anyChar
+            >>= fun c1 ->
+                if System.Char.IsHighSurrogate c1 then
+                    anyChar
+                    >>= fun c2 ->
+                        if System.Char.IsLowSurrogate c2 then
+                            System.Text.Rune(c1, c2) |> string |> preturn
+                        else
+                            fail "invalid surrogate pair."
+                elif System.Char.IsLowSurrogate c1 then
+                    fail "unexpected low surrogate."
+                else
+                    System.Text.Rune c1 |> string |> preturn
+
+        // 5.2 <Unicode escape character> — shall not be a <hexit>, plus sign, quote, double quote or space.
+        let pUnicodeEscapeCharacter =
+            pAnyRune
+            >>= fun c ->
+                let forbidden ch =
+                    System.Char.IsDigit ch
+                    || ch >= 'a' && ch <= 'f'
+                    || ch >= 'A' && ch <= 'F'
+                    || ch = '+'
+                    || ch = '\''
+                    || ch = '"'
+                    || ch = ' '
+
+                if c.Length <> 1 || not (forbidden c.[0]) then
+                    preturn c
+                else
+                    fail "invalid Unicode escape character."
+
+        opt (pKeyword "UESCAPE" >>. pQuote >>. pUnicodeEscapeCharacter .>> pQuote)
+        |>> Option.defaultValue "\\"
 
     // 5.2 <Unicode escape value> — <Unicode escape character> <Unicode escape character>
-    let pUnicodeEscape esc = pstring esc >>. pstring esc
+    let private pUnicodeEscape esc = pstring esc >>. pstring esc
 
     [<TailCall>]
-    let rec loopParseHead p n acc =
+    let rec private loopParseHead p n acc =
         if n = 0 then
             acc |> List.rev |> preturn
         else
             p >>= fun x -> loopParseHead p (n - 1) (x :: acc)
 
-    let parseHead p n = loopParseHead p n []
+    let private parseHead p n = loopParseHead p n []
 
-    let hexToInt32 (chars: char list) =
+    let private hexToInt32 (chars: char list) =
         System.Convert.ToInt32(System.String.Concat chars, 16)
 
     // 5.3 <hexit> ::= <digit> | A | B | C | D | E | F | a | b | c | d | e | f
-    let pHexit = hex <|> digit
+    let private pHexit = hex <|> digit
 
     // 5.2 <Unicode 4 digit escape value> ::= <Unicode escape character> <hexit> <hexit> <hexit> <hexit>
-    let pUnicode4DigitEscape esc =
+    let private pUnicode4DigitEscape esc =
         pstring esc >>. parseHead pHexit 4
         |>> hexToInt32
         |>> System.Convert.ToChar
@@ -465,59 +488,28 @@ module Lexer =
     // 5.2 <Unicode 6 digit escape value> ::= <Unicode escape character> <plus sign> <hexit> <hexit> <hexit> <hexit> <hexit> <hexit>
     // The six hexits are a <Unicode scalar value>, so an out-of-range code point or a surrogate
     // is rejected instead of throwing out of `ConvertFromUtf32`.
-    let pUnicode6DigitEscape esc =
+    let private pUnicode6DigitEscape esc =
         pstring esc >>. pchar '+' >>. parseHead pHexit 6
         >>= fun chars ->
             let code = hexToInt32 chars
 
-            if code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF) then
+            if code > 0x10FFFF || code >= 0xD800 && code <= 0xDFFF then
                 fail "invalid Unicode escape value."
             else
                 preturn (System.Char.ConvertFromUtf32 code)
 
-    // 5.2 <Unicode escape character> — shall not be a <hexit>, plus sign, quote, double quote or space.
-    let pUnicodeEscapeCharacter =
-        pAnyRune
-        >>= fun c ->
-            let forbidden ch =
-                System.Char.IsDigit ch
-                || (ch >= 'a' && ch <= 'f')
-                || (ch >= 'A' && ch <= 'F')
-                || ch = '+'
-                || ch = '\''
-                || ch = '"'
-                || ch = ' '
-
-            if c.Length <> 1 || not (forbidden c.[0]) then
-                preturn c
-            else
-                fail "invalid Unicode escape character."
-
-    // 5.2 <Unicode escape specifier> ::= [ UESCAPE <quote> <Unicode escape character> <quote> ]
-    let pUnicodeEscapeSpecifier =
-        opt (pKeyword "UESCAPE" >>. pQuote >>. pUnicodeEscapeCharacter .>> pQuote)
-        |>> Option.defaultValue "\\"
-
-    // 5.2 <SQL language identifier> ::= <SQL language identifier start> [ <SQL language identifier part>... ]
-    // <SQL language identifier start> ::= <simple Latin letter>
-    // <SQL language identifier part> ::= <simple Latin letter> | <digit> | <underscore>
-    let pSqlLanguageIdentifier =
-        many1Satisfy2L isAsciiLetter (fun c -> isAsciiLetter c || isDigit c || c = '_') "SQL language identifier"
-        |>> (fun s -> s.ToUpperInvariant())
-        .>> ws
-
-    // 5.2 <identifier body> — <identifier start> [ <identifier part>... ]
-    let isIdentifierStartChar c = isLetter c || c = '_'
-    let isIdentifierPartChar c = isLetter c || isDigit c || c = '_'
-
-    // 5.2 <regular identifier> ::= <identifier body>
-    let pIdentifierRaw =
-        many1Satisfy2L isIdentifierStartChar isIdentifierPartChar "identifier"
-        |>> (fun s -> s.ToUpperInvariant())
-        .>> ws
-
     // 5.2 <regular identifier> — fails on <reserved word>
-    let pRegularIdentifier =
+    let private pRegularIdentifier =
+        // 5.2 <identifier body> — <identifier start> [ <identifier part>... ]
+        let isIdentifierStartChar c = isLetter c || c = '_'
+        let isIdentifierPartChar c = isLetter c || isDigit c || c = '_'
+
+        // 5.2 <regular identifier> ::= <identifier body>
+        let pIdentifierRaw =
+            many1Satisfy2L isIdentifierStartChar isIdentifierPartChar "identifier"
+            |>> (fun s -> s.ToUpperInvariant())
+            .>> ws
+
         attempt (
             pIdentifierRaw
             >>= fun s ->
@@ -530,7 +522,7 @@ module Lexer =
     // 5.2 <delimited identifier> ::= <double quote> <delimited identifier body> <double quote>
     // <delimited identifier body> ::= <delimited identifier part> ...
     // <delimited identifier part> ::= <nondoublequote character> | <doublequote symbol>
-    let pDelimitedIdentifier =
+    let private pDelimitedIdentifier =
         between (pchar '\"') (pchar '\"') (manyChars (attempt (pstring "\"\"") >>% '\"' <|> noneOf "\""))
 
     // A surrogate pair must be complete: a lone surrogate is not a Unicode scalar value. The check
@@ -555,21 +547,21 @@ module Lexer =
         else
             fail "invalid surrogate pair."
 
-    // 5.2 <Unicode delimiter body> ::= <Unicode identifier part>...
-    // <Unicode identifier part> ::= <delimited identifier part> | <Unicode escape value>
-    let pUnicodeDelimiterBody esc =
-        many (
-            choice
-                [ attempt (pUnicode6DigitEscape esc)
-                  attempt (pUnicodeEscape esc)
-                  attempt (pUnicode4DigitEscape esc)
-                  attempt (pUnicodeEscape "\"")
-                  attempt (many1Chars (noneOf (esc + "\""))) ]
-        )
-        >>= fun parts -> validateUnicodeScalars (String.concat "" parts)
-
     // 5.2 <Unicode delimited identifier> ::= U <ampersand> <double quote> <Unicode delimiter body> <double quote> <Unicode escape specifier>
-    let pUnicodeDelimitedIdentifier =
+    let private pUnicodeDelimitedIdentifier =
+        // 5.2 <Unicode delimiter body> ::= <Unicode identifier part>...
+        // <Unicode identifier part> ::= <delimited identifier part> | <Unicode escape value>
+        let pUnicodeDelimiterBody esc =
+            many (
+                choice
+                    [ attempt (pUnicode6DigitEscape esc)
+                      attempt (pUnicodeEscape esc)
+                      attempt (pUnicode4DigitEscape esc)
+                      attempt (pUnicodeEscape "\"")
+                      attempt (many1Chars (noneOf (esc + "\""))) ]
+            )
+            >>= fun parts -> validateUnicodeScalars (String.concat "" parts)
+
         pchar 'U'
         >>. pchar '&'
         >>. lookAhead (pDelimitedIdentifier .>>. pUnicodeEscapeSpecifier |>> snd)
@@ -604,69 +596,63 @@ module Lexer =
             else
                 preturn (int v)
 
-    // 5.3 <exact numeric literal> ::= <unsigned integer> [ <period> [ <unsigned integer> ] ] | <period> <unsigned integer>
-    // No trailing <separator>: pApproximateNumericLiteral reuses this as its <mantissa>, and a
-    // <mantissa> must not be separated from its E <exponent> by white space (5.3 tokenisation).
-    let private pExactNumericLiteralRaw =
-        attempt (
-            pipe2 (many1Chars digit) (opt (pchar '.' >>. manyChars digit)) (fun p f ->
-                match f with
-                | Some fStr when fStr <> "" -> p + "." + fStr
-                | _ -> p)
-        )
-        <|> (pchar '.' >>. many1Chars digit |>> fun f -> "0." + f)
-        >>= toDecimal
-
-    // 5.3 <exact numeric literal> — the tokenised form (consumes the trailing <separator>).
-    let pExactNumericLiteral = pExactNumericLiteralRaw .>> ws
-
-    // 5.3 <exponent> ::= <signed integer> — the magnitude is bounded so `int` cannot overflow.
-    let private pExponentMagnitude =
-        many1Chars digit
-        >>= fun d ->
-            match System.Int32.TryParse(d, System.Globalization.NumberStyles.None, invariantCulture) with
-            | true, v -> preturn v
-            | _ -> fail "exponent is out of range."
-
     // 10^n for 0 <= n <= 28; the exponent is bounded by the callers, so this cannot overflow.
     [<TailCall>]
     let rec private loopPow10 acc n =
         if n = 0 then acc else loopPow10 (acc * 10m) (n - 1)
 
-    // 5.3 <approximate numeric literal> ::= <mantissa> E <exponent>
-    // An exponent whose value does not fit `decimal` is rejected instead of being silently clamped
-    // to a different number: <Number> holds a decimal, so an unrepresentable literal cannot round-trip.
-    let private pApproximateNumericLiteralRaw =
-        pipe3
-            pExactNumericLiteralRaw
-            (pchar 'E' <|> pchar 'e')
-            (opt (pchar '+' <|> pchar '-') .>>. pExponentMagnitude)
-            (fun m _ (sign, mag) -> m, (if sign = Some '-' then -mag else mag))
-        >>= fun (m, exponent) ->
-            if exponent > 28 || exponent < -28 then
-                fail "approximate numeric literal is out of range."
-            else
-                let scaled =
-                    try
-                        if exponent >= 0 then
-                            m * loopPow10 1m exponent
-                        else
-                            m / loopPow10 1m (-exponent)
-                    with :? System.OverflowException ->
-                        System.Decimal.Zero
-
-                if scaled = 0m && m <> 0m then
-                    fail "approximate numeric literal is out of range."
-                else
-                    preturn scaled
-
-    // 5.3 <approximate numeric literal> — the tokenised form (consumes the trailing <separator>).
-    let pApproximateNumericLiteral = pApproximateNumericLiteralRaw .>> ws
-
     // 5.3 <unsigned numeric literal> ::= <exact numeric literal> | <approximate numeric literal>
     // Maximal munch: a numeric token must not be immediately followed by an identifier character,
     // so `1E`, `1E5x` and `0x10` are rejected instead of being re-read as a number plus an alias.
-    let pUnsignedNumericLiteral =
+    let private pUnsignedNumericLiteral =
+        // 5.3 <exact numeric literal> ::= <unsigned integer> [ <period> [ <unsigned integer> ] ] | <period> <unsigned integer>
+        // No trailing <separator>: pApproximateNumericLiteral reuses this as its <mantissa>, and a
+        // <mantissa> must not be separated from its E <exponent> by white space (5.3 tokenisation).
+        let pExactNumericLiteralRaw =
+            attempt (
+                pipe2 (many1Chars digit) (opt (pchar '.' >>. manyChars digit)) (fun p f ->
+                    match f with
+                    | Some fStr when fStr <> "" -> p + "." + fStr
+                    | _ -> p)
+            )
+            <|> (pchar '.' >>. many1Chars digit |>> fun f -> "0." + f)
+            >>= toDecimal
+
+        // 5.3 <exponent> ::= <signed integer> — the magnitude is bounded so `int` cannot overflow.
+        let pExponentMagnitude =
+            many1Chars digit
+            >>= fun d ->
+                match System.Int32.TryParse(d, System.Globalization.NumberStyles.None, invariantCulture) with
+                | true, v -> preturn v
+                | _ -> fail "exponent is out of range."
+
+        // 5.3 <approximate numeric literal> ::= <mantissa> E <exponent>
+        // An exponent whose value does not fit `decimal` is rejected instead of being silently clamped
+        // to a different number: <Number> holds a decimal, so an unrepresentable literal cannot round-trip.
+        let pApproximateNumericLiteralRaw =
+            pipe3
+                pExactNumericLiteralRaw
+                (pchar 'E' <|> pchar 'e')
+                (opt (pchar '+' <|> pchar '-') .>>. pExponentMagnitude)
+                (fun m _ (sign, mag) -> m, (if sign = Some '-' then -mag else mag))
+            >>= fun (m, exponent) ->
+                if exponent > 28 || exponent < -28 then
+                    fail "approximate numeric literal is out of range."
+                else
+                    let scaled =
+                        try
+                            if exponent >= 0 then
+                                m * loopPow10 1m exponent
+                            else
+                                m / loopPow10 1m -exponent
+                        with :? System.OverflowException ->
+                            System.Decimal.Zero
+
+                    if scaled = 0m && m <> 0m then
+                        fail "approximate numeric literal is out of range."
+                    else
+                        preturn scaled
+
         attempt (
             attempt pApproximateNumericLiteralRaw <|> pExactNumericLiteralRaw
             .>>? notFollowedBy (asciiLetter <|> digit <|> pchar '_')
@@ -678,16 +664,20 @@ module Lexer =
         opt (pchar '-' <|> pchar '+') .>>. pUnsignedNumericLiteral
         |>> fun (sign, n) -> if sign = Some '-' then -n else n
 
-    // 5.3 <character representation> ::= <nonquote character> | <quote symbol>
-    // <quote symbol> ::= <quote> <quote>
-    let pCharacterRepresentation = attempt (pstring "''") >>% '\'' <|> noneOf "'"
-
     // 5.3 <introducer> ::= <underscore>
-    let pIntroducer = pchar '_' .>> ws
+    let private pIntroducer = pchar '_' .>> ws
 
     // 10.5 <character set specification> ::= <character set name>
     // <character set name> ::= [ <schema name> <period> ] <SQL language identifier>
     let pCharacterSetSpecification =
+        // 5.2 <SQL language identifier> ::= <SQL language identifier start> [ <SQL language identifier part>... ]
+        // <SQL language identifier start> ::= <simple Latin letter>
+        // <SQL language identifier part> ::= <simple Latin letter> | <digit> | <underscore>
+        let pSqlLanguageIdentifier =
+            many1Satisfy2L isAsciiLetter (fun c -> isAsciiLetter c || isDigit c || c = '_') "SQL language identifier"
+            |>> (fun s -> s.ToUpperInvariant())
+            .>> ws
+
         // `attempt` is required: pSqlLanguageIdentifier consumes the name before the
         // optional <period> fails, which would otherwise reject an unqualified
         // <character set name> such as `_UTF8'abc'`.
@@ -700,7 +690,10 @@ module Lexer =
 
     // 5.3 <character string literal> — the body is shared with the <national character string
     // literal>, whose production has no <introducer> <character set specification> slot.
-    let pCharacterStringLiteralBody =
+    let private pCharacterStringLiteralBody =
+        // 5.3 <character representation> ::= <nonquote character> | <quote symbol>
+        // <quote symbol> ::= <quote> <quote>
+        let pCharacterRepresentation = attempt (pstring "''") >>% '\'' <|> noneOf "'"
         let pSegment = between pQuote pQuote (manyChars pCharacterRepresentation)
 
         pSegment .>>. many (attempt (pSeparator >>. pSegment))
@@ -714,23 +707,23 @@ module Lexer =
         .>> ws
 
     // 5.3 <national character string literal> ::= N <quote> [ <character representation>... ] <quote> [ { <separator> <quote> [ <character representation>... ] <quote> }... ]
-    let pNationalCharacterStringLiteral =
+    let private pNationalCharacterStringLiteral =
         pchar 'N' >>. pCharacterStringLiteralBody .>> ws
 
-    // 5.3 <Unicode representation> ::= <character representation> | <Unicode escape value>
-    let pUnicodeRepresentation esc =
-        many (
-            choice
-                [ attempt (pUnicode6DigitEscape esc)
-                  attempt (pUnicodeEscape esc)
-                  attempt (pUnicode4DigitEscape esc)
-                  attempt (pUnicodeEscape "'")
-                  attempt (many1Chars (noneOf (esc + "'"))) ]
-        )
-        >>= fun parts -> validateUnicodeScalars (String.concat "" parts)
-
     // 5.3 <Unicode character string literal> ::= [ <introducer> <character set specification> ] U <ampersand> <quote> [ <Unicode representation>... ] <quote> [ { <separator> <quote> [ <Unicode representation>... ] <quote> }... ] <Unicode escape specifier>
-    let pUnicodeCharacterStringLiteral =
+    let private pUnicodeCharacterStringLiteral =
+        // 5.3 <Unicode representation> ::= <character representation> | <Unicode escape value>
+        let pUnicodeRepresentation esc =
+            many (
+                choice
+                    [ attempt (pUnicode6DigitEscape esc)
+                      attempt (pUnicodeEscape esc)
+                      attempt (pUnicode4DigitEscape esc)
+                      attempt (pUnicodeEscape "'")
+                      attempt (many1Chars (noneOf (esc + "'"))) ]
+            )
+            >>= fun parts -> validateUnicodeScalars (String.concat "" parts)
+
         opt (pIntroducer >>. pCharacterSetSpecification)
         .>>. (pchar 'U'
               >>. pchar '&'
@@ -745,7 +738,7 @@ module Lexer =
         |>> snd
 
     // 5.3 <binary string literal> ::= X <quote> [ <space>... ] [ { <hexit> [ <space>... ] <hexit> [ <space>... ] }... ] <quote> [ { <separator> <quote> ... ] <quote> }... ]
-    let pBinaryStringLiteral =
+    let private pBinaryStringLiteral =
         let pSegment =
             between
                 pQuote
@@ -763,13 +756,13 @@ module Lexer =
         .>> ws
 
     // 5.3 <boolean literal> ::= TRUE | FALSE | UNKNOWN
-    let pBooleanLiteral =
+    let private pBooleanLiteral =
         pKeyword "TRUE" >>% Some true
         <|> (pKeyword "FALSE" >>% Some false)
         <|> (pKeyword "UNKNOWN" >>% None)
 
     // 5.3 <date value> ::= <years value> <minus sign> <months value> <minus sign> <days value>
-    let pDateValue =
+    let private pDateValue =
         pUnsignedIntegerAsInt .>> pchar '-' .>>. pUnsignedIntegerAsInt .>> pchar '-'
         .>>. pUnsignedIntegerAsInt
         >>= fun ((yi, mi), di) ->
@@ -779,24 +772,25 @@ module Lexer =
                 preturn { Year = yi; Month = mi; Day = di }
 
     // 5.3 <date literal> ::= DATE <date string>
-    let pDateLiteral = pKeyword "DATE" >>. between pQuote pQuote pDateValue .>> ws
-
-    // 5.3 <time zone interval> ::= <sign> <hours value> <colon> <minutes value>
-    // The displacement is bounded by +-14:00.
-    let pTimeZoneInterval =
-        pchar '+' >>% 1 <|> (pchar '-' >>% -1)
-        .>>. (pUnsignedIntegerAsInt .>> pchar ':' .>>. pUnsignedIntegerAsInt)
-        >>= fun (sign, (h, m)) ->
-            if h > 14 || m > 59 || h = 14 && m > 0 then
-                fail "invalid time zone interval"
-            else
-                preturn { Sign = sign; Hours = h; Minutes = m }
+    let private pDateLiteral =
+        pKeyword "DATE" >>. between pQuote pQuote pDateValue .>> ws
 
     // 5.3 <unquoted time string> ::= <time value>  [ <time zone interval>  ]
     // <time value> ::= <hours value> <colon> <minutes value> <colon> <seconds value>
     // The fields are unsigned, so a negative time of day cannot be written; the ranges are
     // hours 0-23, minutes 0-59 and seconds 0-60 (a leap second).
-    let pUnquotedTimeString =
+    let private pUnquotedTimeString =
+        // 5.3 <time zone interval> ::= <sign> <hours value> <colon> <minutes value>
+        // The displacement is bounded by +-14:00.
+        let pTimeZoneInterval =
+            pchar '+' >>% 1 <|> (pchar '-' >>% -1)
+            .>>. (pUnsignedIntegerAsInt .>> pchar ':' .>>. pUnsignedIntegerAsInt)
+            >>= fun (sign, (h, m)) ->
+                if h > 14 || m > 59 || h = 14 && m > 0 then
+                    fail "invalid time zone interval"
+                else
+                    preturn { Sign = sign; Hours = h; Minutes = m }
+
         pipe4
             (pUnsignedIntegerAsInt .>> pchar ':')
             (pUnsignedIntegerAsInt .>> pchar ':')
@@ -818,82 +812,82 @@ module Lexer =
                       TzOffset = tz }
 
     // 5.3 <time literal> ::= TIME <time string>
-    let pTimeLiteral =
+    let private pTimeLiteral =
         pKeyword "TIME" >>. between pQuote pQuote pUnquotedTimeString .>> ws
 
-    // 5.3 <unquoted timestamp string> ::= <unquoted date string> <space> <unquoted time string>
-    let pUnquotedTimestampString =
-        pDateValue .>> spaces1 .>>. pUnquotedTimeString
-        |>> fun (d, t) -> { Date = d; Time = t }
-
     // 5.3 <timestamp literal> ::= TIMESTAMP <timestamp string>
-    let pTimestampLiteral =
+    let private pTimestampLiteral =
+        // 5.3 <unquoted timestamp string> ::= <unquoted date string> <space> <unquoted time string>
+        let pUnquotedTimestampString =
+            pDateValue .>> spaces1 .>>. pUnquotedTimeString
+            |>> fun (d, t) -> { Date = d; Time = t }
+
         pKeyword "TIMESTAMP" >>. between pQuote pQuote pUnquotedTimestampString .>> ws
-
-    // 10.1 <non-second primary datetime field> ::= YEAR | MONTH | DAY | HOUR | MINUTE
-    let pNonSecondPrimaryDatetimeField =
-        choice
-            [ attempt (pKeyword "YEAR") >>% Year
-              attempt (pKeyword "MONTH") >>% Month
-              attempt (pKeyword "DAY") >>% Day
-              attempt (pKeyword "HOUR") >>% Hour
-              attempt (pKeyword "MINUTE") >>% Minute ]
-
-    // 10.1 <interval leading field precision> ::= <unsigned integer>
-    let pIntervalLeadingFieldPrecision =
-        between (token (pstring "(")) (token (pstring ")")) pUnsignedIntegerAsInt
-
-    // 10.1 <interval fractional seconds precision> ::= <unsigned integer>
-    let pIntervalFractionalSecondsPrecision =
-        between (token (pstring "(")) (token (pstring ")")) pUnsignedIntegerAsInt
-
-    // 10.1 <start field> ::= <non-second primary datetime field> [ ( <interval leading field precision> ) ]
-    let pStartField =
-        pNonSecondPrimaryDatetimeField .>>. opt pIntervalLeadingFieldPrecision
-        |>> fun (field, leading) ->
-            field,
-            leading
-            |> Option.map (fun l ->
-                { IntervalPrecision.Leading = Some l
-                  FractionalSeconds = None })
-
-    // 10.1 <end field> ::= <non-second primary datetime field> | SECOND [ ( <interval fractional seconds precision> ) ]
-    let pEndField =
-        (pNonSecondPrimaryDatetimeField |>> fun f -> f, None)
-        <|> (pKeyword "SECOND" >>. opt pIntervalFractionalSecondsPrecision
-             |>> fun frac ->
-                 Second,
-                 frac
-                 |> Option.map (fun fs ->
-                     { IntervalPrecision.Leading = None
-                       FractionalSeconds = Some fs }))
-
-    // 10.1 <single datetime field> ::= <non-second primary datetime field> [ ( <interval leading field precision> ) ]
-    //   | SECOND [ ( <interval leading field precision> [ , <interval fractional seconds precision> ] ) ]
-    let pSingleDatetimeField =
-        (pNonSecondPrimaryDatetimeField .>>. opt pIntervalLeadingFieldPrecision
-         |>> fun (field, leading) ->
-             field,
-             leading
-             |> Option.map (fun l ->
-                 { IntervalPrecision.Leading = Some l
-                   FractionalSeconds = None }))
-        <|> (pKeyword "SECOND"
-             >>. opt (
-                 between
-                     (token (pstring "("))
-                     (token (pstring ")"))
-                     (pUnsignedIntegerAsInt .>>. opt (token (pstring ",") >>. pUnsignedIntegerAsInt))
-             )
-             |>> fun prec ->
-                 Second,
-                 prec
-                 |> Option.map (fun (leading, frac) ->
-                     { IntervalPrecision.Leading = Some leading
-                       FractionalSeconds = frac }))
 
     // 10.1 <interval qualifier> ::= <start field> TO <end field> | <single datetime field>
     let pIntervalQualifier =
+        // 10.1 <non-second primary datetime field> ::= YEAR | MONTH | DAY | HOUR | MINUTE
+        let pNonSecondPrimaryDatetimeField =
+            choice
+                [ attempt (pKeyword "YEAR") >>% Year
+                  attempt (pKeyword "MONTH") >>% Month
+                  attempt (pKeyword "DAY") >>% Day
+                  attempt (pKeyword "HOUR") >>% Hour
+                  attempt (pKeyword "MINUTE") >>% Minute ]
+
+        // 10.1 <interval leading field precision> ::= <unsigned integer>
+        let pIntervalLeadingFieldPrecision =
+            between (token (pstring "(")) (token (pstring ")")) pUnsignedIntegerAsInt
+
+        // 10.1 <interval fractional seconds precision> ::= <unsigned integer>
+        let pIntervalFractionalSecondsPrecision =
+            between (token (pstring "(")) (token (pstring ")")) pUnsignedIntegerAsInt
+
+        // 10.1 <start field> ::= <non-second primary datetime field> [ ( <interval leading field precision> ) ]
+        let pStartField =
+            pNonSecondPrimaryDatetimeField .>>. opt pIntervalLeadingFieldPrecision
+            |>> fun (field, leading) ->
+                field,
+                leading
+                |> Option.map (fun l ->
+                    { IntervalPrecision.Leading = Some l
+                      FractionalSeconds = None })
+
+        // 10.1 <end field> ::= <non-second primary datetime field> | SECOND [ ( <interval fractional seconds precision> ) ]
+        let pEndField =
+            (pNonSecondPrimaryDatetimeField |>> fun f -> f, None)
+            <|> (pKeyword "SECOND" >>. opt pIntervalFractionalSecondsPrecision
+                 |>> fun frac ->
+                     Second,
+                     frac
+                     |> Option.map (fun fs ->
+                         { IntervalPrecision.Leading = None
+                           FractionalSeconds = Some fs }))
+
+        // 10.1 <single datetime field> ::= <non-second primary datetime field> [ ( <interval leading field precision> ) ]
+        //   | SECOND [ ( <interval leading field precision> [ , <interval fractional seconds precision> ] ) ]
+        let pSingleDatetimeField =
+            (pNonSecondPrimaryDatetimeField .>>. opt pIntervalLeadingFieldPrecision
+             |>> fun (field, leading) ->
+                 field,
+                 leading
+                 |> Option.map (fun l ->
+                     { IntervalPrecision.Leading = Some l
+                       FractionalSeconds = None }))
+            <|> (pKeyword "SECOND"
+                 >>. opt (
+                     between
+                         (token (pstring "("))
+                         (token (pstring ")"))
+                         (pUnsignedIntegerAsInt .>>. opt (token (pstring ",") >>. pUnsignedIntegerAsInt))
+                 )
+                 |>> fun prec ->
+                     Second,
+                     prec
+                     |> Option.map (fun (leading, frac) ->
+                         { IntervalPrecision.Leading = Some leading
+                           FractionalSeconds = frac }))
+
         let pRange =
             pStartField .>> pKeyword "TO" .>>. pEndField
             >>= fun ((startF, startPrec), (endF, endPrec)) ->
@@ -926,64 +920,64 @@ module Lexer =
 
         attempt pRange <|> pSingle
 
-    // 5.3 <unquoted interval string> — validates <year-month literal> | <day-time literal> against the
-    // <interval qualifier>, and cross-checks the value's digits against the qualifier's
-    // <interval leading field precision> and <interval fractional seconds precision>.
-    let isValidIntervalValue q s =
-        let d = @"\d+"
-        let sec = @"\d+(\.\d+)?"
-
-        let pattern =
-            match q with
-            | IntervalQualifier.SingleField(Year, _)
-            | IntervalQualifier.SingleField(Month, _)
-            | IntervalQualifier.SingleField(Day, _)
-            | IntervalQualifier.SingleField(Hour, _)
-            | IntervalQualifier.SingleField(Minute, _) -> "^" + d + "$"
-            | IntervalQualifier.SingleField(Second, _) -> "^" + sec + "$"
-            | IntervalQualifier.Range(Year, Month, _) -> "^" + d + "-" + d + "$"
-            | IntervalQualifier.Range(Day, Hour, _) -> "^" + d + @"\s+" + d + "$"
-            | IntervalQualifier.Range(Day, Minute, _) -> "^" + d + @"\s+" + d + ":" + d + "$"
-            | IntervalQualifier.Range(Day, Second, _) -> "^" + d + @"\s+" + d + ":" + d + ":" + sec + "$"
-            | IntervalQualifier.Range(Hour, Minute, _) -> "^" + d + ":" + d + "$"
-            | IntervalQualifier.Range(Hour, Second, _) -> "^" + d + ":" + d + ":" + sec + "$"
-            | IntervalQualifier.Range(Minute, Second, _) -> "^" + d + ":" + sec + "$"
-            | _ ->
-                // Unreachable: pIntervalQualifier only builds the combinations listed above.
-                "$^"
-
-        let leading, fractional =
-            match q with
-            | IntervalQualifier.SingleField(_, p)
-            | IntervalQualifier.Range(_, _, p) ->
-                match p with
-                | Some p -> p.Leading, p.FractionalSeconds
-                | None -> None, None
-
-        // The first digit run is the leading field in every accepted shape.
-        let leadingOk =
-            match leading with
-            | Some bound ->
-                let m = System.Text.RegularExpressions.Regex.Match(s, d)
-                not m.Success || m.Value.Length <= bound
-            | None -> true
-
-        let fractionalOk =
-            match fractional with
-            | Some bound ->
-                let m = System.Text.RegularExpressions.Regex.Match(s, @"\.(\d+)")
-                not m.Success || m.Groups.[1].Value.Length <= bound
-            | None -> true
-
-        System.Text.RegularExpressions.Regex.IsMatch(s, pattern)
-        && leadingOk
-        && fractionalOk
-
     // 5.3 <interval literal> ::= INTERVAL [ <sign> ] <interval string> <interval qualifier>
     // Both <sign> slots are optional and may co-occur; the literal is negative when exactly
     // one of them is '-'. The quoted sign stays part of <unquoted interval string> and is
     // stripped here so ValueString holds only the <year-month|day-time literal>.
-    let pIntervalLiteral =
+    let private pIntervalLiteral =
+        // 5.3 <unquoted interval string> — validates <year-month literal> | <day-time literal> against the
+        // <interval qualifier>, and cross-checks the value's digits against the qualifier's
+        // <interval leading field precision> and <interval fractional seconds precision>.
+        let isValidIntervalValue q s =
+            let d = @"\d+"
+            let sec = @"\d+(\.\d+)?"
+
+            let pattern =
+                match q with
+                | IntervalQualifier.SingleField(Year, _)
+                | IntervalQualifier.SingleField(Month, _)
+                | IntervalQualifier.SingleField(Day, _)
+                | IntervalQualifier.SingleField(Hour, _)
+                | IntervalQualifier.SingleField(Minute, _) -> "^" + d + "$"
+                | IntervalQualifier.SingleField(Second, _) -> "^" + sec + "$"
+                | IntervalQualifier.Range(Year, Month, _) -> "^" + d + "-" + d + "$"
+                | IntervalQualifier.Range(Day, Hour, _) -> "^" + d + @"\s+" + d + "$"
+                | IntervalQualifier.Range(Day, Minute, _) -> "^" + d + @"\s+" + d + ":" + d + "$"
+                | IntervalQualifier.Range(Day, Second, _) -> "^" + d + @"\s+" + d + ":" + d + ":" + sec + "$"
+                | IntervalQualifier.Range(Hour, Minute, _) -> "^" + d + ":" + d + "$"
+                | IntervalQualifier.Range(Hour, Second, _) -> "^" + d + ":" + d + ":" + sec + "$"
+                | IntervalQualifier.Range(Minute, Second, _) -> "^" + d + ":" + sec + "$"
+                | _ ->
+                    // Unreachable: pIntervalQualifier only builds the combinations listed above.
+                    "$^"
+
+            let leading, fractional =
+                match q with
+                | IntervalQualifier.SingleField(_, p)
+                | IntervalQualifier.Range(_, _, p) ->
+                    match p with
+                    | Some p -> p.Leading, p.FractionalSeconds
+                    | None -> None, None
+
+            // The first digit run is the leading field in every accepted shape.
+            let leadingOk =
+                match leading with
+                | Some bound ->
+                    let m = System.Text.RegularExpressions.Regex.Match(s, d)
+                    not m.Success || m.Value.Length <= bound
+                | None -> true
+
+            let fractionalOk =
+                match fractional with
+                | Some bound ->
+                    let m = System.Text.RegularExpressions.Regex.Match(s, @"\.(\d+)")
+                    not m.Success || m.Groups.[1].Value.Length <= bound
+                | None -> true
+
+            System.Text.RegularExpressions.Regex.IsMatch(s, pattern)
+            && leadingOk
+            && fractionalOk
+
         pKeyword "INTERVAL" >>. opt (pchar '-' <|> pchar '+') .>> ws
         .>>. between pQuote pQuote (manyChars (noneOf "'"))
         .>> ws
@@ -1023,12 +1017,41 @@ module Lexer =
               attempt (pIntervalLiteral |>> Interval |>> Literal)
               attempt (pBinaryStringLiteral |>> Literal.Binary |>> Literal) ]
 
+    // 5.4 <identifier> ::= <actual identifier> — <regular identifier> | <delimited identifier> | <Unicode delimited identifier>
+    let pIdentifier =
+        choice
+            [ attempt pUnicodeDelimitedIdentifier
+              pRegularIdentifier
+              pDelimitedIdentifier ]
+        .>> ws
+
+    // 5.4 <schema qualified name> ::= [ <schema name> <period> ] <qualified identifier>
+    // <schema name> ::= [ <catalog name> <period> ] <unqualified schema name>
+    // <qualified identifier> ::= <identifier>
+    // Returns the parts in order: [ <catalog name>; <schema name>; <qualified identifier> ]
+    // At most THREE parts (catalog.schema.identifier) — a 4th dot-part is rejected.
+    let pSchemaQualifiedName =
+        pIdentifier .>>. many (token (pstring ".") >>. pIdentifier)
+        >>= fun (first, rest) ->
+            if List.length rest > 2 then
+                fail "<schema qualified name> allows at most three parts"
+            else
+                preturn (first :: rest)
+
+    // 5.4 <host parameter name> ::= <colon> <identifier>
+    let pHostParameter = pchar ':' >>. pIdentifier |>> (fun name -> ":" + name) .>> ws
+
+    // 5.4 <scope option> ::= GLOBAL | LOCAL
+    let pScopeOption: Parser<ScopeOption, unit> =
+        pKeyword "GLOBAL" >>% ScopeOption.ScopeGlobal
+        <|> (pKeyword "LOCAL" >>% ScopeOption.ScopeLocal)
+
     // plus optional OVER (window), FILTER (WHERE), WITHIN GROUP (ORDER BY) clauses.
     // 10.4 <routine invocation> ::= <routine name> <SQL argument list>
     // 10.9 <aggregate function> — names used by <aggregate function>, <binary set function> and
     // <hypothetical set function>. Shared by the 10.4 <routine invocation> reserved-name whitelist
     // and by the 6.9 <set function specification> RUNNING/FINAL prefix check.
-    let aggregateFunctionKeywords =
+    let private aggregateFunctionKeywords =
         [ "AVG"
           "MAX"
           "MIN"
@@ -1058,46 +1081,6 @@ module Lexer =
           "REGR_SXY" ]
 
     let aggregateFunctionNames = Set.ofList aggregateFunctionKeywords
-
-    // 6.10 <window function type> — these keywords are only valid with an OVER clause.
-    let windowOnlyFunctionNames =
-        Set.ofList
-            [ "ROW_NUMBER"
-              "NTILE"
-              "LEAD"
-              "LAG"
-              "FIRST_VALUE"
-              "LAST_VALUE"
-              "NTH_VALUE" ]
-
-    // 6.10 <rank function type> — RANK | DENSE_RANK | PERCENT_RANK | CUME_DIST.
-    // Used both as a <window function type> (empty parens + OVER) and as a
-    // <hypothetical set function> (>= 1 arguments + WITHIN GROUP).
-    let rankFunctionNames =
-        Set.ofList [ "RANK"; "DENSE_RANK"; "PERCENT_RANK"; "CUME_DIST" ]
-
-    // 10.9 <inverse distribution function type> — WITHIN GROUP is required.
-    let inverseDistributionFunctionNames =
-        Set.ofList [ "PERCENTILE_CONT"; "PERCENTILE_DISC" ]
-
-    // 10.9 <binary set function type> — exactly two arguments.
-    let binarySetFunctionNames =
-        Set.ofList
-            [ "COVAR_POP"
-              "COVAR_SAMP"
-              "CORR"
-              "REGR_SLOPE"
-              "REGR_INTERCEPT"
-              "REGR_COUNT"
-              "REGR_R2"
-              "REGR_AVGX"
-              "REGR_AVGY"
-              "REGR_SXX"
-              "REGR_SYY"
-              "REGR_SXY" ]
-
-    // 10.9 <listagg set function> — WITHIN GROUP is required.
-    let withinGroupOnlyFunctionNames = Set.ofList [ "LISTAGG" ]
 
     // 10.4 <routine name> ::= [ <schema name> <period> ] <qualified identifier>
     // — <qualified identifier> is a <nonreserved qualifier>, so a reserved word
@@ -1135,7 +1118,7 @@ module Lexer =
           "LAST_VALUE"
           "NTH_VALUE" ]
 
-    let pReservedFunctionName =
+    let private pReservedFunctionName =
         functionKeywords
         |> List.map pKeyword
         |> choice
@@ -1144,35 +1127,6 @@ module Lexer =
                 preturn kw
             else
                 fail "not a reserved function keyword."
-
-    // 5.4 <identifier> ::= <actual identifier> — <regular identifier> | <delimited identifier> | <Unicode delimited identifier>
-    let pIdentifier =
-        choice
-            [ attempt pUnicodeDelimitedIdentifier
-              pRegularIdentifier
-              pDelimitedIdentifier ]
-        .>> ws
-
-    // 5.4 <schema qualified name> ::= [ <schema name> <period> ] <qualified identifier>
-    // <schema name> ::= [ <catalog name> <period> ] <unqualified schema name>
-    // <qualified identifier> ::= <identifier>
-    // Returns the parts in order: [ <catalog name>; <schema name>; <qualified identifier> ]
-    // At most THREE parts (catalog.schema.identifier) — a 4th dot-part is rejected.
-    let pSchemaQualifiedName =
-        pIdentifier .>>. many (token (pstring ".") >>. pIdentifier)
-        >>= fun (first, rest) ->
-            if List.length rest > 2 then
-                fail "<schema qualified name> allows at most three parts"
-            else
-                preturn (first :: rest)
-
-    // 5.4 <host parameter name> ::= <colon> <identifier>
-    let pHostParameter = pchar ':' >>. pIdentifier |>> (fun name -> ":" + name) .>> ws
-
-    // 5.4 <scope option> ::= GLOBAL | LOCAL
-    let pScopeOption: Parser<ScopeOption, unit> =
-        pKeyword "GLOBAL" >>% ScopeOption.ScopeGlobal
-        <|> (pKeyword "LOCAL" >>% ScopeOption.ScopeLocal)
 
     // 5.4 <identifier> — regular (non-reserved), delimited, or reserved function keyword
     let pRoutineName =

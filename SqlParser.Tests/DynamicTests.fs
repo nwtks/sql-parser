@@ -1,7 +1,6 @@
 module SqlParser.Tests.DynamicTests
 
 open Xunit
-open FParsec
 open SqlParser
 
 // Dynamic-SQL statements are <SQL procedure statement>s (13.4), not directly executable
@@ -95,25 +94,6 @@ let ``PREPARE with ATTRIBUTES verification`` () =
     | Prepare({ Kind = Identifier "STMT" }, Some { Kind = Literal(String "a") }, { Kind = Literal(String "SELECT 1") }) ->
         ()
     | res -> Assert.Fail(sprintf "Expected Prepare with attributes, got %A" res)
-
-[<Fact>]
-let ``CURSOR ATTRIBUTES verification`` () =
-    match run (DynamicParser.pCursorAttributes .>> eof) "SENSITIVE NO SCROLL WITH HOLD WITHOUT RETURN" with
-    | Success(attrs, _, _) ->
-        Assert.Equal<CursorAttribute list>(
-            [ CursorAttribute.SensitivityAttribute Sensitive
-              CursorAttribute.ScrollabilityAttribute NoScroll
-              CursorAttribute.HoldabilityAttribute WithHold
-              CursorAttribute.ReturnabilityAttribute WithoutReturn ],
-            attrs
-        )
-    | Failure(msg, _, _) -> Assert.Fail(msg)
-
-[<Fact>]
-let ``CURSOR ATTRIBUTES rejects a non-attribute`` () =
-    match run (DynamicParser.pCursorAttributes .>> eof) "SENSITIVE UPDATE" with
-    | Success _ -> Assert.Fail("Expected CURSOR ATTRIBUTES to reject UPDATE")
-    | Failure _ -> ()
 
 [<Fact>]
 let ``DEALLOCATE PREPARE verification`` () =

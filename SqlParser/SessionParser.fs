@@ -3,7 +3,6 @@ namespace SqlParser
 open FParsec
 open SqlParser.Lexer
 open SqlParser.ExpressionParser
-open SqlParser.TransactionParser
 
 module SessionParser =
     // 19.1 <set session characteristics statement>
@@ -15,7 +14,7 @@ module SessionParser =
         >>. pKeyword "CHARACTERISTICS"
         >>. pKeyword "AS"
         >>. pKeyword "TRANSACTION"
-        >>. sepBy1 pTransactionMode (token (pstring ","))
+        >>. sepBy1 TransactionParser.pTransactionMode (token (pstring ","))
         |>> SetSessionCharacteristics
 
     // 19.2 <set session user identifier statement>

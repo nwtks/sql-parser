@@ -1121,6 +1121,17 @@ let ``Explicit table verification`` () =
     | res -> Assert.Fail(sprintf "Expected ExplicitTable, got %A" res)
 
 [<Fact>]
+let ``UNION CORRESPONDING verification`` () =
+    match parse "SELECT a FROM t1 UNION CORRESPONDING BY (a) SELECT a FROM t2" with
+    | Select(SetOperation(_, op, _)) ->
+        Assert.Equal(Union, op.Kind)
+
+        match op.Corresponding with
+        | Some(Some [ { Kind = Identifier "A" } ]) -> ()
+        | res -> Assert.Fail(sprintf "Expected Union Corresponding, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
 let ``OFFSET without ROW or ROWS fails verification`` () =
     match SqlParser.parse "SELECT * FROM t OFFSET 5;" with
     | Error _ -> ()
@@ -1231,17 +1242,6 @@ let ``A schema qualified name has at most three parts (5.4)`` () = parseFails "S
 [<Fact>]
 let ``JSON table plans need at least two operands (7.11)`` () =
     parseFails "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN (p UNION)) AS jt"
-
-[<Fact>]
-let ``UNION CORRESPONDING verification`` () =
-    match parse "SELECT a FROM t1 UNION CORRESPONDING BY (a) SELECT a FROM t2" with
-    | Select(SetOperation(_, op, _)) ->
-        Assert.Equal(Union, op.Kind)
-
-        match op.Corresponding with
-        | Some(Some [ { Kind = Identifier "A" } ]) -> ()
-        | res -> Assert.Fail(sprintf "Expected Union Corresponding, got %A" res)
-    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``Locking clause verification`` () =

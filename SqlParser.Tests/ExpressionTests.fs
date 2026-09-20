@@ -725,12 +725,6 @@ let ``NEXT VALUE FOR verification`` () =
     | res -> Assert.Fail(sprintf "Expected NextValueFor qualified, got %A" res)
 
 [<Fact>]
-let ``TREAT subtype treatment verification`` () =
-    match parse "SELECT TREAT(x AS t)" with
-    | Treat({ Kind = Identifier "X" }, UserDefinedType { Kind = Identifier "T" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected Treat, got %A" res)
-
-[<Fact>]
 let ``SPECIFICTYPE method verification`` () =
     match parse "SELECT x.SPECIFICTYPE" with
     | SpecificTypeMethod({ Kind = Identifier "X" }, false) -> ()
@@ -774,6 +768,12 @@ let ``Method invocation on last chain segment verification`` () =
     | res -> Assert.Fail(sprintf "Expected MethodInvocation on last segment, got %A" res)
 
     parseFails "SELECT 1 + DEFAULT"
+
+[<Fact>]
+let ``TREAT subtype treatment verification`` () =
+    match parse "SELECT TREAT(x AS t)" with
+    | Treat({ Kind = Identifier "X" }, UserDefinedType { Kind = Identifier "T" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected Treat, got %A" res)
 
 [<Fact>]
 let ``Generalized method invocation verification`` () =

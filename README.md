@@ -43,7 +43,7 @@ A `Statement` carries a `Kind` (`StatementKind`) mirroring the grammar's alterna
 
 | Document | Contents |
 |----------|----------|
-| [docs/architecture.md](docs/architecture.md) | Module layout, parse pipeline, entry points, forward-reference wiring, AST and keyword strategy, coverage table, and the full list of supported SQL features. |
+| [docs/architecture.md](docs/architecture.md) | Module layout, parse pipeline, entry points, forward-reference wiring, AST and keyword strategy, coverage table, and the supported SQL features. |
 | [docs/trade-off.md](docs/trade-off.md) | Design decisions and rejected alternatives. |
 | [docs/gotchas.md](docs/gotchas.md) | Recurring F#/FParsec/grammar pitfalls. |
 | [AGENTS.md](AGENTS.md) | Conventions for AI agents working in this repo (rule numbering, definition order, coding and testing rules). |

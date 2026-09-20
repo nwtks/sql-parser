@@ -91,6 +91,31 @@ type UnaryOperator =
     | Plus
     | Minus
 
+// 6.29 <term>
+// 6.31 <concatenation>
+// 6.39 <boolean value expression>
+// 8.2 <comp op>
+// <binary operator> ::= + | - | * | / | = | <> | < | <= | > | >= | AND | OR | ||
+type BinaryOperator =
+    // 6.29 <numeric value expression>
+    | Add
+    | Subtract
+    // 6.29 <term>
+    | Multiply
+    | Divide
+    // 6.31 <concatenation>
+    | Concatenate
+    // 6.39 <boolean value expression>
+    | And
+    | Or
+    // 8.2 <comp op>
+    | Equal
+    | NotEqual
+    | LessThan
+    | LessThanOrEqual
+    | GreaterThan
+    | GreaterThanOrEqual
+
 // 6.32 <trim specification> ::= LEADING | TRAILING | BOTH
 type TrimSpecification =
     | Both
@@ -117,31 +142,6 @@ type SetOperatorKind =
     | Union
     | Intersect
     | Except
-
-// 6.29 <term>
-// 6.31 <concatenation>
-// 6.39 <boolean value expression>
-// 8.2 <comp op>
-// <binary operator> ::= + | - | * | / | = | <> | < | <= | > | >= | AND | OR | ||
-type BinaryOperator =
-    // 6.29 <numeric value expression>
-    | Add
-    | Subtract
-    // 6.29 <term>
-    | Multiply
-    | Divide
-    // 6.31 <concatenation>
-    | Concatenate
-    // 6.39 <boolean value expression>
-    | And
-    | Or
-    // 8.2 <comp op>
-    | Equal
-    | NotEqual
-    | LessThan
-    | LessThanOrEqual
-    | GreaterThan
-    | GreaterThanOrEqual
 
 // 8.9 <quantifier> ::= ALL | ANY | SOME
 type Quantifier =
@@ -537,59 +537,6 @@ and ExpressionKind =
 
 // 6.28 <value expression> — wrapper carrying source position
 and Expression = { Kind: ExpressionKind; Pos: Position }
-
-// 10.4 <SQL argument> ::= <value expression> | <generalized expression> | <target specification>
-//     | <contextually typed value specification> | <named argument specification>
-//     | <table argument> | <descriptor argument>
-and SqlArgument =
-    // <value expression> / <target specification> (20.4) / <contextually typed value
-    // specification> (6.5, i.e. NULL) — the alternatives that are also expressions.
-    | SqlArgumentValue of Expression
-    // <generalized expression> ::= <value expression> AS <path-resolved user-defined type name>
-    | SqlArgumentGeneralized of Expression * DataType
-    // <named argument specification> ::=
-    //     <SQL parameter name> <named argument assignment token> <named argument SQL argument>
-    | SqlArgumentNamed of Expression * SqlArgument
-    // <table argument>
-    | SqlArgumentTable of TableArgument
-    // <descriptor argument> ::= <descriptor value constructor> | CAST ( NULL AS DESCRIPTOR )
-    | SqlArgumentDescriptor of Expression
-
-// 10.4 <SQL argument list> ::=
-//     ( [ <SQL argument> [ { <comma> <SQL argument> }... ] [ <copartition clause> ] ] )
-and SqlArgumentList =
-    { Arguments: SqlArgument list
-      // <copartition clause> ::= COPARTITION <copartition list> — each specification is a
-      // ( <range variable> [ , ... ] ) group.
-      Copartition: Expression list list option }
-
-// 10.4 <table argument> ::= <table argument proper>
-//     [ [ AS ] <table argument correlation name> [ ( <derived column list> ) ] ]
-//     [ PARTITION BY <table argument partitioning list> ]
-//     [ PRUNE WHEN EMPTY | KEEP WHEN EMPTY ]
-//     [ ORDER BY <table argument ordering list> ]
-and TableArgument =
-    { Table: TableArgumentProper
-      // [ [ AS ] <table argument correlation name> [ ( <derived column list> ) ] ]
-      Correlation: (Expression * Expression list option) option
-      // PARTITION BY <column reference> | ( [ <column reference> [ , ... ] ] )
-      PartitionBy: Expression list option
-      // PRUNE WHEN EMPTY | KEEP WHEN EMPTY
-      Pruning: TableArgumentPruning option
-      // ORDER BY <table argument ordering column> | ( <ordering column> [ , ... ] )
-      OrderBy: (Expression * bool * NullsOrder option) list option }
-
-// 10.4 <table argument proper> ::= TABLE ( <table or query name> ) | TABLE <table subquery>
-//     | <table function invocation>
-and TableArgumentProper =
-    | TableArgumentName of Expression
-    | TableArgumentTableQuery of Query
-    | TableArgumentInvocation of Expression
-
-// 10.4 <table argument pruning> ::= PRUNE WHEN EMPTY | KEEP WHEN EMPTY
-and TableArgumentPruning =
-    | PruneWhenEmpty
-    | KeepWhenEmpty
 
 // 6.30 <length expression> ::= <char length expression> | <octet length expression>
 and LengthFunction =
@@ -1089,6 +1036,59 @@ and JsonExistsErrorBehavior =
     | JsonExistsFalse
     | JsonExistsUnknown
     | JsonExistsError
+
+// 10.4 <SQL argument> ::= <value expression> | <generalized expression> | <target specification>
+//     | <contextually typed value specification> | <named argument specification>
+//     | <table argument> | <descriptor argument>
+and SqlArgument =
+    // <value expression> / <target specification> (20.4) / <contextually typed value
+    // specification> (6.5, i.e. NULL) — the alternatives that are also expressions.
+    | SqlArgumentValue of Expression
+    // <generalized expression> ::= <value expression> AS <path-resolved user-defined type name>
+    | SqlArgumentGeneralized of Expression * DataType
+    // <named argument specification> ::=
+    //     <SQL parameter name> <named argument assignment token> <named argument SQL argument>
+    | SqlArgumentNamed of Expression * SqlArgument
+    // <table argument>
+    | SqlArgumentTable of TableArgument
+    // <descriptor argument> ::= <descriptor value constructor> | CAST ( NULL AS DESCRIPTOR )
+    | SqlArgumentDescriptor of Expression
+
+// 10.4 <SQL argument list> ::=
+//     ( [ <SQL argument> [ { <comma> <SQL argument> }... ] [ <copartition clause> ] ] )
+and SqlArgumentList =
+    { Arguments: SqlArgument list
+      // <copartition clause> ::= COPARTITION <copartition list> — each specification is a
+      // ( <range variable> [ , ... ] ) group.
+      Copartition: Expression list list option }
+
+// 10.4 <table argument> ::= <table argument proper>
+//     [ [ AS ] <table argument correlation name> [ ( <derived column list> ) ] ]
+//     [ PARTITION BY <table argument partitioning list> ]
+//     [ PRUNE WHEN EMPTY | KEEP WHEN EMPTY ]
+//     [ ORDER BY <table argument ordering list> ]
+and TableArgument =
+    { Table: TableArgumentProper
+      // [ [ AS ] <table argument correlation name> [ ( <derived column list> ) ] ]
+      Correlation: (Expression * Expression list option) option
+      // PARTITION BY <column reference> | ( [ <column reference> [ , ... ] ] )
+      PartitionBy: Expression list option
+      // PRUNE WHEN EMPTY | KEEP WHEN EMPTY
+      Pruning: TableArgumentPruning option
+      // ORDER BY <table argument ordering column> | ( <ordering column> [ , ... ] )
+      OrderBy: (Expression * bool * NullsOrder option) list option }
+
+// 10.4 <table argument proper> ::= TABLE ( <table or query name> ) | TABLE <table subquery>
+//     | <table function invocation>
+and TableArgumentProper =
+    | TableArgumentName of Expression
+    | TableArgumentTableQuery of Query
+    | TableArgumentInvocation of Expression
+
+// 10.4 <table argument pruning> ::= PRUNE WHEN EMPTY | KEEP WHEN EMPTY
+and TableArgumentPruning =
+    | PruneWhenEmpty
+    | KeepWhenEmpty
 
 // 10.6 <routine type> ::= ROUTINE | FUNCTION | PROCEDURE
 //     | [ INSTANCE | STATIC | CONSTRUCTOR ] METHOD
@@ -1831,13 +1831,6 @@ and Privileges =
     | AllPrivileges
     | Actions of PrivilegeAction list
 
-// 12.7 <revoke option extension> ::= GRANT OPTION FOR | HIERARCHY OPTION FOR
-// (None covers the absent case)
-and RevokeOptionExtension =
-    | NoOption
-    | GrantOptionFor
-    | HierarchyOptionFor
-
 // 12.3 <grantor> ::= CURRENT_USER | CURRENT_ROLE — a closed keyword set; an
 // <authorization identifier> is not a <grantor>.
 and Grantor =
@@ -1873,6 +1866,13 @@ and GrantPrivilegeStatement =
       WithGrantOption: bool
       // 12.3 <grantor> — None when the GRANTED BY clause is absent
       Grantor: Grantor option }
+
+// 12.7 <revoke option extension> ::= GRANT OPTION FOR | HIERARCHY OPTION FOR
+// (None covers the absent case)
+and RevokeOptionExtension =
+    | NoOption
+    | GrantOptionFor
+    | HierarchyOptionFor
 
 // 12.7 <revoke privilege statement> — payload shared by the flat StatementKind cases
 // (RevokeObject / RevokeTable / … / RevokeRoutine).

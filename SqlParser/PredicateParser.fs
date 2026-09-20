@@ -4,20 +4,40 @@ open FParsec
 open SqlParser.Lexer
 open SqlParser.ExpressionParser
 
-// 8 Predicates
-//
-// This module is compiled after QueryParser.fs (clause order §6 → §7 → §8), but §6.3
-// <value expression primary>, §6.39 <boolean test> and §6.12 <when operand> consume these
-// parsers. The reverse dependency is resolved with five forward refs declared in
-// ExpressionParser.fs and wired in SqlParser.fs: pPredicate (the 8.1 postfix),
-// pPredicateNoBooleanTest (8.1 without 6.39), pBooleanTestPart2 (6.39), pWhenOperandPart2
-// (6.12) and pPredicatePrimary (the 8.9/8.10/8.11/8.20/8.23 atoms bundled into one). The
-// local definitions shadow the opened forward refs of the same name — the `Ref` cells are
-// the same objects.
 module PredicateParser =
+    // 8.2 <comparison predicate> ::= <row value predicand> <comp op> <row value predicand>
+    // 8.9 <quantified comparison predicate> — rewrites <comp op> <quantifier> <table subquery> on the right
+    // The addInfix calls below register the six <comp op>s on ExpressionParser's `opp` — the
+    // operators belong to `opp`, but the rules are 8.2's, so the registrations live here. The
+    // right-hand <quantifier> <table subquery> term is built by pPredicatePrimary's local
+    // pQuantifiedSubqueryTerm below.
+    let private comparisonOp op x (y: Expression) =
+        match y.Kind with
+        | QuantifiedSubquery(quant, q) -> QuantifiedComparison(op, quant, x, q)
+        | _ -> BinaryOp(op, x, y)
+
+    // 8.2 <comp op> ::= <equals operator> | <not equals operator> | <less than operator> | <less than or equals operator> | <greater than operator> | <greater than or equals operator>
+    addInfix "=" 5 Associativity.Left (comparisonOp Equal)
+    addInfix "<>" 5 Associativity.Left (comparisonOp NotEqual)
+    addInfix "<" 5 Associativity.Left (comparisonOp LessThan)
+    addInfix "<=" 5 Associativity.Left (comparisonOp LessThanOrEqual)
+    addInfix ">" 5 Associativity.Left (comparisonOp GreaterThan)
+    addInfix ">=" 5 Associativity.Left (comparisonOp GreaterThanOrEqual)
+
+    // 8.2 <comp op> — used by the 6.12 <when operand> comparison part 2 only: under 8.1 a
+    // comparison is an `opp` infix operator (ExpressionParser.fs), not a predicate suffix.
+    let private pComparisonOperator =
+        choice
+            [ attempt (token (pstring "<=")) >>% BinaryOperator.LessThanOrEqual
+              attempt (token (pstring "<>")) >>% BinaryOperator.NotEqual
+              attempt (token (pstring ">=")) >>% BinaryOperator.GreaterThanOrEqual
+              attempt (token (pstring "=")) >>% BinaryOperator.Equal
+              attempt (token (pstring "<")) >>% BinaryOperator.LessThan
+              attempt (token (pstring ">")) >>% BinaryOperator.GreaterThan ]
+
     // 8.20 <period predicate> operators (OVERLAPS is covered by the existing Overlaps case).
     // Module-level because pPredicatePrimary needs a lookahead of it.
-    let pPeriodPredicateOperator =
+    let private pPeriodPredicateOperator =
         choice
             [ pKeyword "EQUALS" >>% PeriodEquals
               pKeyword "CONTAINS" >>% PeriodContains
@@ -28,7 +48,7 @@ module PredicateParser =
 
     // 8.20 <period predicand> ::= <period reference> | PERIOD ( <period start value>, <period end value> )
     // Both slots are <datetime value expression> per the grammar, not general expressions.
-    let pPeriodPredicand =
+    let private pPeriodPredicand =
         pKeyword "PERIOD"
         >>. between
                 (token (pstring "("))
@@ -36,33 +56,6 @@ module PredicateParser =
                 (pDatetimeValueExpression .>> token (pstring ",") .>>. pDatetimeValueExpression)
         |>> (fun (start, finish) -> PeriodValue(start, finish))
         |> withExprPosition
-
-    // 6.39 <boolean test> ::= <boolean primary> IS [ NOT ] { TRUE | FALSE | UNKNOWN }
-    // The only predicate suffix that may follow a boolean primary, so ExpressionParser's
-    // pBooleanTestSuffixes offers it alone once the accumulated expression is a top-level
-    // boolean. `IS [ NOT ] NULL` (8.8) is a separate alternative (pNullPart2 below).
-    let pBooleanTestPart2 =
-        attempt (
-            pKeyword "IS" >>. opt (pKeyword "NOT")
-            .>>. (pKeyword "TRUE" >>% Some true
-                  <|> (pKeyword "FALSE" >>% Some false)
-                  <|> (pKeyword "UNKNOWN" >>% None))
-            |>> fun (isNot, b) ->
-                fun e ->
-                    { Expression.Kind = IsBoolean(e, Option.isSome isNot, b)
-                      Pos = e.Pos }
-        )
-
-    // 8.2 <comp op> — used by the 6.12 <when operand> comparison part 2 only: under 8.1 a
-    // comparison is an `opp` infix operator (ExpressionParser.fs), not a predicate suffix.
-    let pComparisonOperator =
-        choice
-            [ attempt (token (pstring "<=")) >>% BinaryOperator.LessThanOrEqual
-              attempt (token (pstring "<>")) >>% BinaryOperator.NotEqual
-              attempt (token (pstring ">=")) >>% BinaryOperator.GreaterThanOrEqual
-              attempt (token (pstring "=")) >>% BinaryOperator.Equal
-              attempt (token (pstring "<")) >>% BinaryOperator.LessThan
-              attempt (token (pstring ">")) >>% BinaryOperator.GreaterThan ]
 
     // 8.1 <predicate> — a postfix predicate applied to a <value expression primary>:
     //   <between predicate>, <in predicate>, <null predicate>, <distinct predicate>,
@@ -76,7 +69,7 @@ module PredicateParser =
     // the 6.39 <boolean test>, which needs a <boolean primary> on its left (ExpressionParser's
     // pBooleanTestSuffixes decides between the three forms). The 8.19/8.20 sub-parsers are
     // local because this is their only consumer.
-    let pPredicateImpl forWhenOperand includeBooleanTest pExpr =
+    let private pPredicateImpl forWhenOperand includeBooleanTest pExpr =
         // A predicate part-2 operand is a <row value predicand>: a TOP-LEVEL
         // boolean-producing expression (comparison, AND/OR/NOT, or another predicate)
         // is rejected. A PARENTHESIZED expression is a 6.39 <boolean predicand> and stays
@@ -88,6 +81,31 @@ module PredicateParser =
                     fail "a predicate part-2 operand must be a <row value predicand>"
                 else
                     preturn e
+
+        // 7.2 <row value expression> ::= <row value special case> | <explicit row value constructor>
+        //   <row value special case> ::= <nonparenthesized value expression primary>
+        // A parenthesized value expression (`(1)`) is a <value expression primary> but NOT a
+        // <row value special case>; a term (`1 + 1`) or a signed primary is not a primary at all.
+        // An explicit row value constructor (including a <row subquery>) is the other alternative.
+        let isRowValueExpression e =
+            not (isBooleanTopLevel e)
+            && match e.Kind with
+               | RowValueConstructor _ -> true // <explicit row value constructor>
+               | SubqueryExpression _ -> true // <row subquery>
+               | Parenthesized _ -> false // <parenthesized value expression>
+               | BinaryOp _ -> false // a term, not a primary
+               | UnaryOp _ -> false // [ <sign> ] <numeric primary>, not a primary
+               | _ -> true // a <nonparenthesized value expression primary>
+
+        // A grammar slot that requires a *value* expression (8.5/8.6/8.7 pattern and escape,
+        // 8.16/8.17 multiset operand): a boolean and an explicit row value constructor are both
+        // excluded, so `'a' LIKE (1, 2)` is rejected. Character-vs-numeric distinctions stay
+        // semantic — a parse-only library cannot see them.
+        let isValueShaped e =
+            not (isBooleanTopLevel e)
+            && match e.Kind with
+               | RowValueConstructor _ -> false
+               | _ -> true
 
         // A slot whose grammar is a *value* expression — the <character pattern> and
         // <escape character> of 8.5, the <similar pattern> of 8.6, the <XQuery pattern> /
@@ -102,22 +120,37 @@ module PredicateParser =
                 else
                     fail "this operand must be a <value expression> (8.5/8.6/8.7)"
 
-        // 8.4 <in value list> ::= <row value expression> [ { <comma> <row value expression> }... ]
-        // `1 + 1` (a term) and `(1)` (a parenthesized value expression) are neither a
-        // <row value special case> nor an <explicit row value constructor>.
-        let pInValueItem =
-            pExpr
-            >>= fun e ->
-                if isRowValueExpression e then
-                    preturn e
-                else
-                    fail "an <in value list> element must be a <row value expression> (8.4)"
+        // 8.2 <comparison predicate part 2> ::= <comp op> <row value predicand>
+        // 8.9 <quantified comparison predicate part 2> ::= <comp op> <quantifier> <table subquery>
+        // 6.12 <when operand> only (see the `forWhenOperand` note above); the <case operand>
+        // becomes the left-hand <row value predicand>. The quantifier is local because this
+        // is its only consumer.
+        let pComparisonPart2 =
+            // 8.9 <quantifier> ::= ALL | SOME | ANY
+            let pQuantifier =
+                choice
+                    [ pKeyword "ANY" >>% Quantifier.Any
+                      pKeyword "SOME" >>% Quantifier.SomeQuantifier
+                      pKeyword "ALL" >>% Quantifier.All ]
 
-        // 8.19 <user-defined type specification> ::= <user-defined type name> | ONLY <user-defined type name>
-        let pUserDefinedTypeSpecification =
-            choice
-                [ pKeyword "ONLY" >>. pSchemaQualifiedNameExpression |>> Exclusive
-                  pSchemaQualifiedNameExpression |>> Inclusive ]
+            attempt (
+                pComparisonOperator
+                .>>. (attempt (
+                          pQuantifier
+                          .>>. between (token (pstring "(")) (token (pstring ")")) QueryParser.pQueryExpression
+                      )
+                      |>> Choice1Of2
+                      <|> (pOperand |>> Choice2Of2))
+                |>> fun (op, operand) ->
+                    fun e ->
+                        match operand with
+                        | Choice1Of2(quant, q) ->
+                            { Expression.Kind = QuantifiedComparison(op, quant, e, q)
+                              Pos = e.Pos }
+                        | Choice2Of2 value ->
+                            { Expression.Kind = BinaryOp(op, e, value)
+                              Pos = e.Pos }
+            )
 
         // 8.3 <between predicate part 2> ::= [ NOT ] BETWEEN [ ASYMMETRIC | SYMMETRIC ]
         //     <row value predicand> AND <row value predicand>
@@ -135,6 +168,17 @@ module PredicateParser =
                           Pos = e.Pos }
             )
 
+        // 8.4 <in value list> ::= <row value expression> [ { <comma> <row value expression> }... ]
+        // `1 + 1` (a term) and `(1)` (a parenthesized value expression) are neither a
+        // <row value special case> nor an <explicit row value constructor>.
+        let pInValueItem =
+            pExpr
+            >>= fun e ->
+                if isRowValueExpression e then
+                    preturn e
+                else
+                    fail "an <in value list> element must be a <row value expression> (8.4)"
+
         // 8.4 <in predicate part 2> ::= [ NOT ] IN { <table subquery> | <in predicate value> }
         let pInPart2 =
             attempt (
@@ -142,7 +186,7 @@ module PredicateParser =
                 .>>. between
                     (token (pstring "("))
                     (token (pstring ")"))
-                    (attempt pQuery |>> Choice1Of2
+                    (attempt QueryParser.pQueryExpression |>> Choice1Of2
                      <|> (sepBy1 pInValueItem (token (pstring ",")) |>> Choice2Of2))
                 |>> fun (isNot, res) ->
                     fun e ->
@@ -152,39 +196,6 @@ module PredicateParser =
                             | Choice2Of2 l -> InList(e, Option.isSome isNot, l)
 
                         { Expression.Kind = kind; Pos = e.Pos }
-            )
-
-        // 8.8 <null predicate part 2> ::= IS [ NOT ] NULL
-        let pNullPart2 =
-            attempt (
-                pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "NULL"
-                |>> fun isNot ->
-                    fun e ->
-                        { Expression.Kind = IsNull(e, Option.isSome isNot)
-                          Pos = e.Pos }
-            )
-
-        // 8.15 <distinct predicate> ::= <row value predicand> IS [ NOT ] DISTINCT FROM <row value predicand>
-        let pDistinctPart2 =
-            attempt (
-                pKeyword "IS" >>. opt (pKeyword "NOT")
-                .>> pKeyword "DISTINCT"
-                .>> pKeyword "FROM"
-                .>>. pOperand
-                |>> fun (isNot, r) ->
-                    fun l ->
-                        { Expression.Kind = IsDistinctFrom(l, Option.isSome isNot, r)
-                          Pos = l.Pos }
-            )
-
-        // 8.14 <overlaps predicate> ::= <row value predicand 1> OVERLAPS <row value predicand 2>
-        let pOverlapsPart2 =
-            attempt (
-                pKeyword "OVERLAPS" >>. pOperand
-                |>> fun r ->
-                    fun l ->
-                        { Expression.Kind = Overlaps(l, r)
-                          Pos = l.Pos }
             )
 
         // 8.5 <like predicate> ::= <character string value expression> [ NOT ] LIKE <character string pattern> [ ESCAPE <escape character> ]
@@ -213,13 +224,26 @@ module PredicateParser =
                           Pos = l.Pos }
             )
 
-        // 10.7 <collate clause> ::= COLLATE <collation name>
-        let pCollatePart2 =
+        // 8.7 <regex like predicate> ::= [ NOT ] LIKE_REGEX <XQuery pattern>
+        //     [ FLAG <XQuery option flag> ]
+        let pRegexLikePart2 =
             attempt (
-                pKeyword "COLLATE" >>. pIdentifierExpression
-                |>> fun collation ->
+                opt (pKeyword "NOT") .>> pKeyword "LIKE_REGEX"
+                .>>. pValueOperand
+                .>>. opt (pKeyword "FLAG" >>. pValueOperand)
+                |>> fun ((isNot, pattern), flag) ->
                     fun e ->
-                        { Expression.Kind = Collate(e, collation)
+                        { Expression.Kind = RegexLike(e, Option.isSome isNot, pattern, flag)
+                          Pos = e.Pos }
+            )
+
+        // 8.8 <null predicate part 2> ::= IS [ NOT ] NULL
+        let pNullPart2 =
+            attempt (
+                pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "NULL"
+                |>> fun isNot ->
+                    fun e ->
+                        { Expression.Kind = IsNull(e, Option.isSome isNot)
                           Pos = e.Pos }
             )
 
@@ -234,61 +258,6 @@ module PredicateParser =
                           Pos = e.Pos }
             )
 
-        // 8.19 <type predicate> ::= IS [ NOT ] OF ( <type list> )
-        let pTypePart2 =
-            attempt (
-                pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "OF"
-                .>>. between
-                    (token (pstring "("))
-                    (token (pstring ")"))
-                    (sepBy1 pUserDefinedTypeSpecification (token (pstring ",")))
-                |>> fun (isNot, types) ->
-                    fun e ->
-                        { Expression.Kind = IsOfType(e, Option.isSome isNot, types)
-                          Pos = e.Pos }
-            )
-
-        // 8.22 <JSON predicate> ::= <string value expression> [ <JSON input clause> ]
-        //     IS [ NOT ] JSON [ <JSON predicate type constraint> ] [ <JSON key uniqueness constraint> ]
-        // The optional FORMAT slot is part of this suffix parser: pPredicate applies the
-        // whole suffix (FORMAT included) to the already-parsed part-1 operand.
-        let pJsonPart2 =
-            attempt (
-                opt pJsonInputClause
-                .>>. (pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "JSON")
-                .>>. opt (
-                    pKeyword "VALUE" >>% JsonTypeValue
-                    <|> (pKeyword "ARRAY" >>% JsonTypeArray)
-                    <|> (pKeyword "OBJECT" >>% JsonTypeObject)
-                    <|> (pKeyword "SCALAR" >>% JsonTypeScalar)
-                )
-                .>>. opt (
-                    attempt (
-                        pKeyword "WITH" >>% Some true <|> (pKeyword "WITHOUT" >>% Some false)
-                        .>> pKeyword "UNIQUE"
-                        .>> opt (pKeyword "KEYS")
-                    )
-                )
-                |>> fun (((format, isNot), typeConstraint), unique) ->
-                    fun e ->
-                        { Expression.Kind =
-                            IsJson(e, format, Option.isSome isNot, typeConstraint, Option.flatten unique)
-                          Pos = e.Pos }
-            )
-
-        // 8.7 <regex like predicate> ::= [ NOT ] LIKE_REGEX <XQuery pattern>
-        //     [ FLAG <XQuery option flag> ]
-        let pRegexLikePart2 =
-            attempt (
-                opt (pKeyword "NOT") .>> pKeyword "LIKE_REGEX"
-                .>>. pValueOperand
-                .>>. opt (pKeyword "FLAG" >>. pValueOperand)
-                |>> fun ((isNot, pattern), flag) ->
-                    fun e ->
-                        { Expression.Kind = RegexLike(e, Option.isSome isNot, pattern, flag)
-                          Pos = e.Pos }
-            )
-
         // 8.13 <match predicate> ::= MATCH [ UNIQUE ] [ SIMPLE | PARTIAL | FULL ]
         //     <table subquery>
         let pMatchPart2 =
@@ -299,11 +268,34 @@ module PredicateParser =
                     <|> (pKeyword "PARTIAL" >>% Partial)
                     <|> (pKeyword "FULL" >>% Full)
                 )
-                .>>. between (token (pstring "(")) (token (pstring ")")) pQuery
+                .>>. between (token (pstring "(")) (token (pstring ")")) QueryParser.pQueryExpression
                 |>> fun ((isUnique, matchOption), q) ->
                     fun e ->
                         { Expression.Kind = Match(e, Option.isSome isUnique, matchOption, q)
                           Pos = e.Pos }
+            )
+
+        // 8.14 <overlaps predicate> ::= <row value predicand 1> OVERLAPS <row value predicand 2>
+        let pOverlapsPart2 =
+            attempt (
+                pKeyword "OVERLAPS" >>. pOperand
+                |>> fun r ->
+                    fun l ->
+                        { Expression.Kind = Overlaps(l, r)
+                          Pos = l.Pos }
+            )
+
+        // 8.15 <distinct predicate> ::= <row value predicand> IS [ NOT ] DISTINCT FROM <row value predicand>
+        let pDistinctPart2 =
+            attempt (
+                pKeyword "IS" >>. opt (pKeyword "NOT")
+                .>> pKeyword "DISTINCT"
+                .>> pKeyword "FROM"
+                .>>. pOperand
+                |>> fun (isNot, r) ->
+                    fun l ->
+                        { Expression.Kind = IsDistinctFrom(l, Option.isSome isNot, r)
+                          Pos = l.Pos }
             )
 
         // 8.16 <member predicate> ::= [ NOT ] MEMBER [ OF ] <multiset value expression>
@@ -338,6 +330,26 @@ module PredicateParser =
                           Pos = e.Pos }
             )
 
+        // 8.19 <user-defined type specification> ::= <user-defined type name> | ONLY <user-defined type name>
+        let pUserDefinedTypeSpecification =
+            choice
+                [ pKeyword "ONLY" >>. pSchemaQualifiedNameExpression |>> Exclusive
+                  pSchemaQualifiedNameExpression |>> Inclusive ]
+
+        // 8.19 <type predicate> ::= IS [ NOT ] OF ( <type list> )
+        let pTypePart2 =
+            attempt (
+                pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "OF"
+                .>>. between
+                    (token (pstring "("))
+                    (token (pstring ")"))
+                    (sepBy1 pUserDefinedTypeSpecification (token (pstring ",")))
+                |>> fun (isNot, types) ->
+                    fun e ->
+                        { Expression.Kind = IsOfType(e, Option.isSome isNot, types)
+                          Pos = e.Pos }
+            )
+
         // 8.20 <period predicate> ::= <period predicate operator> <period predicand>
         // EQUALS / PRECEDES / SUCCEEDS / IMMEDIATELY ... require a <period predicand>
         // on the right; only CONTAINS admits a <point in time> (<datetime value
@@ -361,33 +373,46 @@ module PredicateParser =
                               Pos = left.Pos }
             )
 
-        // 8.2 <comparison predicate part 2> ::= <comp op> <row value predicand>
-        // 8.9 <quantified comparison predicate part 2> ::= <comp op> <quantifier> <table subquery>
-        // 6.12 <when operand> only (see the `forWhenOperand` note above); the <case operand>
-        // becomes the left-hand <row value predicand>.
-        let pQuantifier =
-            choice
-                [ pKeyword "ANY" >>% Quantifier.Any
-                  pKeyword "SOME" >>% Quantifier.SomeQuantifier
-                  pKeyword "ALL" >>% Quantifier.All ]
-
-        let pComparisonPart2 =
+        // 8.22 <JSON predicate> ::= <string value expression> [ <JSON input clause> ]
+        //     IS [ NOT ] JSON [ <JSON predicate type constraint> ] [ <JSON key uniqueness constraint> ]
+        // The optional FORMAT slot is part of this suffix parser: pPredicate applies the
+        // whole suffix (FORMAT included) to the already-parsed part-1 operand.
+        let pJsonPart2 =
             attempt (
-                pComparisonOperator
-                .>>. (attempt (pQuantifier .>>. between (token (pstring "(")) (token (pstring ")")) pQuery)
-                      |>> Choice1Of2
-                      <|> (pOperand |>> Choice2Of2))
-                |>> fun (op, operand) ->
+                opt pJsonInputClause
+                .>>. (pKeyword "IS" >>. opt (pKeyword "NOT") .>> pKeyword "JSON")
+                .>>. opt (
+                    pKeyword "VALUE" >>% JsonTypeValue
+                    <|> (pKeyword "ARRAY" >>% JsonTypeArray)
+                    <|> (pKeyword "OBJECT" >>% JsonTypeObject)
+                    <|> (pKeyword "SCALAR" >>% JsonTypeScalar)
+                )
+                .>>. opt (
+                    attempt (
+                        pKeyword "WITH" >>% Some true <|> (pKeyword "WITHOUT" >>% Some false)
+                        .>> pKeyword "UNIQUE"
+                        .>> opt (pKeyword "KEYS")
+                    )
+                )
+                |>> fun (((format, isNot), typeConstraint), unique) ->
                     fun e ->
-                        match operand with
-                        | Choice1Of2(quant, q) ->
-                            { Expression.Kind = QuantifiedComparison(op, quant, e, q)
-                              Pos = e.Pos }
-                        | Choice2Of2 value ->
-                            { Expression.Kind = BinaryOp(op, e, value)
-                              Pos = e.Pos }
+                        { Expression.Kind =
+                            IsJson(e, format, Option.isSome isNot, typeConstraint, Option.flatten unique)
+                          Pos = e.Pos }
             )
 
+        // 10.7 <collate clause> ::= COLLATE <collation name>
+        let pCollatePart2 =
+            attempt (
+                pKeyword "COLLATE" >>. pIdentifierExpression
+                |>> fun collation ->
+                    fun e ->
+                        { Expression.Kind = Collate(e, collation)
+                          Pos = e.Pos }
+            )
+
+        // The alternatives in the two lists below are in the historical dispatch order
+        // (every one of them backtracks); the definitions above follow the clause numbers.
         let pPredicateBranches =
             [ pBetweenPart2; pInPart2; pNullPart2 ]
             @ (if includeBooleanTest then [ pBooleanTestPart2 ] else [])
@@ -438,28 +463,30 @@ module PredicateParser =
     let pWhenOperandPart2 pExpr = pPredicateImpl true false pExpr
 
     // 8.10 <exists predicate> ::= EXISTS ( <subquery> )
-    let pExistsPredicate =
-        pKeyword "EXISTS" >>. between (token (pstring "(")) (token (pstring ")")) pQuery
+    let private pExistsPredicate =
+        pKeyword "EXISTS"
+        >>. between (token (pstring "(")) (token (pstring ")")) QueryParser.pQueryExpression
         |>> Exists
         |> withExprPosition
 
     // 8.11 <unique predicate> ::= UNIQUE ( <subquery> )
-    let pUniquePredicate =
-        pKeyword "UNIQUE" >>. between (token (pstring "(")) (token (pstring ")")) pQuery
+    let private pUniquePredicate =
+        pKeyword "UNIQUE"
+        >>. between (token (pstring "(")) (token (pstring ")")) QueryParser.pQueryExpression
         |>> ExpressionKind.Unique
         |> withExprPosition
 
-    // 8.23 <JSON exists error behavior> ::= TRUE | FALSE | UNKNOWN | ERROR
-    let pJsonExistsErrorBehavior =
-        choice
-            [ pKeyword "TRUE" >>% JsonExistsTrue
-              pKeyword "FALSE" >>% JsonExistsFalse
-              pKeyword "UNKNOWN" >>% JsonExistsUnknown
-              pKeyword "ERROR" >>% JsonExistsError ]
-
     // 8.23 <JSON exists predicate> ::= JSON_EXISTS ( <JSON API common syntax>
     //     [ <JSON exists error behavior> ON ERROR ] )
-    let pJsonExistsPredicate =
+    let private pJsonExistsPredicate =
+        // 8.23 <JSON exists error behavior> ::= TRUE | FALSE | UNKNOWN | ERROR
+        let pJsonExistsErrorBehavior =
+            choice
+                [ pKeyword "TRUE" >>% JsonExistsTrue
+                  pKeyword "FALSE" >>% JsonExistsFalse
+                  pKeyword "UNKNOWN" >>% JsonExistsUnknown
+                  pKeyword "ERROR" >>% JsonExistsError ]
+
         pKeyword "JSON_EXISTS"
         >>. between
                 (token (pstring "("))
@@ -474,7 +501,7 @@ module PredicateParser =
     // so ExpressionParser needs one forward ref instead of five. This is not a grammar rule:
     // it is a wiring helper. Each alternative backtracks. The 8.9 sub-parsers are local
     // because this is their only consumer.
-    let pPredicatePrimary =
+    let private pPredicatePrimary =
         // 8.9 <quantifier> ::= ALL | SOME | ANY
         let pQuantifier =
             choice
@@ -485,7 +512,8 @@ module PredicateParser =
         // Only valid as the right operand of a comparison operator (see comparisonOp in ExpressionParser).
         // 8.9 <quantified comparison predicate> — the ANY | SOME | ALL subquery term
         let pQuantifiedSubqueryTerm =
-            pQuantifier .>>. between (token (pstring "(")) (token (pstring ")")) pQuery
+            pQuantifier
+            .>>. between (token (pstring "(")) (token (pstring ")")) QueryParser.pQueryExpression
             |>> fun (quant, q) -> QuantifiedSubquery(quant, q)
             |> withExprPosition
 
@@ -498,3 +526,5 @@ module PredicateParser =
               // only inside a <period predicate>: require a period-predicate operator
               // to follow, so it cannot leak as a standalone atom.
               attempt (pPeriodPredicand .>> lookAhead pPeriodPredicateOperator) ]
+
+    pPredicatePrimaryRef.Value <- pPredicatePrimary

@@ -5,19 +5,19 @@ open SqlParser.Lexer
 open SqlParser.ExpressionParser
 
 module TransactionParser =
-    // 17.3 <level of isolation> ::= READ UNCOMMITTED | READ COMMITTED | REPEATABLE READ | SERIALIZABLE
-    let pLevelOfIsolation =
-        choice
-            [ attempt (pKeyword "READ" >>. pKeyword "UNCOMMITTED" >>% ReadUncommitted)
-              attempt (pKeyword "READ" >>. pKeyword "COMMITTED" >>% ReadCommitted)
-              attempt (pKeyword "REPEATABLE" >>. pKeyword "READ" >>% RepeatableRead)
-              attempt (pKeyword "SERIALIZABLE" >>% Serializable) ]
-
     // 17.3 <transaction mode> ::= <isolation level> | <transaction access mode> | <diagnostics size>
     // <isolation level> ::= ISOLATION LEVEL <level of isolation>
     // <transaction access mode> ::= READ ONLY | READ WRITE
     // <diagnostics size> ::= DIAGNOSTICS SIZE <number of conditions>
     let pTransactionMode =
+        // 17.3 <level of isolation> ::= READ UNCOMMITTED | READ COMMITTED | REPEATABLE READ | SERIALIZABLE
+        let pLevelOfIsolation =
+            choice
+                [ attempt (pKeyword "READ" >>. pKeyword "UNCOMMITTED" >>% ReadUncommitted)
+                  attempt (pKeyword "READ" >>. pKeyword "COMMITTED" >>% ReadCommitted)
+                  attempt (pKeyword "REPEATABLE" >>. pKeyword "READ" >>% RepeatableRead)
+                  attempt (pKeyword "SERIALIZABLE" >>% Serializable) ]
+
         choice
             [ attempt (pKeyword "ISOLATION" >>. pKeyword "LEVEL" >>. pLevelOfIsolation |>> Isolation)
               attempt (pKeyword "READ" >>. pKeyword "ONLY" >>% AccessMode ReadOnly)
@@ -30,7 +30,8 @@ module TransactionParser =
 
     // 17.3 <transaction characteristics> ::= [ <transaction mode> [ { <comma> <transaction mode> }... ] ]
     // The characteristics themselves are optional: bare `SET TRANSACTION` is valid.
-    let pTransactionCharacteristics = sepBy1 pTransactionMode (token (pstring ","))
+    let private pTransactionCharacteristics =
+        sepBy1 pTransactionMode (token (pstring ","))
 
     // 17.1 <start transaction statement> ::= START TRANSACTION [ <transaction characteristics> ]
     let pStartTransactionStatement =
@@ -62,7 +63,7 @@ module TransactionParser =
         |>> ReleaseSavepoint
 
     // 17.7/17.8 <commit/rollback> chain option ::= AND [ NO ] CHAIN
-    let pChain =
+    let private pChain =
         attempt (pKeyword "AND" >>. pKeyword "NO" >>. pKeyword "CHAIN" >>% Some false)
         <|> attempt (pKeyword "AND" >>. pKeyword "CHAIN" >>% Some true)
         <|> preturn None

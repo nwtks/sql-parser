@@ -28,6 +28,12 @@ let parseStatementFails (sql: string) =
     | Ok _ -> failwithf "Expected parse failure for %s" sql
     | Error _ -> ()
 
+[<Fact>]
+let ``DECLARE cursor name is a local qualified name`` () =
+    // 5.4 <local qualified name> admits only the MODULE qualifier.
+    parseStatement "DECLARE MODULE.c CURSOR FOR SELECT 1 FROM t" |> ignore
+    parseStatementFails "DECLARE a.b CURSOR FOR SELECT 1"
+
 [<Theory>]
 [<InlineData("SENSITIVE", "Sensitive")>]
 [<InlineData("INSENSITIVE", "Insensitive")>]
@@ -167,12 +173,6 @@ let ``FETCH RELATIVE verification`` () =
             { Kind = Identifier "CUR" },
             UsingArguments [ { Kind = Identifier "A" } ]) -> ()
     | res -> Assert.Fail(sprintf "Expected Fetch RELATIVE, got %A" res)
-
-[<Fact>]
-let ``DECLARE cursor name is a local qualified name`` () =
-    // 5.4 <local qualified name> admits only the MODULE qualifier.
-    parseStatement "DECLARE MODULE.c CURSOR FOR SELECT 1 FROM t" |> ignore
-    parseStatementFails "DECLARE a.b CURSOR FOR SELECT 1"
 
 [<Fact>]
 let ``FETCH without INTO is rejected`` () = parseStatementFails "FETCH cur"

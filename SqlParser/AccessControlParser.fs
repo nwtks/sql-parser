@@ -3,23 +3,22 @@ namespace SqlParser
 open FParsec
 open SqlParser.Lexer
 open SqlParser.ExpressionParser
-open SqlParser.SchemaParser
 
 module AccessControlParser =
     // 12.3 <grantor> ::= CURRENT_USER | CURRENT_ROLE — a closed keyword set; an
     // <authorization identifier> is NOT a <grantor>.
-    let pGrantor =
+    let private pGrantor =
         pKeyword "CURRENT_USER" >>% Grantor.CurrentUser
         <|> (pKeyword "CURRENT_ROLE" >>% Grantor.CurrentRole)
 
     // 12.3 <grantee> ::= PUBLIC | <authorization identifier>
-    let pGrantee =
+    let private pGrantee =
         pKeyword "PUBLIC" >>% Grantee.Public
         <|> (pIdentifierExpression |>> Grantee.AuthorizationId)
 
     // 12.3 <privileges> ::= ALL PRIVILEGES | <action> [ { <comma> <action> }... ]
     // The three 12.3 sub-rules below are local because <privileges> is their only consumer.
-    let pPrivileges =
+    let private pPrivileges =
         // 12.3 <privilege column list> ::= ( <column name list> )
         let pPrivilegeColumnList =
             between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
@@ -30,7 +29,7 @@ module AccessControlParser =
         // bare name is NOT a <specific routine designator>, so without this re-check the
         // method list would swallow `SELECT (c1, c2)` instead of the <privilege column list>.
         let pPrivilegeMethodItem =
-            pSpecificRoutineDesignator
+            SchemaParser.pSpecificRoutineDesignator
             >>= fun d ->
                 if d.IsSpecific || d.RoutineType.IsSome then
                     preturn d
@@ -79,7 +78,7 @@ module AccessControlParser =
     // of the routine-designator alternative (None = absent) and the qualified name. The two
     // options are mutually exclusive; pGrantStatement / pRevokeStatement turn them into the
     // flat StatementKind cases.
-    let pObjectName =
+    let private pObjectName =
         let pKind =
             choice
                 [ pKeyword "TABLE" >>% ObjectKind.Table
@@ -96,7 +95,7 @@ module AccessControlParser =
         // pDropStatement shares) is used so the <routine type> is kept in the AST.
         choice
             [ attempt (
-                  pRoutineType .>>. pSchemaQualifiedNameExpression
+                  SchemaParser.pRoutineType .>>. pSchemaQualifiedNameExpression
                   |>> fun (rt, name) -> None, Some rt, name
               )
               attempt (
@@ -153,20 +152,20 @@ module AccessControlParser =
         .>>. opt (pKeyword "WITH" >>. pKeyword "ADMIN" >>. pGrantor)
         |>> fun (name, grantor) -> CreateRole(name, grantor)
 
-    // 12.7 <revoke statement> ::= <revoke privilege statement> | <revoke role statement>
-    // 12.7 <revoke option extension> ::= GRANT OPTION FOR | HIERARCHY OPTION FOR
-    let pRevokeOptionExtension =
-        choice
-            [ attempt (pKeyword "GRANT" >>. pKeyword "OPTION" >>. pKeyword "FOR" >>% GrantOptionFor)
-              attempt (
-                  pKeyword "HIERARCHY" >>. pKeyword "OPTION" >>. pKeyword "FOR"
-                  >>% HierarchyOptionFor
-              ) ]
-
     // 12.7 <revoke privilege statement> ::= REVOKE [ <revoke option extension> ] <privileges>
     //     FROM <grantee> [ { , <grantee> }... ] [ GRANTED BY <grantor> ] <drop behavior>
     // (12.3 <privileges> ::= <object privileges> ON <object name>)
     let pRevokeStatement =
+        // 12.7 <revoke statement> ::= <revoke privilege statement> | <revoke role statement>
+        // 12.7 <revoke option extension> ::= GRANT OPTION FOR | HIERARCHY OPTION FOR
+        let pRevokeOptionExtension =
+            choice
+                [ attempt (pKeyword "GRANT" >>. pKeyword "OPTION" >>. pKeyword "FOR" >>% GrantOptionFor)
+                  attempt (
+                      pKeyword "HIERARCHY" >>. pKeyword "OPTION" >>. pKeyword "FOR"
+                      >>% HierarchyOptionFor
+                  ) ]
+
         pKeyword "REVOKE"
         >>. choice
                 [ attempt (
@@ -175,7 +174,7 @@ module AccessControlParser =
                       .>> pKeyword "FROM"
                       .>>. sepBy1 pGrantee (token (pstring ","))
                       .>>. opt (attempt (pKeyword "GRANTED" >>. pKeyword "BY" >>. pGrantor))
-                      .>>. pDropBehavior
+                      .>>. SchemaParser.pDropBehavior
                       |>> fun (((((optOpt, privs), (kind, rt, name)), grantees), grantor), cascade) ->
                           let stmt: RevokePrivilegeStatement =
                               { Privileges = privs
@@ -205,7 +204,7 @@ module AccessControlParser =
                       .>> pKeyword "FROM"
                       .>>. sepBy1 pGrantee (token (pstring ","))
                       .>>. opt (attempt (pKeyword "GRANTED" >>. pKeyword "BY" >>. pGrantor))
-                      .>>. pDropBehavior
+                      .>>. SchemaParser.pDropBehavior
                       |>> fun ((((adminFor, roles), grantees), grantor), cascade) ->
                           RevokeRoles(roles, grantees, Option.defaultValue false adminFor, grantor, cascade)
                   ) ]
