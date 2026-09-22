@@ -4,7 +4,7 @@ open Xunit
 open SqlParser
 
 // 22.1 <direct SQL statement> requires a trailing <semicolon>.
-// 7.16 <table expression> requires a <from clause>: bare expressions are wrapped
+// 7.4 <table expression> requires a <from clause>: bare expressions are wrapped
 // in "SELECT ... FROM t", and SELECT statements without a top-level FROM get one
 // appended (a FROM inside parentheses does not count).
 let private hasOuterFrom (s: string) =
@@ -395,6 +395,14 @@ let ``Period predicate verification`` () =
     match parse "SELECT p1 SUCCEEDS p2" with
     | PeriodPredicate(PeriodSucceeds, { Kind = Identifier "P1" }, { Kind = Identifier "P2" }) -> ()
     | res -> Assert.Fail(sprintf "Expected PeriodSucceeds, got %A" res)
+
+    // 8.20 <period reference> is a <basic identifier chain> — qualified names
+    // are valid on both sides of a non-CONTAINS period predicate.
+    match parse "SELECT a.p EQUALS b.p2" with
+    | PeriodPredicate(PeriodEquals,
+                      { Kind = ColumnReference [ "A"; "P" ] },
+                      { Kind = ColumnReference [ "B"; "P2" ] }) -> ()
+    | res -> Assert.Fail(sprintf "Expected PeriodEquals with qualified names, got %A" res)
 
     // The left operand of a <period predicate> is a <period predicand> — a <period
     // reference> (a plain identifier chain) or PERIOD ( start, end ).

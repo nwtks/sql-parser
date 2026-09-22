@@ -366,7 +366,8 @@ module PredicateParser =
                          // EQUALS / PRECEDES / SUCCEEDS / IMMEDIATELY ... require a
                          // <period predicand>: PERIOD ( ... ) or a <period reference>
                          // (a plain name).
-                         attempt pPeriodPredicand <|> pIdentifierExpression |>> fun right -> kind, right)
+                          attempt pPeriodPredicand <|> pSchemaQualifiedNameExpression
+                          |>> fun right -> kind, right)
                     |>> fun (kind, right) ->
                         fun left ->
                             { Expression.Kind = PeriodPredicate(kind, left, right)

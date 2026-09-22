@@ -4,13 +4,10 @@ open Xunit
 open SqlParser
 
 // 22.1 <direct SQL statement> requires a trailing <semicolon>.
-// Routine bodies in this file use "SELECT 1" / "SELECT 2"; 7.16 <table expression>
-// requires a <from clause>, so the body statements get one appended here.
+// Routine bodies in this file use RETURN (16.2) or an explicit SELECT ... INTO (14.7),
+// both of which are <SQL procedure statement>s (13.4).
 let parse (sql: string) =
-    let s =
-        sql.TrimEnd().Replace("SELECT 1", "SELECT 1 FROM t").Replace("SELECT 2;", "SELECT 2 FROM t;")
-
-    match SqlParser.parse (s + ";") with
+    match SqlParser.parse (sql.TrimEnd() + ";") with
     | Ok res -> res.Kind
     | Error(ParseError(msg, pos)) -> failwithf "Parse failed: %s at %d:%d" msg pos.Line pos.Column
 
@@ -34,10 +31,10 @@ let private dataTypeParam ty = DataTypeParameter(ty, false)
 [<Fact>]
 let ``LANGUAGE and PARAMETER STYLE are closed keyword sets verification`` () =
     // 10.2 <language name> ::= ADA | C | COBOL | FORTRAN | M | MUMPS | PASCAL | PLI | SQL
-    parseFails "CREATE FUNCTION f () RETURNS INT LANGUAGE JS SELECT 1"
-    parse "CREATE FUNCTION f () RETURNS INT LANGUAGE FORTRAN SELECT 1" |> ignore
+    parseFails "CREATE FUNCTION f () RETURNS INT LANGUAGE JS RETURN 1"
+    parse "CREATE FUNCTION f () RETURNS INT LANGUAGE FORTRAN RETURN 1" |> ignore
     // 11.60 <parameter style> ::= SQL | GENERAL
-    parseFails "CREATE FUNCTION f () RETURNS INT PARAMETER STYLE FOO SELECT 1"
+    parseFails "CREATE FUNCTION f () RETURNS INT PARAMETER STYLE FOO RETURN 1"
 
 [<Fact>]
 let ``column collate clause verification`` () =
@@ -274,12 +271,35 @@ let ``DROP TRANSFORM verification`` () =
 [<Fact>]
 let ``DROP ROUTINE verification`` () =
     match parse "DROP FUNCTION add CASCADE" with
-    | DropRoutine({ Kind = Identifier "ADD" }, true) -> ()
+    | DropRoutine(designator, true) ->
+        Assert.False(designator.IsSpecific)
+        Assert.Equal(Some RoutineType.Function, designator.RoutineType)
+        Assert.Equal(Identifier "ADD", designator.Name.Kind)
+        Assert.Equal(None, designator.DataTypeList)
+        Assert.Equal(None, designator.ForType)
     | res -> Assert.Fail(sprintf "Expected DropRoutine CASCADE, got %A" res)
 
     match parse "DROP PROCEDURE p RESTRICT" with
-    | DropRoutine({ Kind = Identifier "P" }, false) -> ()
+    | DropRoutine(designator, false) ->
+        Assert.False(designator.IsSpecific)
+        Assert.Equal(Some RoutineType.Procedure, designator.RoutineType)
+        Assert.Equal(Identifier "P", designator.Name.Kind)
     | res -> Assert.Fail(sprintf "Expected DropRoutine RESTRICT, got %A" res)
+
+    // 11.62 — full 10.6 <specific routine designator>, including the SPECIFIC form
+    // and a <data type list> that disambiguates overloads.
+    match parse "DROP SPECIFIC FUNCTION f CASCADE" with
+    | DropRoutine(designator, true) ->
+        Assert.True(designator.IsSpecific)
+        Assert.Equal(Some RoutineType.Function, designator.RoutineType)
+        Assert.Equal(Identifier "F", designator.Name.Kind)
+    | res -> Assert.Fail(sprintf "Expected DropRoutine SPECIFIC, got %A" res)
+
+    match parse "DROP FUNCTION f (INT) RESTRICT" with
+    | DropRoutine(designator, false) ->
+        Assert.Equal(Some(RoutineType.Function), designator.RoutineType)
+        Assert.Equal(Some [ Integer ], designator.DataTypeList)
+    | res -> Assert.Fail(sprintf "Expected DropRoutine data type list, got %A" res)
 
 [<Fact>]
 let ``DROP TRIGGER verification`` () =
@@ -473,7 +493,7 @@ let ``CREATE TABLE with table constraints verification`` () =
         Assert.Equal(3, cols.Length)
 
         match pk.Constraint with
-        | TableConstraint.PrimaryKey(Some name, [ idCol ]) ->
+        | TableConstraint.PrimaryKey(Some name, [ idCol ], None) ->
             Assert.Equal(Identifier "PK_ORDERS", name.Kind)
             Assert.Equal(Identifier "ID", idCol.Kind)
         | c -> Assert.Fail(sprintf "Expected PrimaryKey, got %A" c)
@@ -500,12 +520,49 @@ let ``CREATE TABLE with a named UNIQUE table constraint verification`` () =
     match parse "CREATE TABLE t (a INT, b INT, CONSTRAINT uq UNIQUE (a, b))" with
     | CreateTable { Constraints = [ constraintDef ] } ->
         match constraintDef.Constraint with
-        | TableConstraint.Unique(Some name, [ first; second ]) ->
+        | TableConstraint.Unique(Some name, [ first; second ], None) ->
             Assert.Equal(Identifier "UQ", name.Kind)
             Assert.Equal(Identifier "A", first.Kind)
             Assert.Equal(Identifier "B", second.Kind)
         | c -> Assert.Fail(sprintf "Expected Unique, got %A" c)
     | res -> Assert.Fail(sprintf "Expected a UNIQUE table constraint, got %A" res)
+
+[<Fact>]
+let ``UNIQUE without overlap specification verification`` () =
+    // 11.7 <without overlap specification> ::= <application time period name> WITHOUT OVERLAPS
+    match parse "CREATE TABLE t (a INT, b INT, bt TIMESTAMP, UNIQUE (a, b, bt WITHOUT OVERLAPS))" with
+    | CreateTable { Constraints = [ constraintDef ] } ->
+        match constraintDef.Constraint with
+        | TableConstraint.Unique(None, [ _; _ ], Some { Kind = Identifier "BT" }) -> ()
+        | c -> Assert.Fail(sprintf "Expected Unique WITHOUT OVERLAPS, got %A" c)
+    | res -> Assert.Fail(sprintf "Expected CreateTable, got %A" res)
+
+    match parse "CREATE TABLE t (a INT, bt TIMESTAMP, PRIMARY KEY (a, bt WITHOUT OVERLAPS))" with
+    | CreateTable { Constraints = [ constraintDef ] } ->
+        match constraintDef.Constraint with
+        | TableConstraint.PrimaryKey(None, [ _ ], Some { Kind = Identifier "BT" }) -> ()
+        | c -> Assert.Fail(sprintf "Expected PrimaryKey WITHOUT OVERLAPS, got %A" c)
+    | res -> Assert.Fail(sprintf "Expected CreateTable, got %A" res)
+
+    // WITHOUT OVERLAPS requires a preceding comma-separated column list entry.
+    parseFails "CREATE TABLE t (a INT, UNIQUE (a WITHOUT OVERLAPS))"
+
+[<Fact>]
+let ``UNIQUE VALUE verification`` () =
+    // 11.7 UNIQUE ( VALUE ) — VALUE is reserved, distinct from a column named VALUE.
+    match parse "CREATE TABLE t (a INT, UNIQUE (VALUE))" with
+    | CreateTable { Constraints = [ constraintDef ] } ->
+        match constraintDef.Constraint with
+        | TableConstraint.UniqueValue None -> ()
+        | c -> Assert.Fail(sprintf "Expected UniqueValue, got %A" c)
+    | res -> Assert.Fail(sprintf "Expected CreateTable, got %A" res)
+
+    match parse "CREATE TABLE t (a INT, CONSTRAINT uv UNIQUE (VALUE))" with
+    | CreateTable { Constraints = [ constraintDef ] } ->
+        match constraintDef.Constraint with
+        | TableConstraint.UniqueValue(Some { Kind = Identifier "UV" }) -> ()
+        | c -> Assert.Fail(sprintf "Expected named UniqueValue, got %A" c)
+    | res -> Assert.Fail(sprintf "Expected CreateTable, got %A" res)
 
 [<Fact>]
 let ``table constraint with characteristics verification`` () =
@@ -515,7 +572,7 @@ let ``table constraint with characteristics verification`` () =
         Assert.Equal(Some false, constraintDef.Characteristics.Enforced)
 
         match constraintDef.Constraint with
-        | TableConstraint.PrimaryKey(Some name, _) -> Assert.Equal(Identifier "PK", name.Kind)
+        | TableConstraint.PrimaryKey(Some name, _, None) -> Assert.Equal(Identifier "PK", name.Kind)
         | c -> Assert.Fail(sprintf "Expected PrimaryKey, got %A" c)
     | res -> Assert.Fail(sprintf "Expected constraint characteristics, got %A" res)
 
@@ -1206,7 +1263,7 @@ let ``CREATE TRIGGER without action is rejected`` () =
 
 [<Fact>]
 let ``CREATE PROCEDURE with DESCRIPTOR parameter default verification`` () =
-    match parse "CREATE PROCEDURE p (IN x INT DEFAULT DESCRIPTOR (a INT, b)) SELECT 1" with
+    match parse "CREATE PROCEDURE p (IN x INT DEFAULT DESCRIPTOR (a INT, b)) RETURN 1" with
     | CreateProcedure { Parameters = [ param ] } ->
         match param.Default with
         | Some { Kind = DescriptorValueConstructor [ ({ Kind = Identifier "A" }, Some _)
@@ -1248,7 +1305,7 @@ let ``CREATE TYPE attribute default is a default clause`` () =
 [<Fact>]
 let ``CREATE PROCEDURE with DEFAULT NULL parameter verification`` () =
     // 6.5 <null specification> — a legal <parameter default>.
-    match parse "CREATE PROCEDURE p (IN x INT DEFAULT NULL) SELECT 1" with
+    match parse "CREATE PROCEDURE p (IN x INT DEFAULT NULL) RETURN 1" with
     | CreateProcedure { Parameters = [ param ] } ->
         match param.Default with
         | Some { Kind = Literal Null } -> ()
@@ -1258,7 +1315,7 @@ let ``CREATE PROCEDURE with DEFAULT NULL parameter verification`` () =
 [<Fact>]
 let ``SQL parameter type verification`` () =
     // `IN mytype` — the identifier after the mode is the <parameter type>, not a parameter name
-    match parse "CREATE PROCEDURE p (IN mytype) SELECT 1" with
+    match parse "CREATE PROCEDURE p (IN mytype) RETURN 1" with
     | CreateProcedure { Parameters = [ param ] } ->
         Assert.True(Option.isNone param.Name)
 
@@ -1268,7 +1325,7 @@ let ``SQL parameter type verification`` () =
     | res -> Assert.Fail(sprintf "Expected an anonymous UDT parameter, got %A" res)
 
     // a named parameter with a UDT type
-    match parse "CREATE PROCEDURE p (IN p1 mytype) SELECT 1" with
+    match parse "CREATE PROCEDURE p (IN p1 mytype) RETURN 1" with
     | CreateProcedure { Parameters = [ param ] } ->
         Assert.Equal(Some(Identifier "P1"), param.Name |> Option.map (fun e -> e.Kind))
 
@@ -1278,12 +1335,12 @@ let ``SQL parameter type verification`` () =
     | res -> Assert.Fail(sprintf "Expected a named UDT parameter, got %A" res)
 
     // 11.60 <locator indication> ::= AS LOCATOR
-    match parse "CREATE PROCEDURE p (x INT AS LOCATOR) SELECT 1" with
+    match parse "CREATE PROCEDURE p (x INT AS LOCATOR) RETURN 1" with
     | CreateProcedure { Parameters = [ param ] } -> Assert.Equal(DataTypeParameter(Integer, true), param.ParameterType)
     | res -> Assert.Fail(sprintf "Expected AS LOCATOR, got %A" res)
 
     // 11.60 <descriptor parameter type> ::= DESCRIPTOR
-    match parse "CREATE PROCEDURE p (d DESCRIPTOR) SELECT 1" with
+    match parse "CREATE PROCEDURE p (d DESCRIPTOR) RETURN 1" with
     | CreateProcedure { Parameters = [ param ] } ->
         Assert.Equal(Some(Identifier "D"), param.Name |> Option.map (fun e -> e.Kind))
         Assert.Equal(DescriptorParameter, param.ParameterType)
@@ -1291,11 +1348,11 @@ let ``SQL parameter type verification`` () =
 
 [<Fact>]
 let ``generic table parameter type verification`` () =
-    match parse "CREATE PROCEDURE p (t TABLE) SELECT 1" with
+    match parse "CREATE PROCEDURE p (t TABLE) RETURN 1" with
     | CreateProcedure { Parameters = [ param ] } -> Assert.Equal(GenericTableParameter(None, None), param.ParameterType)
     | res -> Assert.Fail(sprintf "Expected TABLE parameter, got %A" res)
 
-    match parse "CREATE PROCEDURE p (t TABLE PASS THROUGH WITH ROW SEMANTICS) SELECT 1" with
+    match parse "CREATE PROCEDURE p (t TABLE PASS THROUGH WITH ROW SEMANTICS) RETURN 1" with
     | CreateProcedure { Parameters = [ param ] } ->
         Assert.Equal(
             GenericTableParameter(Some PassThroughOption.PassThrough, Some GenericTableSemantics.RowSemantics),
@@ -1303,7 +1360,7 @@ let ``generic table parameter type verification`` () =
         )
     | res -> Assert.Fail(sprintf "Expected TABLE PASS THROUGH, got %A" res)
 
-    match parse "CREATE PROCEDURE p (t TABLE NO PASS THROUGH WITH SET SEMANTICS PRUNE ON EMPTY) SELECT 1" with
+    match parse "CREATE PROCEDURE p (t TABLE NO PASS THROUGH WITH SET SEMANTICS PRUNE ON EMPTY) RETURN 1" with
     | CreateProcedure { Parameters = [ param ] } ->
         Assert.Equal(
             GenericTableParameter(
@@ -1314,7 +1371,7 @@ let ``generic table parameter type verification`` () =
         )
     | res -> Assert.Fail(sprintf "Expected TABLE NO PASS THROUGH, got %A" res)
 
-    match parse "CREATE PROCEDURE p (t TABLE WITH SET SEMANTICS KEEP ON EMPTY) SELECT 1" with
+    match parse "CREATE PROCEDURE p (t TABLE WITH SET SEMANTICS KEEP ON EMPTY) RETURN 1" with
     | CreateProcedure { Parameters = [ param ] } ->
         Assert.Equal(
             GenericTableParameter(None, Some(GenericTableSemantics.SetSemantics(Some GenericTablePruning.KeepOnEmpty))),
@@ -1458,19 +1515,19 @@ let ``ALTER TYPE without action is rejected`` () = parseFails "ALTER TYPE my_typ
 [<Fact>]
 let ``CREATE PROCEDURE with rights clause verification`` () =
     // 11.60 <SQL routine spec> ::= [ <rights clause> ] <SQL routine body>
-    match parse "CREATE PROCEDURE p () SQL SECURITY DEFINER SELECT 1" with
-    | CreateProcedure { Body = SqlRoutine(Some RightsClause.SqlSecurityDefiner, Select _) } -> ()
+    match parse "CREATE PROCEDURE p () SQL SECURITY DEFINER RETURN 1" with
+    | CreateProcedure { Body = SqlRoutine(Some RightsClause.SqlSecurityDefiner, Return _) } -> ()
     | res -> Assert.Fail(sprintf "Expected SQL SECURITY DEFINER, got %A" res)
 
-    match parse "CREATE FUNCTION f () RETURNS INT SQL SECURITY INVOKER SELECT 1" with
-    | CreateFunction { Body = SqlRoutine(Some RightsClause.SqlSecurityInvoker, Select _) } -> ()
+    match parse "CREATE FUNCTION f () RETURNS INT SQL SECURITY INVOKER RETURN 1" with
+    | CreateFunction { Body = SqlRoutine(Some RightsClause.SqlSecurityInvoker, Return _) } -> ()
     | res -> Assert.Fail(sprintf "Expected SQL SECURITY INVOKER, got %A" res)
 
-    match parse "CREATE PROCEDURE p () SELECT 1" with
-    | CreateProcedure { Body = SqlRoutine(None, Select _) } -> ()
+    match parse "CREATE PROCEDURE p () RETURN 1" with
+    | CreateProcedure { Body = SqlRoutine(None, Return _) } -> ()
     | res -> Assert.Fail(sprintf "Expected a bare SQL routine spec, got %A" res)
 
-    parseFails "CREATE PROCEDURE p () SQL SECURITY OWNER SELECT 1"
+    parseFails "CREATE PROCEDURE p () SQL SECURITY OWNER RETURN 1"
 
 [<Fact>]
 let ``CREATE PROCEDURE with EXTERNAL body verification`` () =
@@ -1552,17 +1609,17 @@ let ``CREATE FUNCTION with polymorphic table function body verification`` () =
     | res -> Assert.Fail(sprintf "Expected the full PTF body, got %A" res)
 
     // FULFILL WITH is not optional
-    parseFails "CREATE FUNCTION f () RETURNS TABLE PRIVATE (x INT) SELECT 1"
+    parseFails "CREATE FUNCTION f () RETURNS TABLE PRIVATE (x INT) RETURN 1"
 
 [<Fact>]
 let ``CREATE FUNCTION with result sets and null-call verification`` () =
-    match parse "CREATE FUNCTION f () RETURNS INT DYNAMIC RESULT SETS 5 RETURNS NULL ON NULL INPUT SELECT 1" with
+    match parse "CREATE FUNCTION f () RETURNS INT DYNAMIC RESULT SETS 5 RETURNS NULL ON NULL INPUT RETURN 1" with
     | CreateFunction { Returns = returns
                        Characteristics = [ DynamicResultSets 5UL; NullCall true ] } ->
         Assert.Equal(Some(returnsData Integer), returns)
     | res -> Assert.Fail(sprintf "Expected CreateFunction characteristics, got %A" res)
 
-    match parse "CREATE FUNCTION f () RETURNS INT CALLED ON NULL INPUT SELECT 1" with
+    match parse "CREATE FUNCTION f () RETURNS INT CALLED ON NULL INPUT RETURN 1" with
     | CreateFunction { Returns = returns
                        Characteristics = [ NullCall false ] } -> Assert.Equal(Some(returnsData Integer), returns)
     | res -> Assert.Fail(sprintf "Expected CreateFunction CALLED ON NULL INPUT, got %A" res)
@@ -1570,7 +1627,7 @@ let ``CREATE FUNCTION with result sets and null-call verification`` () =
 [<Fact>]
 let ``routine characteristic catalogue verification`` () =
     let sql =
-        "CREATE FUNCTION f () RETURNS INT PARAMETER STYLE SQL SPECIFIC f_spec OLD SAVEPOINT LEVEL NO SQL SELECT 1"
+        "CREATE FUNCTION f () RETURNS INT PARAMETER STYLE SQL SPECIFIC f_spec OLD SAVEPOINT LEVEL NO SQL RETURN 1"
 
     match parse sql with
     | CreateFunction { Characteristics = [ ParameterStyle "SQL"
@@ -1583,25 +1640,25 @@ let ``routine characteristic catalogue verification`` () =
 let ``CREATE routine rejects the 11.61-only NAME characteristic verification`` () =
     // NAME <external routine name> belongs to 11.61 <alter routine characteristic>, not to
     // 11.60 <routine characteristic>.
-    parseFails "CREATE PROCEDURE p () NAME ext SELECT 1"
-    parseFails "CREATE FUNCTION f () RETURNS INT NAME ext SELECT 1"
+    parseFails "CREATE PROCEDURE p () NAME ext RETURN 1"
+    parseFails "CREATE FUNCTION f () RETURNS INT NAME ext RETURN 1"
 
 [<Fact>]
 let ``routine characteristics are accepted in any order`` () =
     // 11.60 <routine characteristics> ::= [ <routine characteristic>... ] — the order is unconstrained
-    match parse "CREATE FUNCTION f () RETURNS INT DETERMINISTIC LANGUAGE SQL READS SQL DATA SELECT 1" with
+    match parse "CREATE FUNCTION f () RETURNS INT DETERMINISTIC LANGUAGE SQL READS SQL DATA RETURN 1" with
     | CreateFunction { Characteristics = [ Deterministic true; Language "SQL"; SqlDataAccess ReadsSqlData ] } -> ()
     | res -> Assert.Fail(sprintf "Expected characteristics in the given order, got %A" res)
 
 [<Fact>]
 let ``CREATE FUNCTION rejects duplicate characteristics`` () =
-    parseFails "CREATE FUNCTION f () RETURNS INT CALLED ON NULL INPUT RETURNS NULL ON NULL INPUT SELECT 1"
-    parseFails "CREATE FUNCTION f () RETURNS INT LANGUAGE SQL LANGUAGE SQL SELECT 1"
+    parseFails "CREATE FUNCTION f () RETURNS INT CALLED ON NULL INPUT RETURNS NULL ON NULL INPUT RETURN 1"
+    parseFails "CREATE FUNCTION f () RETURNS INT LANGUAGE SQL LANGUAGE SQL RETURN 1"
 
 [<Fact>]
 let ``CREATE PROCEDURE with BEGIN ATOMIC body verification`` () =
-    match parse "CREATE PROCEDURE p () BEGIN ATOMIC SELECT 1; SELECT 2; END" with
-    | CreateProcedure { Body = RoutineBody.BeginAtomic [ Select _; Select _ ] } -> ()
+    match parse "CREATE PROCEDURE p () BEGIN ATOMIC SELECT 1 INTO a FROM t; SELECT 2 INTO b FROM t; END" with
+    | CreateProcedure { Body = RoutineBody.BeginAtomic [ SelectInto _; SelectInto _ ] } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateProcedure BEGIN ATOMIC, got %A" res)
 
 [<Fact>]
@@ -1614,13 +1671,13 @@ let ``routine parameter style may not appear twice verification`` () =
 [<Fact>]
 let ``CREATE PROCEDURE verification`` () =
     match
-        parse "CREATE PROCEDURE add_employee (IN name VARCHAR(100), OUT id INT) LANGUAGE SQL DETERMINISTIC SELECT 1"
+        parse "CREATE PROCEDURE add_employee (IN name VARCHAR(100), OUT id INT) LANGUAGE SQL DETERMINISTIC RETURN 1"
     with
     | CreateProcedure { Name = { Kind = Identifier "ADD_EMPLOYEE" }
                         Parameters = [ first; second ]
                         Returns = None
                         Characteristics = [ Language "SQL"; Deterministic true ]
-                        Body = SqlRoutine(None, Select _) } ->
+                        Body = SqlRoutine(None, Return _) } ->
         Assert.Equal(Some ParameterMode.In, first.Mode)
         Assert.Equal(Some(Identifier "NAME"), first.Name |> Option.map (fun e -> e.Kind))
         Assert.Equal(DataTypeParameter(Varchar { Value = 100; Unit = None }, false), first.ParameterType)
@@ -1632,7 +1689,7 @@ let ``CREATE PROCEDURE verification`` () =
 
 [<Fact>]
 let ``CREATE PROCEDURE with INOUT and DEFAULT verification`` () =
-    match parse "CREATE PROCEDURE p (INOUT x INT DEFAULT 5) SPECIFIC p_spec SELECT 1" with
+    match parse "CREATE PROCEDURE p (INOUT x INT DEFAULT 5) SPECIFIC p_spec RETURN 1" with
     | CreateProcedure { Parameters = [ param ]
                         Characteristics = [ SpecificName { Kind = Identifier "P_SPEC" } ] } ->
         Assert.Equal(Some ParameterMode.InOut, param.Mode)
@@ -1648,7 +1705,7 @@ let ``CREATE PROCEDURE without body is rejected`` () = parseFails "CREATE PROCED
 [<Fact>]
 let ``CREATE FUNCTION returns type verification`` () =
     // 11.60 <returns table type> ::= TABLE [ <table function column list> ]
-    match parse "CREATE FUNCTION f () RETURNS TABLE (a INT, b VARCHAR(2)) SELECT 1" with
+    match parse "CREATE FUNCTION f () RETURNS TABLE (a INT, b VARCHAR(2)) RETURN 1" with
     | CreateFunction { Returns = returns } ->
         match returns with
         | Some(ReturnsTable(Some [ first; second ])) ->
@@ -1659,16 +1716,16 @@ let ``CREATE FUNCTION returns type verification`` () =
         | other -> Assert.Fail(sprintf "Expected ReturnsTable, got %A" other)
     | res -> Assert.Fail(sprintf "Expected RETURNS TABLE, got %A" res)
 
-    match parse "CREATE FUNCTION f () RETURNS TABLE SELECT 1" with
+    match parse "CREATE FUNCTION f () RETURNS TABLE RETURN 1" with
     | CreateFunction { Returns = Some(ReturnsTable None) } -> ()
     | res -> Assert.Fail(sprintf "Expected RETURNS TABLE without a column list, got %A" res)
 
-    match parse "CREATE FUNCTION f () RETURNS ONLY PASS THROUGH SELECT 1" with
+    match parse "CREATE FUNCTION f () RETURNS ONLY PASS THROUGH RETURN 1" with
     | CreateFunction { Returns = Some ReturnsOnlyPassThrough } -> ()
     | res -> Assert.Fail(sprintf "Expected RETURNS ONLY PASS THROUGH, got %A" res)
 
     // 11.60 <result cast> ::= CAST FROM <result cast from type>
-    match parse "CREATE FUNCTION f () RETURNS INT CAST FROM BIGINT SELECT 1" with
+    match parse "CREATE FUNCTION f () RETURNS INT CAST FROM BIGINT RETURN 1" with
     | CreateFunction { Returns = returns } ->
         match returns with
         | Some(ReturnsData { DataType = Integer
@@ -1677,32 +1734,32 @@ let ``CREATE FUNCTION returns type verification`` () =
     | res -> Assert.Fail(sprintf "Expected RETURNS INT CAST FROM BIGINT, got %A" res)
 
     // <locator indication> on the returns data type
-    match parse "CREATE FUNCTION f () RETURNS INT AS LOCATOR SELECT 1" with
+    match parse "CREATE FUNCTION f () RETURNS INT AS LOCATOR RETURN 1" with
     | CreateFunction { Returns = Some(ReturnsData { AsLocator = true }) } -> ()
     | res -> Assert.Fail(sprintf "Expected RETURNS INT AS LOCATOR, got %A" res)
 
 [<Fact>]
 let ``CREATE FUNCTION with dispatch clause verification`` () =
     // 11.60 <dispatch clause> ::= STATIC DISPATCH — a <function specification> suffix
-    match parse "CREATE FUNCTION f () RETURNS INT STATIC DISPATCH SELECT 1" with
+    match parse "CREATE FUNCTION f () RETURNS INT STATIC DISPATCH RETURN 1" with
     | CreateFunction { Dispatch = true } -> ()
     | res -> Assert.Fail(sprintf "Expected STATIC DISPATCH, got %A" res)
 
-    match parse "CREATE FUNCTION f () RETURNS INT SELECT 1" with
+    match parse "CREATE FUNCTION f () RETURNS INT RETURN 1" with
     | CreateFunction { Dispatch = false } -> ()
     | res -> Assert.Fail(sprintf "Expected no dispatch clause, got %A" res)
 
     // a procedure has no <dispatch clause> (11.60)
-    parseFails "CREATE PROCEDURE p () STATIC DISPATCH SELECT 1"
+    parseFails "CREATE PROCEDURE p () STATIC DISPATCH RETURN 1"
 
 [<Fact>]
 let ``CREATE FUNCTION verification`` () =
-    match parse "CREATE FUNCTION add (a INT, b INT) RETURNS INT LANGUAGE SQL DETERMINISTIC READS SQL DATA SELECT 1" with
+    match parse "CREATE FUNCTION add (a INT, b INT) RETURNS INT LANGUAGE SQL DETERMINISTIC READS SQL DATA RETURN 1" with
     | CreateFunction { Name = { Kind = Identifier "ADD" }
                        Parameters = [ first; second ]
                        Returns = returns
                        Characteristics = [ Language "SQL"; Deterministic true; SqlDataAccess ReadsSqlData ]
-                       Body = SqlRoutine(None, Select _) } ->
+                       Body = SqlRoutine(None, Return _) } ->
         Assert.Equal(Some(Identifier "A"), first.Name |> Option.map (fun e -> e.Kind))
         Assert.Equal(DataTypeParameter(Integer, false), first.ParameterType)
         Assert.Equal(Some(Identifier "B"), second.Name |> Option.map (fun e -> e.Kind))
@@ -1711,13 +1768,13 @@ let ``CREATE FUNCTION verification`` () =
 
 [<Fact>]
 let ``CREATE FUNCTION without RETURNS is rejected`` () =
-    parseFails "CREATE FUNCTION f () SELECT 1"
+    parseFails "CREATE FUNCTION f () RETURN 1"
 
 [<Fact>]
 let ``CREATE METHOD verification`` () =
     // 11.60 <method specification designator> ::= [ INSTANCE | STATIC | CONSTRUCTOR ] METHOD
     //     <method name> <SQL parameter declaration list> [ <returns clause> ] FOR <udt>
-    match parse "CREATE METHOD m (x INT) RETURNS INT FOR my_type SELECT 1" with
+    match parse "CREATE METHOD m (x INT) RETURNS INT FOR my_type RETURN 1" with
     | CreateMethod stmt ->
         match stmt.Designator with
         | MethodDeclaration methodSpec ->
@@ -1730,26 +1787,26 @@ let ``CREATE METHOD verification`` () =
         | other -> Assert.Fail(sprintf "Expected MethodDeclaration, got %A" other)
 
         match stmt.Body with
-        | SqlRoutine(None, Select _) -> ()
+        | SqlRoutine(None, Return _) -> ()
         | other -> Assert.Fail(sprintf "Expected a SQL routine body, got %A" other)
     | res -> Assert.Fail(sprintf "Expected CreateMethod, got %A" res)
 
     // the <returns clause> is optional in the method form
-    match parse "CREATE STATIC METHOD m () FOR my_type SELECT 1" with
+    match parse "CREATE STATIC METHOD m () FOR my_type RETURN 1" with
     | CreateMethod { Designator = MethodDeclaration methodSpec } ->
         Assert.Equal(Some MethodKind.Static, methodSpec.Kind)
         Assert.True(Option.isNone methodSpec.Returns)
     | res -> Assert.Fail(sprintf "Expected CREATE STATIC METHOD without RETURNS, got %A" res)
 
     // 11.60 <method specification designator> ::= SPECIFIC METHOD <specific method name>
-    match parse "CREATE SPECIFIC METHOD m_spec SELECT 1" with
+    match parse "CREATE SPECIFIC METHOD m_spec RETURN 1" with
     | CreateMethod { Designator = SpecificMethod { Kind = Identifier "M_SPEC" } } -> ()
     | res -> Assert.Fail(sprintf "Expected SPECIFIC METHOD, got %A" res)
 
     // FOR <schema-resolved user-defined type name> is mandatory in the non-SPECIFIC form
-    parseFails "CREATE METHOD m (x INT) SELECT 1"
+    parseFails "CREATE METHOD m (x INT) RETURN 1"
     // a <method specification designator> has no <routine characteristics> slot
-    parseFails "CREATE METHOD m (x INT) FOR my_type LANGUAGE SQL SELECT 1"
+    parseFails "CREATE METHOD m (x INT) FOR my_type LANGUAGE SQL RETURN 1"
 
 [<Fact>]
 let ``ALTER ROUTINE characteristic catalogue verification`` () =

@@ -16,7 +16,7 @@ dotnet test    # xUnit v3 + coverlet
 Both entry points take the SQL text and return `Result<Statement, ParseError>`. The trailing `<semicolon>` is required.
 
 - **`SqlParser.parse`** — a 22.1 `<direct SQL statement>`: the directly executable families only (`SELECT`, searched `INSERT` / `UPDATE` / `DELETE`, `MERGE`, `TRUNCATE`, `WITH ... <query>`, `<temporary table declaration>`, and schema, transaction, connection and session statements). The positioned forms of `UPDATE` (14.13) and `DELETE` (14.8) are rejected here.
-- **`SqlParser.parseStatement`** — the superset admitted by 13.4 `<SQL procedure statement>`: everything `parse` accepts, plus `DECLARE CURSOR`, `OPEN` / `FETCH` / `CLOSE`, `SELECT ... INTO`, positioned `DELETE` / `UPDATE`, `FREE` / `HOLD LOCATOR`, `CALL` / `RETURN`, `GET DIAGNOSTICS` and all dynamic-SQL statements.
+- **`SqlParser.parseStatement`** — a 13.4 `<SQL procedure statement>` (exact, not a superset): schema statements, `OPEN` / `FETCH` / `CLOSE`, `SELECT ... INTO`, positioned and searched `DELETE` / `UPDATE`, `FREE` / `HOLD LOCATOR`, `CALL` / `RETURN`, transaction / connection / session statements, `GET DIAGNOSTICS` and all dynamic-SQL statements. It rejects what 13.4 does not admit — multi-row `SELECT`, `WITH`, `DECLARE CURSOR` (14.1) and `<temporary table declaration>` (14.16) are direct-SQL (22.1) forms.
 
 ```fsharp
 open SqlParser
@@ -31,7 +31,7 @@ match SqlParser.parse sql with
 ```
 
 ```fsharp
-match SqlParser.parseStatement "DECLARE cur CURSOR FOR SELECT a FROM t;" with
+match SqlParser.parseStatement "OPEN cur;" with
 | Ok stmt -> printfn "Successfully parsed statement of kind: %A" stmt.Kind
 | Error (ParseError(msg, pos)) ->
     printfn "Parse error: %s at line %d, col %d" msg pos.Line pos.Column

@@ -14,10 +14,11 @@ let parseFails (sql: string) =
     | Ok _ -> failwithf "Expected parse failure for %s" sql
     | Error _ -> ()
 
-// Cursor statements (14.1–14.7), the temporary table declaration (14.16), the locator
-// statements (14.17/14.18) and positioned DELETE/UPDATE (14.8/14.13, 20.25/20.27) are
-// <SQL procedure statement>s (13.4), not directly executable (22.1), so they use the
-// general entry point.
+// Cursor statements (14.4–14.7), the locator statements (14.17/14.18) and positioned
+// DELETE/UPDATE (14.8/14.13, 20.25/20.27) are <SQL procedure statement>s (13.4), so they
+// use the general entry point. <declare cursor> (14.1) is an SQL-client module statement
+// and <temporary table declaration> (14.16) is a <direct SQL data statement> (22.1) —
+// neither is a 13.4 statement.
 let parseStatement (sql: string) =
     match SqlParser.parseStatement (sql.TrimEnd() + ";") with
     | Ok res -> res.Kind
@@ -29,77 +30,18 @@ let parseStatementFails (sql: string) =
     | Error _ -> ()
 
 [<Fact>]
-let ``DECLARE cursor name is a local qualified name`` () =
-    // 5.4 <local qualified name> admits only the MODULE qualifier.
-    parseStatement "DECLARE MODULE.c CURSOR FOR SELECT 1 FROM t" |> ignore
-    parseStatementFails "DECLARE a.b CURSOR FOR SELECT 1"
-
-[<Theory>]
-[<InlineData("SENSITIVE", "Sensitive")>]
-[<InlineData("INSENSITIVE", "Insensitive")>]
-[<InlineData("ASENSITIVE", "Asensitive")>]
-let ``DECLARE CURSOR sensitivity verification`` (keyword: string) (expected: string) =
-    match parseStatement (sprintf "DECLARE cur %s CURSOR FOR SELECT a FROM t" keyword) with
-    | DeclareCursor { Properties = { Sensitivity = Some actual } } -> Assert.Equal(expected, sprintf "%A" actual)
-    | res -> Assert.Fail(sprintf "Expected %s sensitivity, got %A" keyword res)
-
-[<Theory>]
-[<InlineData("SCROLL", "Scroll")>]
-[<InlineData("NO SCROLL", "NoScroll")>]
-let ``DECLARE CURSOR scrollability verification`` (keyword: string) (expected: string) =
-    match parseStatement (sprintf "DECLARE cur %s CURSOR FOR SELECT a FROM t" keyword) with
-    | DeclareCursor { Properties = { Scrollability = Some actual } } -> Assert.Equal(expected, sprintf "%A" actual)
-    | res -> Assert.Fail(sprintf "Expected %s scrollability, got %A" keyword res)
-
-[<Theory>]
-[<InlineData("WITH HOLD", "WithHold")>]
-[<InlineData("WITHOUT HOLD", "WithoutHold")>]
-let ``DECLARE CURSOR holdability verification`` (keyword: string) (expected: string) =
-    match parseStatement (sprintf "DECLARE cur CURSOR %s FOR SELECT a FROM t" keyword) with
-    | DeclareCursor { Properties = { Holdability = Some actual } } -> Assert.Equal(expected, sprintf "%A" actual)
-    | res -> Assert.Fail(sprintf "Expected %s holdability, got %A" keyword res)
-
-[<Theory>]
-[<InlineData("WITH RETURN", "WithReturn")>]
-[<InlineData("WITHOUT RETURN", "WithoutReturn")>]
-let ``DECLARE CURSOR returnability verification`` (keyword: string) (expected: string) =
-    match parseStatement (sprintf "DECLARE cur CURSOR %s FOR SELECT a FROM t" keyword) with
-    | DeclareCursor { Properties = { Returnability = Some actual } } -> Assert.Equal(expected, sprintf "%A" actual)
-    | res -> Assert.Fail(sprintf "Expected %s returnability, got %A" keyword res)
+let ``DECLARE CURSOR is rejected on both entry points`` () =
+    // 14.1 <declare cursor> is an SQL-client module statement (21), not a 13.4
+    // <SQL procedure statement> nor a 22.1 <direct SQL statement>.
+    parseStatementFails "DECLARE cur CURSOR FOR SELECT a FROM t"
+    parseStatementFails "DECLARE MODULE.c CURSOR FOR SELECT 1 FROM t"
+    parseStatementFails "DECLARE cur INSENSITIVE NO SCROLL CURSOR WITH HOLD WITH RETURN FOR SELECT a FROM t"
+    parseStatementFails "DECLARE cur CURSOR FOR SELECT a FROM t FOR UPDATE OF a"
+    parseFails "DECLARE cur CURSOR FOR SELECT a FROM t"
 
 [<Fact>]
-let ``DECLARE CURSOR verification`` () =
-    match parseStatement "DECLARE cur CURSOR FOR SELECT a FROM t" with
-    | DeclareCursor { Name = { Kind = Identifier "CUR" }
-                      Properties = { Sensitivity = None
-                                     Scrollability = None
-                                     Holdability = None
-                                     Returnability = None }
-                      Specification = SelectQuery _ } -> ()
-    | res -> Assert.Fail(sprintf "Expected DeclareCursor, got %A" res)
-
-[<Fact>]
-let ``DECLARE CURSOR with all cursor properties verification`` () =
-    match parseStatement "DECLARE cur INSENSITIVE NO SCROLL CURSOR WITH HOLD WITH RETURN FOR SELECT a FROM t" with
-    | DeclareCursor { Properties = { Sensitivity = Some Insensitive
-                                     Scrollability = Some NoScroll
-                                     Holdability = Some WithHold
-                                     Returnability = Some WithReturn } } -> ()
-    | res -> Assert.Fail(sprintf "Expected all cursor properties, got %A" res)
-
-[<Fact>]
-let ``DECLARE CURSOR with updatability clause verification`` () =
-    match parseStatement "DECLARE cur CURSOR FOR SELECT a FROM t FOR UPDATE OF a" with
-    | DeclareCursor { Specification = SelectQuery _
-                      Updatability = Some(ForUpdate(Some [ { Kind = Identifier "A" } ])) } -> ()
-    | res -> Assert.Fail(sprintf "Expected FOR UPDATE OF a, got %A" res)
-
-[<Fact>]
-let ``DECLARE CURSOR without CURSOR keyword is rejected`` () =
+let ``malformed DECLARE CURSOR is rejected`` () =
     parseStatementFails "DECLARE cur FOR SELECT a FROM t"
-
-[<Fact>]
-let ``DECLARE CURSOR without FOR is rejected`` () =
     parseStatementFails "DECLARE cur CURSOR"
 
 [<Fact>]
@@ -178,6 +120,13 @@ let ``FETCH RELATIVE verification`` () =
 let ``FETCH without INTO is rejected`` () = parseStatementFails "FETCH cur"
 
 [<Fact>]
+let ``FETCH orientation without FROM is rejected`` () =
+    // 14.5 — the optional group is `[ [ <fetch orientation> ] FROM ]` as a unit;
+    // NEXT immediately followed by the cursor name is not valid.
+    parseStatementFails "FETCH NEXT cur INTO a"
+    parseStatementFails "FETCH ABSOLUTE 5 cur INTO a"
+
+[<Fact>]
 let ``CLOSE verification`` () =
     match parseStatement "CLOSE cur" with
     | Close { Kind = Identifier "CUR" } -> ()
@@ -237,6 +186,41 @@ let ``SELECT INTO without select list is rejected`` () = parseStatementFails "SE
 
 [<Fact>]
 let ``SELECT INTO without a FROM clause is rejected`` () = parseStatementFails "SELECT a INTO x"
+
+[<Fact>]
+let ``SELECT INTO target specification verification`` () =
+    // 14.7 <select target list> ::= <target specification> [ { , <target specification> }... ]
+    match parseStatement "SELECT a INTO ?, :host FROM t" with
+    | SelectInto { Into = [ { Kind = Parameter "?" }; { Kind = Parameter ":HOST" } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected SelectInto with target specifications, got %A" res)
+
+[<Fact>]
+let ``FETCH target specification verification`` () =
+    // 14.5 <fetch target list> ::= <target specification> ...
+    match parseStatement "FETCH cur INTO ?, :host, col" with
+    | Fetch(None,
+            { Kind = Identifier "CUR" },
+            UsingArguments
+                [ { Kind = Parameter "?" }
+                  { Kind = Parameter ":HOST" }
+                  { Kind = Identifier "COL" } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected Fetch with target specifications, got %A" res)
+
+[<Fact>]
+let ``FETCH host parameter with indicator verification`` () =
+    // 6.4 <host parameter specification> ::= <host parameter name> [ <indicator parameter> ]
+    match parseStatement "FETCH cur INTO :a INDICATOR :ind" with
+    | Fetch(None,
+            _,
+            UsingArguments [ { Kind = IndicatorParameter(":A", { Kind = Parameter ":IND" }) } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected indicator parameter, got %A" res)
+
+[<Fact>]
+let ``FETCH target array element verification`` () =
+    // 6.4 <target array element specification>
+    match parseStatement "FETCH cur INTO arr[1]" with
+    | Fetch(None, _, UsingArguments [ { Kind = ArrayElement({ Kind = Identifier "ARR" }, _) } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected target array element, got %A" res)
 
 [<Fact>]
 let ``DELETE with alias verification`` () =
@@ -556,7 +540,8 @@ let ``UPDATE with FOR PORTION OF and WHERE CURRENT OF is rejected`` () =
 
 [<Fact>]
 let ``Temporary table declaration verification`` () =
-    match parseStatement "DECLARE LOCAL TEMPORARY TABLE t (a INT, b VARCHAR(10)) ON COMMIT PRESERVE ROWS" with
+    // 14.16 is a <direct SQL data statement> (22.1), not a 13.4 statement.
+    match parse "DECLARE LOCAL TEMPORARY TABLE t (a INT, b VARCHAR(10)) ON COMMIT PRESERVE ROWS" with
     | DeclareTemporaryTable { Name = { Kind = Identifier "T" }
                               Columns = [ { Name = { Kind = Identifier "A" } }; { Name = { Kind = Identifier "B" } } ]
                               Constraints = []
@@ -565,7 +550,7 @@ let ``Temporary table declaration verification`` () =
 
 [<Fact>]
 let ``Temporary table declaration without ON COMMIT verification`` () =
-    match parseStatement "DECLARE LOCAL TEMPORARY TABLE t (a INT)" with
+    match parse "DECLARE LOCAL TEMPORARY TABLE t (a INT)" with
     | DeclareTemporaryTable { Columns = [ _ ]
                               Constraints = []
                               OnCommit = None } -> ()
@@ -573,15 +558,17 @@ let ``Temporary table declaration without ON COMMIT verification`` () =
 
 [<Fact>]
 let ``Temporary table declaration with table constraint verification`` () =
-    match parseStatement "DECLARE LOCAL TEMPORARY TABLE t (a INT, PRIMARY KEY (a)) ON COMMIT DELETE ROWS" with
+    match parse "DECLARE LOCAL TEMPORARY TABLE t (a INT, PRIMARY KEY (a)) ON COMMIT DELETE ROWS" with
     | DeclareTemporaryTable { Columns = [ _ ]
                               Constraints = [ { Constraint = TableConstraint.PrimaryKey(None,
-                                                                                        [ { Kind = Identifier "A" } ]) } ]
+                                                                                         [ { Kind = Identifier "A" }],
+                                                                                         None) } ]
                               OnCommit = Some DeleteOnCommit } -> ()
     | res -> Assert.Fail(sprintf "Expected DeclareTemporaryTable, got %A" res)
 
 [<Fact>]
 let ``Temporary table declaration without table element list is rejected`` () =
+    parseFails "DECLARE LOCAL TEMPORARY TABLE t"
     parseStatementFails "DECLARE LOCAL TEMPORARY TABLE t"
 
 [<Fact>]

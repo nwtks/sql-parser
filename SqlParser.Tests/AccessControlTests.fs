@@ -191,6 +191,24 @@ let ``GRANT object kind verification`` sql expectedKind expectedName =
     | res -> Assert.Fail(sprintf "Expected an identifier object name, got %A" res)
 
 [<Fact>]
+let ``GRANT object name as qualified chain verification`` () =
+    // A non-reserved kind word used as a schema name must not commit the kind branch:
+    // `domain.users` is one <qualified identifier chain>, not kind DOMAIN + name.
+    match parse "GRANT USAGE ON domain.users TO alice" with
+    | GrantObject stmt ->
+        match stmt.Object with
+        | { Kind = ColumnReference [ "DOMAIN"; "USERS" ] } -> ()
+        | res -> Assert.Fail(sprintf "Expected domain.users chain, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected GrantObject, got %A" res)
+
+    match parse "REVOKE SELECT ON domain.users FROM alice CASCADE" with
+    | RevokeObject stmt ->
+        match stmt.Object with
+        | { Kind = ColumnReference [ "DOMAIN"; "USERS" ] } -> ()
+        | res -> Assert.Fail(sprintf "Expected domain.users chain, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected RevokeObject, got %A" res)
+
+[<Fact>]
 let ``GRANT UNDER privilege verification`` () =
     match parse "GRANT UNDER ON TABLE users TO alice" with
     | GrantTable stmt ->

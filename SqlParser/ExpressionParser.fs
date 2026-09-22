@@ -977,7 +977,7 @@ module ExpressionParser =
     // plus an optional FORMAT clause)
     // <JSON path specification> ::= <character string literal> — stored as a plain string.
     let pJsonApiCommonSyntax =
-        // 10.14 <JSON passing argument> ::= <JSON value expression> [ <JSON input clause> ] AS <identifier>
+        // 10.14 <JSON argument> ::= <JSON value expression> [ <JSON input clause> ] AS <identifier>
         // <JSON value expression> is a value expression — boolean expressions are not allowed.
         let pJsonArgument =
             pNonBooleanValueExpression .>>. opt pJsonInputClause .>> pKeyword "AS"
@@ -1002,7 +1002,8 @@ module ExpressionParser =
     //     [ <JSON returning clause> ] [ <JSON value empty behavior> ON EMPTY ]
     //     [ <JSON value error behavior> ON ERROR ] )
     let private pJsonValueFunction =
-        // 6.27 <JSON value empty/error behavior> ::= ERROR | NULL | DEFAULT <value expression>
+        // 6.27 <JSON value empty behavior> ::= ERROR | NULL | DEFAULT <value expression>
+        // 6.27 <JSON value error behavior> ::= ERROR | NULL
         // <value expression> is not boolean, so boolean operators are rejected here.
         let pJsonValueBehavior =
             choice
@@ -1075,14 +1076,16 @@ module ExpressionParser =
     //       [ USING <char length units> ] )
     //   <octet length expression> ::= OCTET_LENGTH ( <string value expression> )
     // — <octet length expression> has no USING slot, so it takes a separate body parser.
+    // Both argument slots are value (non-boolean) expressions.
     let private pLengthExpression =
         let pBody =
             between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (pExpression .>>. opt (pKeyword "USING" >>. pCharLengthUnits))
+                (pNonBooleanValueExpression .>>. opt (pKeyword "USING" >>. pCharLengthUnits))
 
-        let pOctetBody = between (token (pstring "(")) (token (pstring ")")) pExpression
+        let pOctetBody =
+            between (token (pstring "(")) (token (pstring ")")) pNonBooleanValueExpression
 
         choice
             [ pKeyword "CHAR_LENGTH" >>. pBody
@@ -1155,26 +1158,50 @@ module ExpressionParser =
     // 6.30 <regex position expression>
     // 6.32 <regex substring function>
     // 6.32 <regex transliteration>
-    // — all four share the argument shape
-    //   <pattern> [ FLAG <flag> ] IN <subject> [ WITH <replacement> ] [ FROM <start> ]
-    //   [ USING <char length units> ] [ OCCURRENCE <occurrence> ] [ GROUP <capture group> ]
-    // The operands are <character value expression>s, so the non-boolean expression parser is
-    // used — that also keeps `IN` from being read as an 8.4 <in predicate>.
-    let private pRegexArgument =
+    // — the four share the head <pattern> [ FLAG <flag> ] IN <subject> but each production
+    // admits a different set of trailing clauses (docs/trade-off.md). The operands are
+    // <character value expression>s, so the non-boolean expression parser is used — that
+    // also keeps `IN` from being read as an 8.4 <in predicate>.
+    //   allowWith / allowOccurrence / allowAll / allowGroup select the production:
+    //   occurrences: false false false false
+    //   position & substring: false true false true
+    //   transliteration: true true true false
+    let private pRegexArgument allowWith allowOccurrence allowAll allowGroup =
         let pOperand = pNonBooleanValueExpression
 
         let pOccurrence =
-            choice
-                [ attempt (pKeyword "ALL" >>% RegexOccurrenceAll)
-                  pExpression |>> RegexOccurrenceNumber ]
+            if allowOccurrence then
+                let pOcc =
+                    if allowAll then
+                        choice
+                            [ attempt (pKeyword "ALL" >>% RegexOccurrenceAll)
+                              pExpression |>> RegexOccurrenceNumber ]
+                    else
+                        pExpression |>> RegexOccurrenceNumber
+
+                opt (attempt (pKeyword "OCCURRENCE" >>. pOcc))
+            else
+                preturn None
+
+        let pWith =
+            if allowWith then
+                opt (attempt (pKeyword "WITH" >>. pOperand))
+            else
+                preturn None
+
+        let pGrp =
+            if allowGroup then
+                opt (attempt (pKeyword "GROUP" >>. pOperand))
+            else
+                preturn None
 
         pOperand .>>. opt (attempt (pKeyword "FLAG" >>. pOperand)) .>> pKeyword "IN"
         .>>. pOperand
-        .>>. opt (attempt (pKeyword "WITH" >>. pOperand))
+        .>>. pWith
         .>>. opt (attempt (pKeyword "FROM" >>. pOperand))
         .>>. opt (attempt (pKeyword "USING" >>. pCharLengthUnits))
-        .>>. opt (attempt (pKeyword "OCCURRENCE" >>. pOccurrence))
-        .>>. opt (attempt (pKeyword "GROUP" >>. pOperand))
+        .>>. pOccurrence
+        .>>. pGrp
         |>> fun (((((((pattern, flag), subject), replacement), start), units), occurrence), captureGroup) ->
             { Pattern = pattern
               Flag = flag
@@ -1190,12 +1217,12 @@ module ExpressionParser =
     //     IN <regex subject string> [ FROM <start position> ] [ USING <char length units> ] )
     let private pRegexOccurrencesFunction =
         pKeyword "OCCURRENCES_REGEX"
-        >>. between (token (pstring "(")) (token (pstring ")")) pRegexArgument
+        >>. between (token (pstring "(")) (token (pstring ")")) (pRegexArgument false false false false)
         |>> RegexOccurrences
         |> withExprPosition
 
     // 6.30 <regex position expression> ::= POSITION_REGEX ( [ START | AFTER ] <XQuery pattern>
-    //     [ FLAG <flag> ] IN <regex subject string> ... )
+    //     [ FLAG <flag> ] IN <regex subject string> [ FROM ] [ USING ] [ OCCURRENCE n ] [ GROUP ] )
     let private pRegexPositionFunction =
         let pStart =
             opt (
@@ -1207,7 +1234,7 @@ module ExpressionParser =
             )
 
         pKeyword "POSITION_REGEX"
-        >>. between (token (pstring "(")) (token (pstring ")")) (pStart .>>. pRegexArgument)
+        >>. between (token (pstring "(")) (token (pstring ")")) (pStart .>>. pRegexArgument false true false true)
         |>> fun (start, arg) -> RegexPosition(start, arg)
         |> withExprPosition
 
@@ -1223,12 +1250,14 @@ module ExpressionParser =
             )
 
         // `[ <trim specification> ] [ <trim character> ] FROM <trim source>`
+        // — both slots are <character value expression>s (non-boolean).
         let pExplicitForm =
-            pSpec .>>. opt pExpression .>> pKeyword "FROM" .>>. pExpression
+            pSpec .>>. opt pNonBooleanValueExpression .>> pKeyword "FROM"
+            .>>. pNonBooleanValueExpression
             |>> fun ((spec, character), source) -> spec, character, source
 
         // `TRIM ( <trim source> )` — the shorthand carries neither part.
-        let pShorthandForm = pExpression |>> fun source -> None, None, source
+        let pShorthandForm = pNonBooleanValueExpression |>> fun source -> None, None, source
 
         pKeyword "TRIM"
         >>. between (token (pstring "(")) (token (pstring ")")) (attempt pExplicitForm <|> pShorthandForm)
@@ -1308,18 +1337,19 @@ module ExpressionParser =
         |> withExprPosition
 
     // 6.32 <regex substring function> ::= SUBSTRING_REGEX ( <XQuery pattern> [ FLAG <flag> ]
-    //     IN <regex subject string> ... [ OCCURRENCE <regex occurrence> ] [ GROUP <capture group> ] )
+    //     IN <regex subject string> [ FROM ] [ USING ] [ OCCURRENCE <regex occurrence> ] [ GROUP ] )
     let private pRegexSubstringFunction =
         pKeyword "SUBSTRING_REGEX"
-        >>. between (token (pstring "(")) (token (pstring ")")) pRegexArgument
+        >>. between (token (pstring "(")) (token (pstring ")")) (pRegexArgument false true false true)
         |>> RegexSubstring
         |> withExprPosition
 
     // 6.32 <regex transliteration> ::= TRANSLATE_REGEX ( <XQuery pattern> [ FLAG <flag> ]
-    //     IN <regex subject string> [ WITH <replacement> ] ... )
+    //     IN <regex subject string> [ WITH <replacement> ] [ FROM ] [ USING ]
+    //     [ OCCURRENCE <regex transliteration occurrence> ] )  — no GROUP.
     let private pRegexTransliterateFunction =
         pKeyword "TRANSLATE_REGEX"
-        >>. between (token (pstring "(")) (token (pstring ")")) pRegexArgument
+        >>. between (token (pstring "(")) (token (pstring ")")) (pRegexArgument true true true false)
         |>> RegexTransliterate
         |> withExprPosition
 
@@ -1451,7 +1481,8 @@ module ExpressionParser =
     //     [ ON SCALAR STRING ] ] [ <JSON query empty behavior> ON EMPTY ]
     //     [ <JSON query error behavior> ON ERROR ] )
     let private pJsonQueryFunction =
-        // 6.34 <JSON query empty/error behavior> ::= ERROR | NULL | EMPTY ARRAY | EMPTY OBJECT
+        // 6.34 <JSON query empty behavior> ::= ERROR | NULL | EMPTY ARRAY | EMPTY OBJECT
+        // 6.34 <JSON query error behavior> ::= ERROR | NULL | EMPTY ARRAY | EMPTY OBJECT
         let pJsonQueryBehavior =
             choice
                 [ pKeyword "ERROR" >>% JsonQueryError
@@ -1866,7 +1897,7 @@ module ExpressionParser =
             | SqlArgumentNamed(name, value) -> collectSqlArgumentChildren (value :: rest) (name :: acc)
             | SqlArgumentTable t -> collectSqlArgumentChildren rest (List.rev (tableArgumentChildren t) @ acc)
 
-    // 10.11 <JSON object aggregate> ::= JSON_OBJECTAGG ( <JSON name and value>
+    // 10.11 <JSON object aggregate constructor> ::= JSON_OBJECTAGG ( <JSON name and value>
     //     [ <JSON constructor null clause> ] [ <JSON key uniqueness constraint> ]
     //     [ <JSON output clause> ] )
     let private pJsonObjectAggFunction =
@@ -1881,7 +1912,7 @@ module ExpressionParser =
         |>> fun (((nv, nullClause), unique), output) -> JsonObjectAgg(nv, nullClause, unique, output)
         |> withExprPosition
 
-    // 10.11 <JSON array aggregate> ::= JSON_ARRAYAGG ( <JSON value expression>
+    // 10.11 <JSON array aggregate constructor> ::= JSON_ARRAYAGG ( <JSON value expression>
     //     [ ORDER BY <sort specification list> ] [ <JSON constructor null clause> ]
     //     [ <JSON output clause> ] )
     let private pJsonArrayAggFunction =
@@ -1938,9 +1969,10 @@ module ExpressionParser =
             |> withExprPosition
 
         // 6.32 <classifier function> ::= CLASSIFIER ( [ <row pattern variable name> ] )
+        // <row pattern variable name> is a simple identifier, not an arbitrary expression.
         let pClassifierFunction =
             pKeyword "CLASSIFIER"
-            >>. between (token (pstring "(")) (token (pstring ")")) (opt pExpression)
+            >>. between (token (pstring "(")) (token (pstring ")")) (opt pIdentifierExpression)
             |>> Classifier
             |> withExprPosition
 

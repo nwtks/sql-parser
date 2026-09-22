@@ -76,7 +76,7 @@ type Literal =
     | Interval of IntervalValue
     // 5.3 <binary string literal>
     | Binary of byte[]
-    // 5.3 <null>
+    // 6.5 <null specification>
     | Null
 
 // 5.4 <scope option> ::= GLOBAL | LOCAL
@@ -282,7 +282,8 @@ and PrevOrNext =
 // 6.27 <JSON returning clause> ::= RETURNING <data type>
 and JsonReturning = DataType
 
-// 6.27 <JSON value empty/error behavior> ::= ERROR | NULL | DEFAULT <value expression>
+// 6.27 <JSON value empty behavior> ::= ERROR | NULL | DEFAULT <value expression>
+// 6.27 <JSON value error behavior> ::= ERROR | NULL
 and JsonValueBehavior =
     | JsonError
     | JsonNull
@@ -304,8 +305,11 @@ and ExpressionKind =
     // a parenthesized boolean expression is a 6.39 <boolean predicand> (not an operator).
     | Parenthesized of Expression
     // 6.4 <dynamic parameter specification>
-    // 6.4 <host parameter specification>
+    // 6.4 <host parameter name> (bare <host parameter specification>)
     | Parameter of string
+    // 6.4 <host parameter specification> ::= <host parameter name> [ <indicator parameter> ]
+    // Only when an <indicator parameter> is present; the bare form stays Parameter.
+    | IndicatorParameter of string * Expression
     // 6.4 <general value specification>
     | CurrentCatalog
     | CurrentDefaultTransformGroup
@@ -428,9 +432,9 @@ and ExpressionKind =
     | CurrentTime of int option
     // 6.36 <current timestamp value function>
     | CurrentTimestamp of int option
-    // 6.36 <local time value function>
+    // 6.36 <current local time value function>
     | LocalTime of int option
-    // 6.36 <local timestamp value function>
+    // 6.36 <current local timestamp value function>
     | LocalTimestamp of int option
     // 6.37 <interval value expression> ::= ... | ( <datetime value expression> <minus sign> <datetime term> ) <interval qualifier>
     | DatetimeDifference of Expression * Expression * IntervalQualifier
@@ -574,11 +578,9 @@ and NumericFunction =
 // 6.30 <regex position expression>
 // 6.32 <regex substring function>
 // 6.32 <regex transliteration>
-// — all four share the shape
-//   <pattern> [ FLAG <flag> ] IN <subject> [ WITH <replacement> ] [ FROM <start> ]
-//   [ USING <char length units> ] [ OCCURRENCE <occurrence> ] [ GROUP <capture group> ]
-// `<WITH>` and `<GROUP>`/`<OCCURRENCE>` are not part of every one of the four rules;
-// the shared parser accepts the superset (see docs/trade-off.md).
+// — all four share this argument record. Each production admits a different subset of
+// the optional clauses (WITH / OCCURRENCE / GROUP); the parser rejects the extras
+// (ExpressionParser.fs — see docs/trade-off.md).
 and RegexArgument =
     { Pattern: Expression
       Flag: Expression option
@@ -630,7 +632,8 @@ and JsonQueryQuotes =
     | Keep
     | Omit
 
-// 6.34 <JSON query empty/error behavior> ::= ERROR | NULL | EMPTY ARRAY | EMPTY OBJECT
+// 6.34 <JSON query empty behavior> ::= ERROR | NULL | EMPTY ARRAY | EMPTY OBJECT
+// 6.34 <JSON query error behavior> ::= ERROR | NULL | EMPTY ARRAY | EMPTY OBJECT
 and JsonQueryBehavior =
     | JsonQueryError
     | JsonQueryNull
@@ -827,7 +830,8 @@ and JsonRegularColumn =
       OnEmpty: JsonColumnBehavior option
       OnError: JsonColumnBehavior option }
 
-// 7.11 <JSON table column empty/error behavior> ::= ERROR | NULL | DEFAULT <value expression>
+// 7.11 <JSON table column empty behavior> ::= ERROR | NULL | DEFAULT <value expression>
+// 7.11 <JSON table column error behavior> ::= ERROR | NULL | DEFAULT <value expression>
 //     (formatted columns additionally allow EMPTY ARRAY | EMPTY OBJECT)
 and JsonColumnBehavior =
     | JsonColumnError
@@ -1003,7 +1007,7 @@ and NormalForm =
     | Nfkc
     | Nfkd
 
-// 8.13 <match option> ::= SIMPLE | PARTIAL | FULL
+// 8.13 <match predicate part 2> ::= MATCH [ UNIQUE ] [ SIMPLE | PARTIAL | FULL ] <table subquery>
 and MatchOption =
     | Simple
     | Partial
@@ -1133,7 +1137,7 @@ and JsonOutput =
     { Returning: DataType
       Format: JsonRepresentation option }
 
-// 10.14 <JSON passing argument> ::= <JSON value expression> [ <JSON input clause> ] AS <identifier>
+// 10.14 <JSON argument> ::= <JSON value expression> [ <JSON input clause> ] AS <identifier>
 and JsonPassingArgument =
     { Value: Expression
       InputFormat: JsonRepresentation option
@@ -1314,7 +1318,8 @@ and ColumnDefinition =
       Identity: IdentitySpec option
       // 11.4 <generation clause>
       Generation: Expression option
-      // 11.4 <system time period start|end column specification>
+      // 11.4 <system time period start column specification>
+      // 11.4 <system time period end column specification>
       SystemTimePeriod: SystemTimePeriodKind option
       // 10.7 <collate clause> ::= COLLATE <collation name>
       Collation: Expression option
@@ -1322,9 +1327,16 @@ and ColumnDefinition =
 
 // 11.6 <table constraint definition> ::= [ <constraint name definition> ] <table constraint>
 // 11.6 <table constraint> ::= <unique constraint definition> | <referential constraint definition> | <check constraint definition>
+// 11.7 <unique constraint definition> ::=
+//     <unique specification> <left paren> <unique column list>
+//         [ <comma> <without overlap specification> ] <right paren>
+//   | UNIQUE ( VALUE )
+// <without overlap specification> = <application time period name> WITHOUT OVERLAPS (Expression option).
 and TableConstraint =
-    | PrimaryKey of Expression option * Expression list
-    | Unique of Expression option * Expression list
+    | PrimaryKey of Expression option * Expression list * Expression option
+    | Unique of Expression option * Expression list * Expression option
+    // 11.7 UNIQUE ( VALUE ) — VALUE is reserved, so this cannot be a column named VALUE.
+    | UniqueValue of Expression option
     | ForeignKey of ForeignKeyConstraint
     | Check of Expression option * Expression
 
@@ -1777,7 +1789,9 @@ and TransformAlteration =
     //     [ <comma> <transform kind> ] <drop behavior> ) — at most one kind per direction.
     | DropTransformElements of TransformKind * TransformKind option * bool
 
-// 11.68 <alter transform group> ::= ALTER GROUP <group name> <alter transform action> [ { <comma> <alter transform action> }... ]
+// 11.68 <alter transform statement> ::= ALTER { TRANSFORM | TRANSFORMS } FOR
+//     <schema-resolved user-defined type name> <alter group>...
+// 11.68 <alter group> ::= <group name> ( <alter transform action list> )
 and AlterTransformGroup =
     { Name: Expression
       Actions: TransformAlteration list }
@@ -2226,7 +2240,7 @@ and StatementKind =
     // 11.61 <alter routine statement> ::= ALTER <specific routine designator> ...
     | AlterRoutine of AlterRoutineStatement
     // 11.62 <drop routine statement>
-    | DropRoutine of Expression * bool
+    | DropRoutine of SpecificRoutineDesignator * bool
     // 11.63 <user-defined cast definition> ::= CREATE CAST ...
     | CreateCast of DataType * DataType * SpecificRoutineDesignator * bool
     // 11.64 <drop user-defined cast statement>
@@ -2331,11 +2345,11 @@ and StatementKind =
     | Disconnect of DisconnectObject
     // 19.1 <set session characteristics statement>
     | SetSessionCharacteristics of TransactionMode list
-    // 19.2 <set session authorization statement>
+    // 19.2 <set session user identifier statement>
     | SetSessionAuthorization of Expression
     // 19.3 <set role statement> ::= SET ROLE ...
     | SetRole of Expression option
-    // 19.4 <set time zone statement>
+    // 19.4 <set local time zone statement>
     | SetTimeZone of Expression option
     // 19.5 <set catalog statement>
     | SetCatalog of Expression
@@ -2361,7 +2375,7 @@ and StatementKind =
     | CopyDescriptor of CopyDescriptorStatement
     // 20.7 <prepare statement>
     | Prepare of Expression * Expression option * Expression
-    // 20.9 <deallocate prepare statement>
+    // 20.9 <deallocate prepared statement>
     | DeallocatePrepare of Expression
     // 20.10 <describe statement>
     | Describe of DescribeStatement

@@ -4,7 +4,7 @@ open Xunit
 open SqlParser
 
 // 22.1 <direct SQL statement> requires a trailing <semicolon>.
-// 7.16 <table expression> requires a <from clause>: bare expressions are wrapped
+// 7.4 <table expression> requires a <from clause>: bare expressions are wrapped
 // in "SELECT ... FROM t", and SELECT statements without a top-level FROM get one
 // appended (a FROM inside parentheses does not count).
 let private hasOuterFrom (s: string) =
@@ -917,7 +917,7 @@ let ``JSON input clause is preserved`` () =
     | JsonValue({ ContextFormat = Some(JsonEncoding(Some Utf16)) }, None, None, None) -> ()
     | res -> Assert.Fail(sprintf "Expected context FORMAT kept, got %A" res)
 
-    // 10.14 <JSON passing argument> — per-argument FORMAT clause.
+    // 10.14 <JSON argument> — per-argument FORMAT clause.
     match parse "SELECT JSON_VALUE(x, '$.a' PASSING y FORMAT JSON AS b)" with
     | JsonValue({ Passing = [ { InputFormat = Some(JsonEncoding None) } ] }, None, None, None) -> ()
     | res -> Assert.Fail(sprintf "Expected passing FORMAT kept, got %A" res)
@@ -978,6 +978,11 @@ let ``CHARACTER length expressions verification`` () =
 [<Fact>]
 let ``Length expressions reject a non char length unit`` () =
     parseFails "SELECT CHARACTER_LENGTH(name USING JUNK)"
+
+[<Fact>]
+let ``CHAR_LENGTH rejects a boolean argument`` () =
+    parseFails "SELECT CHAR_LENGTH(1 = 1)"
+    parseFails "SELECT OCTET_LENGTH(1 = 1)"
     // <octet length expression> has no USING slot at all
     parseFails "SELECT OCTET_LENGTH(name USING CHARACTERS)"
 
@@ -1085,6 +1090,20 @@ let ``Regex functions verification`` () =
     | res -> Assert.Fail(sprintf "Expected RegexTransliterate, got %A" res)
 
 [<Fact>]
+let ``Regex functions reject clauses outside their production`` () =
+    // 6.30 <regex occurrences function> — no WITH, OCCURRENCE, or GROUP.
+    parseFails "SELECT OCCURRENCES_REGEX('a' IN s WITH 'b')"
+    parseFails "SELECT OCCURRENCES_REGEX('a' IN s OCCURRENCE 1)"
+    parseFails "SELECT OCCURRENCES_REGEX('a' IN s GROUP 1)"
+    // 6.30 <regex position expression> — no WITH.
+    parseFails "SELECT POSITION_REGEX('a' IN s WITH 'b')"
+    // 6.32 <regex substring function> — no WITH; OCCURRENCE takes <regex occurrence> only.
+    parseFails "SELECT SUBSTRING_REGEX('a' IN s WITH 'b')"
+    parseFails "SELECT SUBSTRING_REGEX('a' IN s OCCURRENCE ALL)"
+    // 6.32 <regex transliteration> — no GROUP.
+    parseFails "SELECT TRANSLATE_REGEX('a' IN s WITH 'b' GROUP 1)"
+
+[<Fact>]
 let ``POSITION_REGEX start verification`` () =
     match parse "SELECT POSITION_REGEX('a' IN s)" with
     | RegexPosition(None, _) -> ()
@@ -1115,6 +1134,11 @@ let ``TRIM verification`` () =
 
     // A specification keyword cannot start the shorthand (`BOTH` is reserved).
     parseFails "SELECT TRIM(BOTH) FROM t"
+
+[<Fact>]
+let ``TRIM rejects a non char value argument`` () =
+    parseFails "SELECT TRIM(1 = 1)"
+    parseFails "SELECT TRIM(BOTH 1 = 1 FROM name)"
 
 [<Fact>]
 let ``SUBSTRING FROM FOR verification`` () =
@@ -1185,6 +1209,11 @@ let ``CLASSIFIER function verification`` () =
     match parse "SELECT CLASSIFIER(A)" with
     | Classifier(Some { Kind = Identifier "A" }) -> ()
     | res -> Assert.Fail(sprintf "Expected Classifier(A), got %A" res)
+
+[<Fact>]
+let ``CLASSIFIER rejects a non-identifier argument`` () =
+    parseFails "SELECT CLASSIFIER(1)"
+    parseFails "SELECT CLASSIFIER(a + b)"
 
 [<Fact>]
 let ``JSON_OBJECT function verification`` () =

@@ -49,12 +49,14 @@ Two public functions, both requiring the trailing `<semicolon>`:
 | Function | Grammar rule | Accepts |
 |----------|--------------|---------|
 | `SqlParser.parse` | 22.1 `<direct SQL statement>` | The directly executable families: `<direct SQL data statement>` (searched `DELETE`, `SELECT`, `INSERT`, searched `UPDATE`, `TRUNCATE`, `MERGE`, `<temporary table declaration>`, `WITH ... <query>`), `<SQL schema statement>`, `<SQL transaction statement>`, `<SQL connection statement>`, `<SQL session statement>`. |
-| `SqlParser.parseStatement` | 13.4 `<SQL procedure statement>` (superset) | Everything `parse` accepts, plus `DECLARE CURSOR` (14.1), `OPEN`/`FETCH`/`CLOSE`, `SELECT ... INTO`, `FREE`/`HOLD LOCATOR`, positioned `DELETE`/`UPDATE` (`WHERE CURRENT OF`), `CALL`/`RETURN`, `GET DIAGNOSTICS`, and all dynamic-SQL statements. |
+| `SqlParser.parseStatement` | 13.4 `<SQL procedure statement>` | The `<SQL executable statement>` families: schema, `<SQL data statement>` (`OPEN`/`FETCH`/`CLOSE`, `SELECT ... INTO`, `FREE`/`HOLD LOCATOR`, positioned and searched DML), `CALL`/`RETURN`, transaction, connection, session, `GET DIAGNOSTICS`, and all dynamic-SQL statements. Excludes `DECLARE CURSOR` (14.1, an SQL-client module statement), `<temporary table declaration>` (14.16), multi-row `SELECT` and `WITH` — those are 22.1 forms. |
 
-`parse` rejects the *positioned* forms of `UPDATE` (14.13) and `DELETE` (14.8)
-via `pSearchedUpdateStatement` / `pSearchedDeleteStatement` and deliberately
-omits 22.1's `<direct implementation-defined statement>`; use `parseStatement`
-for "any supported statement" — see [README.md](../README.md#usage).
+The two entry points are exact for their clauses — neither is a superset of
+the other: `parse` rejects positioned `UPDATE` (14.13) / `DELETE` (14.8) via
+`pSearchedUpdateStatement` / `pSearchedDeleteStatement`, while `parseStatement`
+rejects the 22.x query forms; both omit 22.1's `<direct implementation-defined
+statement>`. `pStatement` (wired to `parseStatement`, routine bodies and
+triggers) is therefore strict 13.4. See [README.md](../README.md#usage).
 
 ## 4. Module map
 
@@ -70,7 +72,7 @@ low-level parsers first, the dispatcher last) in `SqlParser/SqlParser.fsproj`:
 | `PredicateParser.fs` | §8 | `<predicate>` postfix chain (`BETWEEN`/`IN`/`LIKE`/`SIMILAR TO`/`IS …`) and the standalone `EXISTS`/`UNIQUE`/`JSON_EXISTS`/period predicates. |
 | `SchemaParser.fs` | §11 | Schema definition/manipulation (`CREATE`/`ALTER`/`DROP`) including user-defined types (`CREATE`/`ALTER TYPE`, 11.51–11.53), plus `CREATE PROCEDURE`/`FUNCTION`/`METHOD`/`TRIGGER` (11.49/11.60/11.61); `DROP ROLE` (12.6) is a branch of the `DROP` dispatcher. |
 | `AccessControlParser.fs` | §12 | `GRANT`/`REVOKE` (privileges and roles) and `CREATE ROLE` (12.2–12.5, 12.7). |
-| `DataManipulationParser.fs` | §14 | The whole of §14: DML (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `TRUNCATE`) plus the cursor/locator statements (`DECLARE CURSOR`, `OPEN`/`FETCH`/`CLOSE`, `SELECT ... INTO`, `<temporary table declaration>`, `USING`/`INTO` clauses). |
+| `DataManipulationParser.fs` | §14 | The whole of §14: DML (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `TRUNCATE`) plus the cursor/locator statements (`DECLARE CURSOR` — parsed, but no entry point exposes 14.1 — `OPEN`/`FETCH`/`CLOSE`, `SELECT ... INTO`, `<temporary table declaration>`, `USING`/`INTO` clauses). |
 | `ControlParser.fs` | §16, 10.4 | `CALL`, `RETURN`, plus the `<SQL argument>` / `<SQL argument list>` parsers consumed by §6's routine and method invocations. |
 | `TransactionParser.fs` | §17 | `START TRANSACTION`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `SET TRANSACTION`, `SET CONSTRAINTS`. |
 | `ConnectionParser.fs` | §18 | `CONNECT`, `SET CONNECTION`, `DISCONNECT`. |
@@ -96,7 +98,7 @@ before the first parse.
 
 | Forward reference | Declared in | Wired to | Why |
 |-------------------|-------------|----------|-----|
-| `pStatement` / `pStatementRef` | `SchemaParser.fs` | the full statement `choice` (`SqlParser.fs`) | First module that needs "any statement" — routine bodies (11.60), triggers (11.49); `parseStatement` reuses the ref. |
+| `pStatement` / `pStatementRef` | `SchemaParser.fs` | the 13.4 statement `choice` (`SqlParser.fs`) | First module that needs "any statement" — routine bodies (11.60), triggers (11.49); `parseStatement` reuses the ref. Strict 13.4: no `DECLARE CURSOR`, temp table, multi-row `SELECT` or `WITH`. |
 | `pDataChangeStatementRef` | `QueryParser.fs` | the DML parsers (`SqlParser.fs`) | `<data change delta table>` (7.6) needs §14, compiled later. |
 | `pPredicateRef`, `pPredicateNoBooleanTestRef`, `pWhenOperandPart2Ref` | `ExpressionParser.fs` | `PredicateParser` (§8) (`SqlParser.fs`) | §6.3/§6.39/§6.12 consume §8 before `PredicateParser.fs` compiles: the full 8.1 chain, the no-6.39-test variant for non-`<boolean primary>` operands, and 6.12's part-2 list (`pBooleanTestPart2` itself lives in `ExpressionParser.fs`). |
 | `pPredicatePrimaryRef` | `ExpressionParser.fs` | `PredicateParser` (§8) (`PredicateParser.fs` itself) | §6.3 needs the 8.9/8.10/8.11/8.20/8.23 atoms bundled in `pPredicatePrimary`; wired last in its defining module. |

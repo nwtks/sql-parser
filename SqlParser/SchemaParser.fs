@@ -100,7 +100,8 @@ module SchemaParser =
             attempt (pKeyword "INITIALLY" >>. pKeyword "DEFERRED" >>% true)
             <|> (pKeyword "INITIALLY" >>. pKeyword "IMMEDIATE" >>% false)
 
-        // 10.8 <constraint deferrability> ::= [ NOT ] DEFERRABLE
+        // 10.8 <constraint characteristics> — the deferrable alternative
+        // ([ NOT ] DEFERRABLE) of <constraint characteristics>.
         let pDeferrable =
             attempt (pKeyword "NOT" >>. pKeyword "DEFERRABLE" >>% false)
             <|> (pKeyword "DEFERRABLE" >>% true)
@@ -199,14 +200,6 @@ module SchemaParser =
     // 11.74 <drop sequence generator statement> ::= DROP SEQUENCE <sequence generator name> <drop behavior>
     // 12.6 <drop role statement> ::= DROP ROLE <role name>
     let pDropStatement =
-        // 10.6 <routine designator> ::= [ <routine type> ] <qualified identifier>
-        // (<object name> in 12.2 / 12.3 — kept separate from <specific routine designator>
-        //  because <object name> carries a plain name, not a designator)
-        let pRoutineDesignator =
-            choice
-                [ attempt (pRoutineType >>. pSchemaQualifiedNameExpression)
-                  pSchemaQualifiedNameExpression ]
-
         // 11.71 <transforms to be dropped> ::= ALL | <transform group element>
         // Local because pDropStatement is its only consumer.
         let pTransformsToBeDropped =
@@ -257,7 +250,7 @@ module SchemaParser =
                   attempt (pKeyword "SEQUENCE" >>. pSchemaQualifiedNameExpression .>>. pDropBehavior)
                   |>> DropSequence
                   attempt (pKeyword "ROLE" >>. pIdentifierExpression) |>> DropRole
-                  attempt (pRoutineDesignator .>>. pDropBehavior) |>> DropRoutine ]
+                  attempt (pSpecificRoutineDesignator .>>. pDropBehavior) |>> DropRoutine ]
 
     // 11.8 <referential triggered action> ::= [ <update rule> ] [ <delete rule> ] | [ <delete rule> ] [ <update rule> ] — <update rule> ::= ON UPDATE <referential action>
     let private pReferentialTriggeredAction =
@@ -542,18 +535,43 @@ module SchemaParser =
 
         let pName = opt (pKeyword "CONSTRAINT" >>. pIdentifierExpression)
 
-        let pColumnList =
-            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
+        // 11.7 <without overlap specification> ::= <application time period name> WITHOUT OVERLAPS
+        let pWithoutOverlapSpecification =
+            pIdentifierExpression .>> pKeyword "WITHOUT" .>> pKeyword "OVERLAPS"
+
+        // 11.7 <unique column list> ::= <column name list>, then optional
+        // `[ <comma> <without overlap specification> ]`. A column-list item must not
+        // start the without-overlap period name (`app_time WITHOUT OVERLAPS`), so both
+        // the item and its preceding comma backtrack; the optional group then takes it.
+        let pUniqueColumnList =
+            let pColItem = attempt (pIdentifierExpression .>> notFollowedBy (pKeyword "WITHOUT"))
+
+            let pSepCol = attempt (token (pstring ",") >>. pColItem)
+
+            (pColItem
+             .>>. many pSepCol
+             |>> fun (first, rest) -> first :: rest)
+            .>>. opt (attempt (token (pstring ",") >>. pWithoutOverlapSpecification))
 
         let pConstraint =
             choice
                 [ attempt (
-                      pName .>> pKeyword "PRIMARY" .>> pKeyword "KEY" .>>. pColumnList
-                      |>> fun (n, cols) -> TableConstraint.PrimaryKey(n, cols)
+                      pName .>> pKeyword "PRIMARY" .>> pKeyword "KEY"
+                      .>>. between (token (pstring "(")) (token (pstring ")")) pUniqueColumnList
+                      |>> fun (n, (cols, without)) -> TableConstraint.PrimaryKey(n, cols, without)
                   )
                   attempt (
-                      pName .>> pKeyword "UNIQUE" .>>. pColumnList
-                      |>> fun (n, cols) -> TableConstraint.Unique(n, cols)
+                      pName .>> pKeyword "UNIQUE"
+                      .>>. between (token (pstring "(")) (token (pstring ")")) pUniqueColumnList
+                      |>> fun (n, (cols, without)) -> TableConstraint.Unique(n, cols, without)
+                  )
+                  attempt (
+                      // 11.7 UNIQUE ( VALUE ) — VALUE is reserved, so pColItem cannot
+                      // consume it as a column name; this branch is only reached when
+                      // the column-list form fails entirely.
+                      pName .>> pKeyword "UNIQUE"
+                      .>> between (token (pstring "(")) (token (pstring ")")) (pKeyword "VALUE" >>% ())
+                      |>> TableConstraint.UniqueValue
                   )
                   attempt (
                       pName .>>. pForeignKeyConstraint
@@ -1526,7 +1544,8 @@ module SchemaParser =
                       .>> pKeyword "RESTRICT"
                       |>> AlterTypeAction.DropAttribute
                   )
-                  // 11.56/11.57 <add [overriding] method specification>
+                  // 11.57 <add overriding method specification>
+                  // 11.56 <add original method specification> — the OVERRIDING and plain forms.
                   attempt (
                       pKeyword "ADD"
                       >>. choice
@@ -2035,7 +2054,7 @@ module SchemaParser =
                           .>>. pDropBehavior)
                  |>> fun ((kind1, kind2), restrict) -> TransformAlteration.DropTransformElements(kind1, kind2, restrict))
 
-        // 11.68 <alter transform group> ::= <group name> ( <alter transform action list> )
+        // 11.68 <alter group> ::= <group name> ( <alter transform action list> )
         let pAlterTransformGroup =
             pSchemaQualifiedNameExpression
             .>>. between

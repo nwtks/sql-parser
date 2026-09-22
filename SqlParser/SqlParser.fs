@@ -34,8 +34,9 @@ module SqlParser =
 
     // 7.17 <with clause> + <query expression> — WITH [ RECURSIVE ] <with list>
     // <query expression body>. The body is a query only: <with clause> is a prefix of
-    // <query expression> (7.17), so `WITH ... INSERT/UPDATE/DELETE/MERGE` is not a valid
-    // <SQL statement> and is rejected by both entry points.
+    // <query expression> (7.17), so `WITH ... INSERT/UPDATE/DELETE/MERGE` is never a valid
+    // <SQL statement>. A WITH-prefixed query is a <direct select statement: multiple rows>
+    // (22.2), so it is reachable only from `parse` (22.1), not from `parseStatement` (13.4).
     let private pWithStatement =
         pWithClause .>>. (pQueryExpression |>> Select |> withStmtPosition)
         |>> fun ((recu, ctes), stmt) ->
@@ -111,25 +112,30 @@ module SqlParser =
               pAlterTableStatement
               pTruncateTableStatement ]
 
-    // 14.1 <declare cursor> / 14.4 <open statement> / 14.5 <fetch statement> / 14.6 <close statement>
-    // 14.7 <select statement: single row> / 14.16 <temporary table declaration>
-    // 14.17 <free locator statement> / 14.18 <hold locator statement>
+    // 13.4 <SQL data statement> ::= <open statement> | <fetch statement> | <close statement>
+    //     | <select statement: single row> | <free locator statement> | <hold locator statement>
+    //     | <SQL data change statement>
+    // <declare cursor> (14.1, an SQL-client module statement) and <temporary table declaration>
+    // (14.16, a <direct SQL data statement> only) are deliberately absent — they are not
+    // <SQL procedure statement>s.
     let private pSqlDataStatement =
         choice
-            [ attempt pTemporaryTableDeclaration
-              attempt pDeclareCursor
-              attempt pFreeLocatorStatement
+            [ attempt pFreeLocatorStatement
               attempt pHoldLocatorStatement
               attempt pOpenStatement
               attempt pFetchStatement
               attempt pCloseStatement
               attempt pSelectStatementSingleRow ]
 
-    // 14.8-14.15 <DML statement> ::= <insert statement> | <update statement> | <delete statement> | <merge statement> | <query expression>
+    // 13.4 <SQL data change statement> ::= <delete statement: positioned> | <delete statement: searched>
+    //     | <insert statement> | <update statement: positioned> | <update statement: searched>
+    //     | <truncate table statement> | <merge statement>
+    // TRUNCATE is dispatched by pSqlSchemaStatement (a routing convenience — it is not an
+    // 11.x <schema element>, but both entry points share that choice).
+    // A bare multi-row <query expression> (22.2) is not a <SQL data change statement>.
     let private pSqlDataChangeStatement =
         choice
-            [ attempt (pQueryExpression |>> Select)
-              pInsertStatement
+            [ pInsertStatement
               pUpdateStatement
               pDeleteStatement
               pMergeStatement ]
@@ -239,10 +245,14 @@ module SqlParser =
     // 23.1 <get diagnostics statement> ::= GET DIAGNOSTICS <SQL diagnostics information>
     let private pSqlDiagnosticsStatement = choice [ attempt pGetDiagnosticsStatement ]
 
+    // 13.4 <SQL procedure statement> ::= <SQL executable statement>
+    // <SQL executable statement> ::= <SQL schema statement> | <SQL data statement>
+    //     | <SQL control statement> | <SQL transaction statement> | <SQL connection statement>
+    //     | <SQL session statement> | <SQL diagnostics statement> | <SQL dynamic statement>
+    // A WITH-prefixed query and a bare multi-row SELECT are 22.x forms, not 13.4 statements.
     pStatementRef.Value <-
         choice
-            [ attempt pWithStatement
-              attempt (pSqlDataStatement |> withStmtPosition)
+            [ attempt (pSqlDataStatement |> withStmtPosition)
               attempt (pSqlDataChangeStatement |> withStmtPosition)
               attempt (pSqlSchemaStatement |> withStmtPosition)
               attempt (pSqlControlStatement |> withStmtPosition)
@@ -270,8 +280,9 @@ module SqlParser =
     let parse sql =
         runParser (ws >>. pDirectSqlStatement .>> eof) sql
 
-    /// 13.4 — parses any <SQL statement> the library supports: a superset of the grammar's
-    /// <SQL executable statement>, which also accepts DECLARE CURSOR (14.1) and
-    /// <temporary table declaration> (14.16). The trailing <semicolon> is mandatory.
+    /// 13.4 — parses a <SQL procedure statement> (<SQL executable statement>). The trailing
+    /// <semicolon> is mandatory. Notably absent: DECLARE CURSOR (14.1, SQL-client modules),
+    /// <temporary table declaration> (14.16) and multi-row SELECT / WITH — those are direct
+    /// SQL (22.1) forms, reachable only through `parse`.
     let parseStatement sql =
         runParser (ws >>. pStatement .>> pSemicolon .>> eof) sql

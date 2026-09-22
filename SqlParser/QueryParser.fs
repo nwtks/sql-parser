@@ -294,7 +294,8 @@ module QueryParser =
         createParserForwardedToRef<JsonTableColumn list, unit> ()
 
     let private pJsonTableColumnsClauseBody allowNested =
-        // 7.11 <JSON table column empty/error behavior> ::= ERROR | NULL | DEFAULT <value expression>
+        // 7.11 <JSON table column empty behavior> ::= ERROR | NULL | DEFAULT <value expression>
+        // 7.11 <JSON table column error behavior> ::= ERROR | NULL | DEFAULT <value expression>
         //     (formatted columns additionally allow EMPTY ARRAY | EMPTY OBJECT)
         let pJsonTableColumnEmptyErrorBehavior =
             choice
@@ -444,9 +445,9 @@ module QueryParser =
 
     pJsonTableColumnsClauseRef.Value <- pJsonTableColumnsClauseBody true
 
-    // 7.11 <columns clause> for a JSON_TABLE_PRIMITIVE, whose column definitions have no
-    // <JSON table nested columns definition> alternative (7.11). No forward ref: its only
-    // consumer is defined after this point.
+    // 7.11 <JSON table primitive columns clause> for a JSON_TABLE_PRIMITIVE, whose column
+    // definitions have no <JSON table nested columns> alternative (7.11). No forward ref:
+    // its only consumer is defined after this point.
     let private pJsonTablePrimitiveColumnsClause = pJsonTableColumnsClauseBody false
 
     // 7.11 <JSON table plan>

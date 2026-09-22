@@ -22,10 +22,24 @@ The architecture is in [architecture.md](architecture.md); recurring pitfalls in
 
 ## Entry points and statement dispatch
 
-- **Two entry points.** `parse` (22.1) takes only the directly executable families and
-  requires the trailing `<semicolon>`; `parseStatement` (13.4) is the superset (cursors,
-  positioned DML, `CALL`, diagnostics, dynamic SQL). `parse` stays standard-conforming;
-  the positioned `UPDATE`/`DELETE` forms are excluded from it by explicit guards.
+- **Two entry points, each exact for its clause.** `parse` (22.1) takes only the
+  directly executable families and requires the trailing `<semicolon>`;
+  `parseStatement` (13.4) takes `<SQL executable statement>` — cursors
+  (`OPEN`/`FETCH`/`CLOSE`), `SELECT ... INTO`, positioned DML, `CALL`,
+  diagnostics, dynamic SQL. Neither is a superset of the other: `parse` excludes
+  the positioned `UPDATE`/`DELETE` forms by explicit guards, `parseStatement`
+  excludes multi-row `SELECT`, `WITH`, `DECLARE CURSOR` (14.1) and
+  `<temporary table declaration>` (14.16) because 13.4 lists none of them.
+  `pStatement` (shared with routine bodies 11.60 and triggers 11.49) is the same
+  strict 13.4 choice, so a routine body is `RETURN` / `SELECT ... INTO` / DML —
+  never a bare `SELECT`.
+- **`DECLARE CURSOR` (14.1) is parsed but unreachable.** Static `DECLARE CURSOR`
+  belongs to an SQL-client module (21), which this library does not expose;
+  adding a third entry point was rejected in favour of keeping exactly two
+  clause-exact public functions. `pDeclareCursor` (DataManipulationParser.fs)
+  stays implemented for a future §21 surface; both entry points reject the
+  syntax today. Dynamic `DECLARE ... FOR` (20.15) remains reachable through
+  `parseStatement`.
 - **`CREATE SCHEMA`'s `<schema element>` list is an explicit `choice`** (CREATE-family +
   `GRANT`), so `DROP` / `ALTER` / `TRUNCATE` / `REVOKE` cannot appear there.
 
@@ -69,7 +83,8 @@ The parser rejects what the standard does not permit, even in common vendor dial
   rejects any survivor. One AST case instead of 18 operator×quantifier infixes.
 - **Reserved built-ins get dedicated AST cases** (datetime functions, `SUBSTRING FROM/FOR`,
   navigation, `RUNNING`/`FINAL`, …); the four regex functions (6.30/6.32) share one
-  argument record whose parser accepts the union of their optional clauses.
+  argument record, but each production's parser only accepts its own optional clauses
+  (`WITH` / `OCCURRENCE` / `GROUP` — grammar `sql-2016-grammar.txt` 1819–2088).
 - **Postfix constructs reuse existing layers** (`COLLATE` as predicate suffix, multiset
   set-ops as a postfix fold, `<time zone specifier>` over `<interval primary>`) — slightly
   more permissive parents, no new precedence levels.

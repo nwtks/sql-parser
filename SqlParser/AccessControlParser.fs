@@ -91,17 +91,16 @@ module AccessControlParser =
 
         // The <specific routine designator> branch must be tried first: ROUTINE is a
         // non-reserved word, so the kind branch below would otherwise consume it as a
-        // plain <qualified name>. A local variant of pRoutineDesignator (which
-        // pDropStatement shares) is used so the <routine type> is kept in the AST.
+        // plain <qualified name>. The kind branch is separate from the bare <qualified
+        // name> branch so a non-reserved kind word used as a schema name
+        // (`domain.users`) does not commit to kind + name and then fail on `.users`.
         choice
             [ attempt (
                   SchemaParser.pRoutineType .>>. pSchemaQualifiedNameExpression
                   |>> fun (rt, name) -> None, Some rt, name
               )
-              attempt (
-                  opt pKind .>>. pSchemaQualifiedNameExpression
-                  |>> fun (kind, name) -> kind, None, name
-              ) ]
+              attempt (pKind .>>. pSchemaQualifiedNameExpression |>> fun (kind, name) -> Some kind, None, name)
+              attempt (pSchemaQualifiedNameExpression |>> fun name -> None, None, name) ]
 
     // 12.2 <grant privilege statement> ::= GRANT <privileges> TO <grantee> [ { , <grantee> }... ]
     //     [ WITH HIERARCHY OPTION ] [ WITH GRANT OPTION ] [ GRANTED BY <grantor> ]

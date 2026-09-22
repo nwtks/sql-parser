@@ -78,7 +78,9 @@ let private buildIndex (grammarPath: string) =
     let final = File.ReadAllLines grammarPath |> Array.fold step initial
     final.Numbered, final.Mentions
 
-/// The number a citation should use, or None when the name cannot be validated.
+/// The number a citation should use, or None when the name is mentioned only by
+/// a clause other than the cited one (allowed as a cross-reference).
+/// An unknown name (absent from the grammar entirely) is an error — reported as "?".
 let private expectedNumber
     (numbered: Map<string, string>)
     (mentions: Map<string, Set<string>>)
@@ -91,7 +93,7 @@ let private expectedNumber
         match Map.tryFind name mentions with
         | Some clauses when Set.contains num clauses -> None
         | Some clauses -> Some(String.concat "/" (clauses |> Set.toList |> List.sort))
-        | None -> None
+        | None -> Some "unknown rule"
 
 let private citationsIn (path: string) =
     File.ReadAllLines path
@@ -105,23 +107,30 @@ let private citationsIn (path: string) =
         else
             [||])
 
+let private failOn (numbered, mentions) (path: string) (failures: ResizeArray<string>) =
+    for file, line, num, name in citationsIn path do
+        match expectedNumber numbered mentions num name with
+        | Some expected ->
+            failures.Add(sprintf "%s:%d  %s <%s> -> %s" (Path.GetFileName path) line num name expected)
+        | None -> ()
+
 [<Fact>]
 let ``Rule-number comments match sql-2016-grammar.txt`` () =
     match findGrammar () with
     | None -> Assert.Skip "sql-2016-grammar.txt not found" |> ignore
     | Some grammarPath ->
-        let numbered, mentions = buildIndex grammarPath
-        let sourceDir = Path.Combine(Path.GetDirectoryName grammarPath, "SqlParser")
+        let index = buildIndex grammarPath
+        let root = Path.GetDirectoryName grammarPath
+        let failures = ResizeArray<string>()
 
-        let failures =
-            Directory.GetFiles(sourceDir, "*.fs")
-            |> Array.collect citationsIn
-            |> Array.choose (fun (file, line, num, name) ->
-                expectedNumber numbered mentions num name
-                |> Option.map (fun expected -> sprintf "%s:%d  %s <%s> -> %s" file line num name expected))
-            |> Array.toList
+        for dir in [ "SqlParser"; "SqlParser.Tests" ] do
+            let sourceDir = Path.Combine(root, dir)
 
-        if not (List.isEmpty failures) then
+            if Directory.Exists sourceDir then
+                for path in Directory.GetFiles(sourceDir, "*.fs") do
+                    failOn index path failures
+
+        if failures.Count > 0 then
             Assert.Fail(
                 "Rule-number mismatches (see sql-2016-grammar.txt):"
                 + Environment.NewLine

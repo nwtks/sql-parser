@@ -77,10 +77,9 @@ parsers, AST patterns, or tests — every entry is a real failure mode from this
   `attempt (pSetIdentityColumnGeneration .>>. many option) <|> (many1 option)`).
 - **Dispatch order is load-bearing** because `pKeyword` matches non-reserved words too:
   `ALTER TYPE` < `ALTER ROUTINE`; `DROP TYPE` < `DROP ROUTINE`; `EXECUTE IMMEDIATE` <
-  `EXECUTE <name>`; `DECLARE LOCAL TEMPORARY TABLE` < `DECLARE <cursor>`;
-  `SELECT ... INTO` < `pQuery`; 11.60 `pRoutineBody`'s PTF branch < its
-  `<SQL routine spec>` branch (or `DESCRIBE WITH …` resolves to the 20.10
-  `<describe statement>`); 20.17 `ALLOCATE … FOR <statement>` < 20.18
+  `EXECUTE <name>`; `SELECT ... INTO` < `pQuery`; 11.60 `pRoutineBody`'s PTF
+  branch < its `<SQL routine spec>` branch (or `DESCRIBE WITH …` resolves to the
+  20.10 `<describe statement>`); 20.17 `ALLOCATE … FOR <statement>` < 20.18
   `… FOR PROCEDURE`; `(VALUES …)` < subquery in `pTablePrimary`; `FINAL|NEW|OLD TABLE` <
   plain table; `SELECT ( <privilege method list> )` < `SELECT [ <column list> ]`;
   6.26 navigation < `pRoutineInvocation`/`pColumnReferenceExpression`; 6.37's
@@ -89,6 +88,12 @@ parsers, AST patterns, or tests — every entry is a real failure mode from this
   `GRANT EXECUTE ON ROUTINE add TO u` reads as a plain name). `pPrivilegeMethodItem`
   must also re-check that a `<routine type>` is present, or the bare-name form of
   `pSpecificRoutineDesignator` swallows `SELECT (c1, c2)`.
+- **The two entry points are not nested** — do not write a `parseStatement` test
+  expecting a 22.1 form to pass (multi-row `SELECT`, `WITH`, temp table) or a
+  `parse` test expecting a 13.4 form (positioned DML, `OPEN`, `CALL`). They
+  reject different families; a test that mixes them fails for the wrong reason.
+  Static `14.1 DECLARE CURSOR` is rejected by *both* — `pDeclareCursor` has no
+  public caller (see [trade-off.md](trade-off.md)).
 - **Predicate suffixes are gated on the accumulated expression** —
   `pBooleanTestSuffixes` picks per shape: `IsBoolean` → none; other top-level boolean →
   `pBooleanTestPart2` only; `BinaryOp`/`UnaryOp`/`RowValueConstructor` →
@@ -191,9 +196,10 @@ parsers, AST patterns, or tests — every entry is a real failure mode from this
 - **The `parse` helpers append `;` and need `(sql: string)`** (FS0072). A test calling
   `SqlParser.parse` directly must append the semicolon itself or pass for the wrong
   reason. Use `parse` (22.1) for directly executable statements and `parseStatement`
-  (13.4) for cursors / dynamic SQL / positioned DML — keep a
+  (13.4) for `OPEN`/`FETCH`/`CLOSE`, dynamic SQL and positioned DML — keep a
   `parseStatement`/`parseStatementFails` pair in any file exercising both entry points,
-  or rejection tests pass vacuously.
+  or rejection tests pass vacuously. The entry points reject *different* families (see
+  the dispatch section above), so pick the one whose clause the test targets.
 - **`open FParsec` shadows `Result.Ok`/`Result.Error`** with `ReplyStatus` (FS3191) —
   qualify as `Result.Ok` / `Result.Error`.
 - **Prefer pattern matching over `Assert.Equal` on `Expression`s** — `Pos` never matches

@@ -62,7 +62,7 @@ module TransactionParser =
         pKeyword "RELEASE" >>. pKeyword "SAVEPOINT" >>. pIdentifierExpression
         |>> ReleaseSavepoint
 
-    // 17.7/17.8 <commit/rollback> chain option ::= AND [ NO ] CHAIN
+    // 17.7 <commit statement> — the `AND [ NO ] CHAIN` tail (also used by 17.8).
     let private pChain =
         attempt (pKeyword "AND" >>. pKeyword "NO" >>. pKeyword "CHAIN" >>% Some false)
         <|> attempt (pKeyword "AND" >>. pKeyword "CHAIN" >>% Some true)

@@ -138,8 +138,8 @@ let ``A WITH body that is not a query is rejected (7.17)`` () =
     | Error _ -> ()
     | Ok res -> Assert.Fail(sprintf "Expected WITH + UPDATE to be rejected, got %A" res)
 
-    // <with clause> is a prefix of <query expression>, so this is invalid on the general
-    // entry point too — not merely a 22.1 exclusion.
+    // <with clause> is a prefix of <query expression>, so this is invalid on every
+    // entry point — not merely a 22.1 exclusion.
     match SqlParser.parseStatement "WITH cte AS (SELECT 1) INSERT INTO t VALUES (1);" with
     | Error _ -> ()
     | Ok res -> Assert.Fail(sprintf "Expected WITH + INSERT to be rejected, got %A" res)
@@ -149,11 +149,31 @@ let ``A WITH body that is not a query is rejected (7.17)`` () =
     | Ok res -> Assert.Fail(sprintf "Expected WITH + DELETE to be rejected, got %A" res)
 
 [<Fact>]
-let ``General statement entry point accepts the SQL procedure families (13.4)`` () =
-    match SqlParser.parseStatement "DECLARE c CURSOR FOR SELECT a FROM t;" with
-    | Ok { Kind = DeclareCursor _ } -> ()
-    | res -> Assert.Fail(sprintf "Expected DeclareCursor, got %A" res)
+let ``General statement entry point rejects the direct SQL query forms (13.4)`` () =
+    // A multi-row SELECT (22.2) and a WITH-prefixed query are not <SQL procedure statement>s;
+    // 13.4 admits only <select statement: single row> (SELECT ... INTO).
+    match SqlParser.parseStatement "SELECT a FROM t;" with
+    | Error _ -> ()
+    | Ok res -> Assert.Fail(sprintf "Expected a multi-row SELECT to be rejected, got %A" res)
 
+    match SqlParser.parseStatement "WITH cte AS (SELECT 1 FROM t) SELECT * FROM cte;" with
+    | Error _ -> ()
+    | Ok res -> Assert.Fail(sprintf "Expected a WITH query to be rejected, got %A" res)
+
+[<Fact>]
+let ``General statement entry point rejects the non-13.4 statement families`` () =
+    // 14.1 <declare cursor> (SQL-client module) and 14.16 <temporary table declaration>
+    // (22.1 only) are not <SQL procedure statement>s.
+    match SqlParser.parseStatement "DECLARE c CURSOR FOR SELECT a FROM t;" with
+    | Error _ -> ()
+    | Ok res -> Assert.Fail(sprintf "Expected DECLARE CURSOR to be rejected, got %A" res)
+
+    match SqlParser.parseStatement "DECLARE LOCAL TEMPORARY TABLE tt (a INT);" with
+    | Error _ -> ()
+    | Ok res -> Assert.Fail(sprintf "Expected a temporary table declaration to be rejected, got %A" res)
+
+[<Fact>]
+let ``General statement entry point accepts the SQL procedure families (13.4)`` () =
     match SqlParser.parseStatement "OPEN c;" with
     | Ok { Kind = Open _ } -> ()
     | res -> Assert.Fail(sprintf "Expected Open, got %A" res)
@@ -176,6 +196,6 @@ let ``General statement entry point accepts the SQL procedure families (13.4)`` 
 
 [<Fact>]
 let ``General statement entry point requires the semicolon`` () =
-    match SqlParser.parseStatement "DECLARE c CURSOR FOR SELECT a FROM t" with
+    match SqlParser.parseStatement "OPEN c" with
     | Error _ -> ()
     | Ok res -> Assert.Fail(sprintf "Expected a missing semicolon to be rejected, got %A" res)

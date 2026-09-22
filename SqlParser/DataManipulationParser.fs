@@ -57,6 +57,8 @@ module DataManipulationParser =
     // 14.3 <cursor specification> ::= <query expression> [ <updatability clause> ]
     // The <updatability clause> belongs to the <cursor specification>, NOT to the
     // <query expression> (7.17 has no such slot).
+    // No entry point exposes 14.1 (an SQL-client module statement): neither 13.4 nor
+    // 22.1 lists <declare cursor> — see docs/trade-off.md. Kept for a future §21 surface.
     let pDeclareCursor =
         // 14.3 <updatability clause> ::= FOR { READ ONLY | UPDATE [ OF <column name list> ] }
         let pUpdatabilityClause =
@@ -91,6 +93,52 @@ module DataManipulationParser =
                   { Expression.Kind = Parameter name
                     Pos = { Line = pos.Line; Column = pos.Column } } ]
 
+    // 6.4 <target specification> ::=
+    //     <host parameter specification> | <SQL parameter reference> | <column reference>
+    //   | <target array element specification> | <dynamic parameter specification>
+    //   | <embedded variable name>
+    // Broader than <simple target specification> (23.1): admits `?`, an
+    // <indicator parameter>, and <target array element specification>. Shared by
+    // 14.5 <fetch target list>, 14.7 <select target list> and 20.12 <into argument>.
+    let pTargetSpecification =
+        // 6.4 <target array element specification> ::=
+        //   <target array reference> <left bracket> <simple value specification> <right bracket>
+        let pTargetArrayElement =
+            attempt (
+                (pColumnReferenceExpression
+                 <|> (getPosition .>>. pHostParameter
+                      |>> fun (pos, name) ->
+                          { Expression.Kind = Parameter name
+                            Pos = { Line = pos.Line; Column = pos.Column } }))
+                .>>. between (token (pstring "[")) (token (pstring "]")) pSimpleValueSpecification
+                |>> fun (arr, idx) ->
+                    { Expression.Kind = ArrayElement(arr, idx)
+                      Pos = arr.Pos }
+            )
+
+        // 6.4 <host parameter specification> ::= <host parameter name> [ <indicator parameter> ]
+        // <indicator parameter> ::= [ INDICATOR ] <host parameter name>
+        let pHostParameterSpecification =
+            getPosition .>>. pHostParameter
+            .>>. opt (attempt (opt (pKeyword "INDICATOR") >>. pHostParameter))
+            |>> fun ((pos, name), indicator) ->
+                let p = { Line = pos.Line; Column = pos.Column }
+
+                match indicator with
+                | Some ind ->
+                    { Expression.Kind = IndicatorParameter(name, { Kind = Parameter ind; Pos = p })
+                      Pos = p }
+                | None -> { Expression.Kind = Parameter name; Pos = p }
+
+        choice
+            [ pTargetArrayElement
+              pHostParameterSpecification
+              (getPosition .>>. pQuestionMark
+               |>> fun (pos, _) ->
+                   { Expression.Kind = Parameter "?"
+                     Pos = { Line = pos.Line; Column = pos.Column } })
+              pColumnReferenceExpression ]
+
     // 20.10 <using descriptor> / 20.12 <into descriptor>
     // The `[ SQL ] DESCRIPTOR <descriptor name>` tail shared by both.
     let private pDescriptorName =
@@ -111,10 +159,11 @@ module DataManipulationParser =
 
     // 20.12 <output using clause> ::= <into arguments> | <into descriptor>
     // <into arguments> ::= INTO <into argument> [ { <comma> <into argument> }... ]
+    // 20.12 <into argument> ::= <target specification>
     let pOutputUsingClause =
         pKeyword "INTO"
         >>. (attempt (pDescriptorName |>> UsingClause.UsingDescriptor)
-             <|> (sepBy1 pSimpleTargetSpecification (token (pstring ","))
+             <|> (sepBy1 pTargetSpecification (token (pstring ","))
                   |>> UsingClause.UsingArguments))
 
     // 14.4 <open statement> ::= OPEN <cursor name>
@@ -138,11 +187,14 @@ module DataManipulationParser =
             <|> (pKeyword "ABSOLUTE" >>. pSimpleValueSpecification |>> Absolute)
             <|> (pKeyword "RELATIVE" >>. pSimpleValueSpecification |>> Relative)
 
-        pKeyword "FETCH" >>. opt (attempt pFetchOrientation)
-        .>>. opt (attempt (pKeyword "FROM" >>% ()))
+        // The optional group is `[ [ <fetch orientation> ] FROM ]` as a unit:
+        // an orientation without FROM is not valid (backtracks, then the bare
+        // non-reserved word is tried as a <cursor name>).
+        pKeyword "FETCH"
+        >>. opt (attempt (opt pFetchOrientation .>> pKeyword "FROM"))
         .>>. pLocalQualifiedNameExpression
         .>>. pOutputUsingClause
-        |>> fun (((orient, _), cursor), output) -> Fetch(orient, cursor, output)
+        |>> fun ((head, cursor), output) -> Fetch(Option.flatten head, cursor, output)
 
     // 14.6 <close statement> ::= CLOSE <cursor name>
     let pCloseStatement = pKeyword "CLOSE" >>. pLocalQualifiedNameExpression |>> Close
@@ -150,13 +202,14 @@ module DataManipulationParser =
     // 14.7 <select statement: single row>
     // SELECT [ <set quantifier> ] <select list> INTO <select target list>
     //     <table expression>
+    // 14.7 <select target list> ::= <target specification> [ { , <target specification> }... ]
     // The <table expression> (FROM/WHERE/GROUP BY/HAVING/WINDOW) reuses the
     // QueryParser clause parsers; INTO sits between the select list and FROM.
     let pSelectStatementSingleRow =
         pKeyword "SELECT" >>. QueryParser.pSetQuantifier
         .>>. sepBy1 QueryParser.pSelectSublist (token (pstring ","))
         >>= fun (dist, cols) ->
-            pKeyword "INTO" >>. sepBy1 pSchemaQualifiedNameExpression (token (pstring ","))
+            pKeyword "INTO" >>. sepBy1 pTargetSpecification (token (pstring ","))
             >>= fun into ->
                 QueryParser.pFromClause
                 >>= fun from ->
