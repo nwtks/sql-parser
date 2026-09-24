@@ -138,7 +138,7 @@ module ControlParser =
             choice
                 [ attempt pDescriptorArgument |>> SqlArgumentDescriptor
                   attempt pTableArgument |>> SqlArgumentTable
-                  pNullSpecification |>> SqlArgumentValue
+                  pContextuallyTypedValueSpecification |>> SqlArgumentValue
                   pExpression |>> SqlArgumentValue ]
 
         // 10.4 <copartition clause> ::= COPARTITION <copartition list>
@@ -178,7 +178,7 @@ module ControlParser =
                   // `f(x) AS t PARTITION BY a` is a <table argument> (10.4).
                   attempt (pGeneralizedExpressionArgument .>> followedBy pSqlArgumentEnd)
                   attempt pTableArgument |>> SqlArgumentTable
-                  pNullSpecification |>> SqlArgumentValue
+                  pContextuallyTypedValueSpecification |>> SqlArgumentValue
                   pExpression |>> SqlArgumentValue ]
 
         // A leading COPARTITION starts the <copartition clause>, not a routine call named

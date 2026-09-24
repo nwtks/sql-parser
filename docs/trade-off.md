@@ -70,7 +70,25 @@ The parser rejects what the standard does not permit, even in common vendor dial
   (consumers would layer extensions on top), but an accepted string is much more likely
   to be valid SQL-2016.
 
-## Expressions and data types
+## 2026-09 SQL:2016 conformance changes
+
+- 6.4 `<SQL parameter reference>` is represented by the existing `Identifier` /
+  `ColumnReference` AST; parameter-vs-column resolution remains semantic. 6.5 shares
+  `<implicitly typed value specification>` and `<contextually typed value specification>`
+  across CAST, SQL arguments, INSERT/MERGE values, UPDATE/merge assignment, and
+  parameter defaults. `ARRAY[]` / `MULTISET[]` therefore use the existing constructor
+  nodes rather than adding an information-losing marker.
+- Boolean-free parser layers are separate from the full expression operator parser.
+  This keeps non-boolean slots (character/numeric/JSON/point-in-time and ORDER BY sort
+  keys) from consuming comparisons or predicate suffixes while preserving the full parser
+  for search conditions.
+- 6.10 is currently represented by the existing `WindowFunction` record; null-treatment
+  and from-first/last fields are reserved for a later isolated parser change rather than
+  being silently dropped by a partial suffix implementation. The grammar-specific
+  aggregate families are validated in the shared routine validation block.
+- `JSON_ARRAY` now has an additive query-constructor AST case; query bodies remain
+  opaque to expression traversal, like the other query-bearing constructor nodes.
+
 
 - **Types avoid left recursion by construction** — `pDataTypeElement` + a folded
   `pCollectionType` chain, so typo'd names fail cleanly and `INT ARRAY ARRAY` works.

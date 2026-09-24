@@ -353,8 +353,9 @@ module SchemaParser =
         // `?` / `:name` and `COLLATION FOR (...)`, none of which are <default option>s.
         let pDefaultOption =
             // 11.5 <implicitly typed value specification> ::= <null specification> | <empty specification>
-            // (<null specification> is 6.5 pNullSpecification; <empty specification> is
-            //  ARRAY[] / MULTISET[] — see 6.42 / 6.45)
+            // The empty constructors are supplied by ExpressionParser's shared
+            // 6.5 pEmptySpecification parser; this local alias keeps the
+            // <default option> implementation independent of the broader value form.
             let pEmptySpecification =
                 attempt (
                     pKeyword "ARRAY" >>. token pLeftBracket .>> token pRightBracket
@@ -544,13 +545,12 @@ module SchemaParser =
         // start the without-overlap period name (`app_time WITHOUT OVERLAPS`), so both
         // the item and its preceding comma backtrack; the optional group then takes it.
         let pUniqueColumnList =
-            let pColItem = attempt (pIdentifierExpression .>> notFollowedBy (pKeyword "WITHOUT"))
+            let pColItem =
+                attempt (pIdentifierExpression .>> notFollowedBy (pKeyword "WITHOUT"))
 
             let pSepCol = attempt (token (pstring ",") >>. pColItem)
 
-            (pColItem
-             .>>. many pSepCol
-             |>> fun (first, rest) -> first :: rest)
+            (pColItem .>>. many pSepCol |>> fun (first, rest) -> first :: rest)
             .>>. opt (attempt (token (pstring ",") >>. pWithoutOverlapSpecification))
 
         let pConstraint =
@@ -569,7 +569,8 @@ module SchemaParser =
                       // 11.7 UNIQUE ( VALUE ) — VALUE is reserved, so pColItem cannot
                       // consume it as a column name; this branch is only reached when
                       // the column-list form fails entirely.
-                      pName .>> pKeyword "UNIQUE"
+                      pName
+                      .>> pKeyword "UNIQUE"
                       .>> between (token (pstring "(")) (token (pstring ")")) (pKeyword "VALUE" >>% ())
                       |>> TableConstraint.UniqueValue
                   )
@@ -1306,9 +1307,8 @@ module SchemaParser =
                 .>>. opt (
                     pKeyword "DEFAULT"
                     >>. (attempt pDescriptorValueConstructor
-                         <|> pExpression
-                         // 6.5 <contextually typed value specification> — DEFAULT NULL is legal.
-                         <|> pNullSpecification)
+                         <|> pContextuallyTypedValueSpecification
+                         <|> pExpression)
                 )
                 |>> fun (((mode, name, paramType), isResult), defaultVal) ->
                     { Mode = mode

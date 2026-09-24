@@ -347,6 +347,9 @@ let ``FOR SYSTEM_TIME point in time rejects non datetime operators`` () =
     parseFails "SELECT * FROM t FOR SYSTEM_TIME AS OF a * b"
     parseFails "SELECT * FROM t FOR SYSTEM_TIME AS OF a || b"
     parseFails "SELECT * FROM t FOR SYSTEM_TIME AS OF a = b"
+    parseFails "SELECT * FROM t FOR SYSTEM_TIME AS OF TRUE"
+    parseFails "SELECT * FROM t FOR SYSTEM_TIME AS OF FALSE"
+    parseFails "SELECT * FROM t FOR SYSTEM_TIME AS OF UNKNOWN"
 
 [<Fact>]
 let ``MATCH_RECOGNIZE verification`` () =
@@ -731,6 +734,26 @@ let ``UNNEST derived table verification`` () =
 let ``UNNEST without alias is rejected`` () = parseFails "SELECT * FROM UNNEST(arr)"
 
 [<Fact>]
+let ``TABLE collection expression requires an alias`` () =
+    parseFails "SELECT * FROM TABLE(arr)"
+
+    match parse "SELECT * FROM TABLE(arr) AS a" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = TableFunction(_, Some _, None) } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected table function, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
+let ``PTF table may omit an alias`` () =
+    match parse "SELECT * FROM TABLE(generate_series(1, 3))" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = PtfTable(_, None, None) } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected PTF table, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
 let ``ONLY table reference verification`` () =
     match parse "SELECT * FROM ONLY (users)" with
     | Select(SelectQuery s) ->
@@ -775,25 +798,29 @@ let ``TABLE function and PTF derived table verification`` () =
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
-let ``Data change delta table verification`` () =
-    match parse "SELECT * FROM NEW TABLE (INSERT INTO t VALUES (1))" with
+let ``Delta table without alias is rejected`` () =
+    parseFails "SELECT * FROM NEW TABLE (INSERT INTO t VALUES (1))"
+    parseFails "SELECT * FROM OLD TABLE (DELETE FROM t WHERE id = 1)"
+    parseFails "SELECT * FROM FINAL TABLE (UPDATE t SET id = 1)"
+
+    match parse "SELECT * FROM NEW TABLE (INSERT INTO t VALUES (1)) AS n" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = DataChangeDelta(ResultOption.New, Insert _, None, None) } ] -> ()
+        | [ { Kind = DataChangeDelta(ResultOption.New, Insert _, Some _, None) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected DataChangeDelta New, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
-    match parse "SELECT * FROM OLD TABLE (DELETE FROM t WHERE id = 1)" with
+    match parse "SELECT * FROM OLD TABLE (DELETE FROM t WHERE id = 1) AS o" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = DataChangeDelta(ResultOption.Old, Delete _, None, None) } ] -> ()
+        | [ { Kind = DataChangeDelta(ResultOption.Old, Delete _, Some _, None) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected DataChangeDelta Old, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
-    match parse "SELECT * FROM FINAL TABLE (UPDATE t SET id = 1)" with
+    match parse "SELECT * FROM FINAL TABLE (UPDATE t SET id = 1) AS f" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = DataChangeDelta(ResultOption.Final, Update _, None, None) } ] -> ()
+        | [ { Kind = DataChangeDelta(ResultOption.Final, Update _, Some _, None) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected DataChangeDelta Final, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
@@ -870,7 +897,7 @@ let ``NATURAL CROSS JOIN is rejected`` () =
 
 [<Fact>]
 let ``PARTITION BY join verification`` () =
-    match parse "SELECT * FROM t1 JOIN t2 PARTITION BY (a, b) ON t1.id = t2.id" with
+    match parse "SELECT * FROM t1 PARTITION BY (a, b) JOIN t2 ON t1.id = t2.id" with
     | Select(SelectQuery s) ->
         match s.From with
         | [ { Kind = JoinedTable { PartitionBy = Some [ { Kind = Identifier "A" }; { Kind = Identifier "B" } ] } } ] ->
@@ -881,7 +908,7 @@ let ``PARTITION BY join verification`` () =
 [<Fact>]
 let ``PARTITION BY join rejects an expression (7.10)`` () =
     // <partitioned join column reference list> is a list of <column reference>s.
-    parseFails "SELECT * FROM t1 JOIN t2 PARTITION BY (a + b) ON t1.id = t2.id"
+    parseFails "SELECT * FROM t1 PARTITION BY (a + b) JOIN t2 ON t1.id = t2.id"
 
 [<Fact>]
 let ``NATURAL JOIN and USING verification`` () =
@@ -1259,10 +1286,19 @@ let ``FOR SHARE is rejected (not in SQL-2016)`` () =
     parseFails "SELECT * FROM users FOR SHARE"
 
 [<Fact>]
-let ``OFFSET with expression is rejected`` () =
+let ``ORDER BY rejects a boolean sort key`` () =
+    parseFails "SELECT a FROM t ORDER BY a = b"
+    parseFails "SELECT a FROM t ORDER BY a IS DISTINCT FROM b"
+    parseFails "SELECT a FROM t ORDER BY EXISTS (SELECT 1)"
     parseFails "SELECT * FROM t OFFSET 1 + 1 ROWS"
-    parseFails "SELECT * FROM t OFFSET x ROWS"
     parseFails "SELECT * FROM t OFFSET (SELECT 1) ROWS"
+
+    match parse "SELECT * FROM t OFFSET x ROWS" with
+    | Select(SelectQuery s) ->
+        match s.Offset with
+        | Some { Kind = Identifier "X" } -> ()
+        | other -> Assert.Fail(sprintf "Expected SQL parameter reference for OFFSET, got %A" other)
+    | res -> Assert.Fail(sprintf "Expected SQL parameter reference for OFFSET, got %A" res)
 
 [<Fact>]
 let ``FETCH FIRST with expression is rejected`` () =

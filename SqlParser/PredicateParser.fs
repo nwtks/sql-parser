@@ -366,8 +366,8 @@ module PredicateParser =
                          // EQUALS / PRECEDES / SUCCEEDS / IMMEDIATELY ... require a
                          // <period predicand>: PERIOD ( ... ) or a <period reference>
                          // (a plain name).
-                          attempt pPeriodPredicand <|> pSchemaQualifiedNameExpression
-                          |>> fun right -> kind, right)
+                         attempt pPeriodPredicand <|> pSchemaQualifiedNameExpression
+                         |>> fun right -> kind, right)
                     |>> fun (kind, right) ->
                         fun left ->
                             { Expression.Kind = PeriodPredicate(kind, left, right)
@@ -442,7 +442,13 @@ module PredicateParser =
               pNullPart2
               pNormalizedPart2
               pMatchPart2
-              pOverlapsPart2 ]
+              pOverlapsPart2
+              // 6.12 <when operand> explicitly includes these predicate part-2 forms.
+              pDistinctPart2
+              pMemberPart2
+              pSubmultisetPart2
+              pSetPart2
+              pTypePart2 ]
 
         choice (
             if forWhenOperand then

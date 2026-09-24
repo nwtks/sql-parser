@@ -365,6 +365,12 @@ let ``Routine invocation arity and suffix restrictions (6.10 / 10.9)`` () =
     parseFails "SELECT COUNT(*, x)"
     // <binary set function> takes exactly two arguments
     parseFails "SELECT COVAR_POP(a)"
+    parseFails "SELECT COVAR_POP(DISTINCT a, b)"
+    parseFails "SELECT COVAR_POP(ALL a, b)"
+
+    match parse "SELECT COVAR_POP(a, b)" with
+    | FunctionCall({ Kind = Identifier "COVAR_POP" }, _, _, _, _, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected binary set function, got %A" res)
     // <nth value function> takes exactly two arguments
     parseFails "SELECT NTH_VALUE(x) OVER ()"
     // <lead or lag function> offset is an <exact numeric literal>
@@ -1158,8 +1164,13 @@ let ``SUBSTRING rejects a non char length unit`` () =
 [<Fact>]
 let ``OVERLAY PLACING verification`` () =
     match parse "SELECT OVERLAY(name PLACING 'x' FROM 2)" with
-    | Overlay({ Kind = Identifier "NAME" }, { Kind = Literal(String "x") }, { Kind = Literal(Number 2m) }, None) -> ()
+    | Overlay({ Kind = Identifier "NAME" }, { Kind = Literal(String "x") }, { Kind = Literal(Number 2m) }, None, None) ->
+        ()
     | res -> Assert.Fail(sprintf "Expected Overlay, got %A" res)
+
+    match parse "SELECT OVERLAY(name PLACING 'x' FROM 2 USING OCTETS)" with
+    | Overlay(_, _, _, None, Some "OCTETS") -> ()
+    | res -> Assert.Fail(sprintf "Expected OVERLAY USING, got %A" res)
 
 [<Fact>]
 let ``SUBSTRING SIMILAR ESCAPE verification`` () =

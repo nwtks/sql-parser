@@ -119,7 +119,8 @@ module DataManipulationParser =
         // 6.4 <host parameter specification> ::= <host parameter name> [ <indicator parameter> ]
         // <indicator parameter> ::= [ INDICATOR ] <host parameter name>
         let pHostParameterSpecification =
-            getPosition .>>. pHostParameter
+            getPosition
+            .>>. pHostParameter
             .>>. opt (attempt (opt (pKeyword "INDICATOR") >>. pHostParameter))
             |>> fun ((pos, name), indicator) ->
                 let p = { Line = pos.Line; Column = pos.Column }
@@ -128,7 +129,9 @@ module DataManipulationParser =
                 | Some ind ->
                     { Expression.Kind = IndicatorParameter(name, { Kind = Parameter ind; Pos = p })
                       Pos = p }
-                | None -> { Expression.Kind = Parameter name; Pos = p }
+                | None ->
+                    { Expression.Kind = Parameter name
+                      Pos = p }
 
         choice
             [ pTargetArrayElement
@@ -163,8 +166,7 @@ module DataManipulationParser =
     let pOutputUsingClause =
         pKeyword "INTO"
         >>. (attempt (pDescriptorName |>> UsingClause.UsingDescriptor)
-             <|> (sepBy1 pTargetSpecification (token (pstring ","))
-                  |>> UsingClause.UsingArguments))
+             <|> (sepBy1 pTargetSpecification (token (pstring ",")) |>> UsingClause.UsingArguments))
 
     // 14.4 <open statement> ::= OPEN <cursor name>
     // 20.19 <dynamic open statement> ::= OPEN <conventional dynamic cursor name> [ <input using clause> ]
@@ -190,8 +192,7 @@ module DataManipulationParser =
         // The optional group is `[ [ <fetch orientation> ] FROM ]` as a unit:
         // an orientation without FROM is not valid (backtracks, then the bare
         // non-reserved word is tried as a <cursor name>).
-        pKeyword "FETCH"
-        >>. opt (attempt (opt pFetchOrientation .>> pKeyword "FROM"))
+        pKeyword "FETCH" >>. opt (attempt (opt pFetchOrientation .>> pKeyword "FROM"))
         .>>. pLocalQualifiedNameExpression
         .>>. pOutputUsingClause
         |>> fun ((head, cursor), output) -> Fetch(Option.flatten head, cursor, output)
@@ -342,12 +343,12 @@ module DataManipulationParser =
 
     // 14.10 <truncate table statement> ::= TRUNCATE TABLE <target table> [ <identity column restart option> ]
     let pTruncateTableStatement =
-        pKeyword "TRUNCATE" >>. pKeyword "TABLE" >>. pSchemaQualifiedNameExpression
+        pKeyword "TRUNCATE" >>. pKeyword "TABLE" >>. pTargetTable
         .>>. opt (
             pKeyword "RESTART" >>. pKeyword "IDENTITY" >>% true
             <|> (pKeyword "CONTINUE" >>. pKeyword "IDENTITY" >>% false)
         )
-        |>> fun (table, restart) -> Truncate(table, restart)
+        |>> fun ((table, isOnly), restart) -> Truncate(table, isOnly, restart)
 
     // 14.11 <override clause> ::= OVERRIDING USER VALUE | OVERRIDING SYSTEM VALUE
     // (None when absent; Some true = USER, Some false = SYSTEM)
@@ -374,7 +375,7 @@ module DataManipulationParser =
                     (between
                         (token (pstring "("))
                         (token (pstring ")"))
-                        (sepBy1 (pDefaultSpecification <|> pNullSpecification <|> pExpression) (token (pstring ","))))
+                        (sepBy1 (pContextuallyTypedValueSpecification <|> pExpression) (token (pstring ","))))
                     (token (pstring ","))
             |>> Values
 
@@ -423,7 +424,7 @@ module DataManipulationParser =
                 [ attempt (pKeyword "UPDATE" >>. pKeyword "SET")
                   >>. sepBy1
                           (pIdentifierExpression .>> token (pstring "=")
-                           .>>. (pNullSpecification <|> pExpression))
+                           .>>. (pContextuallyTypedValueSpecification <|> pExpression))
                           (token (pstring ","))
                   |>> MergeUpdate
                   pKeyword "DELETE" >>% MergeDelete ]
@@ -439,7 +440,7 @@ module DataManipulationParser =
             .>>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (sepBy1 (pDefaultSpecification <|> pNullSpecification <|> pExpression) (token (pstring ",")))
+                (sepBy1 (pContextuallyTypedValueSpecification <|> pExpression) (token (pstring ",")))
             |>> fun ((cols, ovr), values) -> MergeInsert(cols, ovr, values)
 
         // 14.12 <merge when matched clause>     ::= WHEN MATCHED [ AND <search condition> ] THEN <merge update or delete specification>
@@ -495,7 +496,7 @@ module DataManipulationParser =
                 .>>. between
                     (token (pstring "("))
                     (token (pstring ")"))
-                    (sepBy1 (pNullSpecification <|> pExpression) (token (pstring ",")))
+                    (sepBy1 (pContextuallyTypedValueSpecification <|> pExpression) (token (pstring ",")))
                 |>> MultipleSet
             )
             <|> attempt (
@@ -504,7 +505,7 @@ module DataManipulationParser =
                 // <set clause> ::= <mutated set clause> <equals operator> <update source>
                 pIdentifierExpression .>>. many1 (token (pstring ".") >>. pIdentifierExpression)
                 .>> token (pstring "=")
-                .>>. (pDefaultSpecification <|> pNullSpecification <|> pExpression)
+                .>>. (pContextuallyTypedValueSpecification <|> pExpression)
                 |>> fun ((first, rest), value) ->
                     // The last segment is the method name; the rest is the
                     // mutated target (folded into a FieldReference chain).
@@ -521,7 +522,7 @@ module DataManipulationParser =
             <|> ( // 14.15 <set clause> ::= <set target> <equals operator> <update source>
             // <set target> ::= <update target> (<object column>)
             pIdentifierExpression .>> token (pstring "=")
-            .>>. (pDefaultSpecification <|> pNullSpecification <|> pExpression)
+            .>>. (pContextuallyTypedValueSpecification <|> pExpression)
             |>> SingleSet)
 
         // 20.25 <preparable dynamic delete statement: positioned> /

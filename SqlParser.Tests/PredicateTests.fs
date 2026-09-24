@@ -399,9 +399,8 @@ let ``Period predicate verification`` () =
     // 8.20 <period reference> is a <basic identifier chain> — qualified names
     // are valid on both sides of a non-CONTAINS period predicate.
     match parse "SELECT a.p EQUALS b.p2" with
-    | PeriodPredicate(PeriodEquals,
-                      { Kind = ColumnReference [ "A"; "P" ] },
-                      { Kind = ColumnReference [ "B"; "P2" ] }) -> ()
+    | PeriodPredicate(PeriodEquals, { Kind = ColumnReference [ "A"; "P" ] }, { Kind = ColumnReference [ "B"; "P2" ] }) ->
+        ()
     | res -> Assert.Fail(sprintf "Expected PeriodEquals with qualified names, got %A" res)
 
     // The left operand of a <period predicate> is a <period predicand> — a <period
@@ -493,10 +492,17 @@ let ``When operand predicate part-2 forms are applied to the case operand (6.12)
            None) -> ()
     | res -> Assert.Fail(sprintf "Expected the OR of the distributed operands, got %A" res)
 
-    // The alternatives 6.12 does not list stay rejected.
+    // The alternatives 6.12 explicitly lists are accepted in part-2 form.
+    match parse "SELECT CASE x WHEN IS DISTINCT FROM 1 THEN 2 END FROM t" with
+    | Case(None, [ ({ Kind = IsDistinctFrom(_, _, _) }, _) ], _) -> ()
+    | res -> Assert.Fail(sprintf "Expected CASE IS DISTINCT FROM part 2, got %A" res)
+
+    match parse "SELECT CASE x WHEN IS A SET THEN 2 END FROM t" with
+    | Case(None, [ ({ Kind = IsSet(_, _) }, _) ], _) -> ()
+    | res -> Assert.Fail(sprintf "Expected CASE IS A SET part 2, got %A" res)
+
+    // <boolean test> is not one of the 6.12 <when operand> alternatives.
     parseFails "SELECT CASE x WHEN IS TRUE THEN 2 END FROM t"
-    parseFails "SELECT CASE x WHEN IS DISTINCT FROM 1 THEN 2 END FROM t"
-    parseFails "SELECT CASE x WHEN IS A SET THEN 2 END FROM t"
 
     // A bare boolean when operand / case operand is not a <row value predicand>.
     parseFails "SELECT CASE x WHEN 1 = 1 THEN 2 END FROM t"

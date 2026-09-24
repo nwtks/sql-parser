@@ -99,7 +99,10 @@ module AccessControlParser =
                   SchemaParser.pRoutineType .>>. pSchemaQualifiedNameExpression
                   |>> fun (rt, name) -> None, Some rt, name
               )
-              attempt (pKind .>>. pSchemaQualifiedNameExpression |>> fun (kind, name) -> Some kind, None, name)
+              attempt (
+                  pKind .>>. pSchemaQualifiedNameExpression
+                  |>> fun (kind, name) -> Some kind, None, name
+              )
               attempt (pSchemaQualifiedNameExpression |>> fun name -> None, None, name) ]
 
     // 12.2 <grant privilege statement> ::= GRANT <privileges> TO <grantee> [ { , <grantee> }... ]

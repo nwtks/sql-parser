@@ -110,8 +110,7 @@ let private citationsIn (path: string) =
 let private failOn (numbered, mentions) (path: string) (failures: ResizeArray<string>) =
     for file, line, num, name in citationsIn path do
         match expectedNumber numbered mentions num name with
-        | Some expected ->
-            failures.Add(sprintf "%s:%d  %s <%s> -> %s" (Path.GetFileName path) line num name expected)
+        | Some expected -> failures.Add(sprintf "%s:%d  %s <%s> -> %s" (Path.GetFileName path) line num name expected)
         | None -> ()
 
 [<Fact>]

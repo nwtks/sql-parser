@@ -191,7 +191,20 @@ parsers, AST patterns, or tests — every entry is a real failure mode from this
 - **`LockingClause` must live inside the recursive `and`-group** — it carries
   `Expression list option`, and a standalone `type` before the group fails FS0039.
 
-## Test-writing pitfalls
+## SQL:2016 conformance implementation notes
+
+- `pSimpleValueSpecification` now includes SQL parameter references, so identifiers are
+  intentionally valid in OFFSET/FETCH and other value-specification slots. Keep tests
+  explicit: `OFFSET x` is positive, while arithmetic terms remain invalid there.
+- `pNonBooleanValueExpression` is a distinct operator-precedence parser. Reusing the full
+  `pExpression` in a value-only slot can re-admit comparisons and predicate suffixes.
+- `CASE` part-2 predicates are intentionally enabled only in the 6.12 when-operand
+  dispatch; the general predicate path remains unchanged.
+- `TRUNCATE` now stores the target-table `isOnly` flag. Updating an additive record field
+  requires updating every test pattern that constructs the DU case.
+- The delta-table and collection-table correlation requirements are parser-level
+  constraints, not AST validation; their optional AST fields remain for other forms.
+
 
 - **The `parse` helpers append `;` and need `(sql: string)`** (FS0072). A test calling
   `SqlParser.parse` directly must append the semicolon itself or pass for the wrong

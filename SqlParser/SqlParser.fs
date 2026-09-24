@@ -134,11 +134,7 @@ module SqlParser =
     // 11.x <schema element>, but both entry points share that choice).
     // A bare multi-row <query expression> (22.2) is not a <SQL data change statement>.
     let private pSqlDataChangeStatement =
-        choice
-            [ pInsertStatement
-              pUpdateStatement
-              pDeleteStatement
-              pMergeStatement ]
+        choice [ pInsertStatement; pUpdateStatement; pDeleteStatement; pMergeStatement ]
 
     // 16 <SQL control statement> ::= <call statement> | <return statement>
     let private pSqlControlStatement =

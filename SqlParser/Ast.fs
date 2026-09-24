@@ -154,6 +154,18 @@ type NullsOrder =
     | NullsFirst
     | NullsLast
 
+// 6.10 <null treatment> ::= RESPECT NULLS | IGNORE NULLS
+type NullTreatment =
+    | RespectNulls
+    | IgnoreNulls
+
+// 6.10 <from first or last> ::= FROM FIRST | FROM LAST
+type FromFirstOrLast =
+    | FromFirst
+    | FromLast
+
+// 6.10 <null treatment> and <from first or last> are optional on the relevant
+// window function forms; the parser stores them on WindowFunction.
 // 6.1 <char length units> ::= CHARACTERS | OCTETS
 type CharLengthUnit =
     | Characters
@@ -243,7 +255,10 @@ and WindowFunction =
     { Function: Expression
       Args: Expression list
       IsDistinct: bool
-      Window: WindowDefinition }
+      Window: WindowDefinition
+      // 6.10 <null treatment> and <from first or last>
+      NullTreatment: NullTreatment option
+      FromFirstOrLast: FromFirstOrLast option }
 
 // 6.11 <row marker> ::= BEGIN_PARTITION | BEGIN_FRAME | CURRENT_ROW | FRAME_ROW
 //     | END_FRAME | END_PARTITION
@@ -394,7 +409,7 @@ and ExpressionKind =
     // 6.32 <character substring function> ::= SUBSTRING ( <character value expression> FROM <start> [ FOR <length> ] [ USING ... ] )
     | Substring of Expression * Expression * Expression option * string option
     // 6.32 <character overlay function> ::= OVERLAY ( <character value expression> PLACING <replacement> FROM <start> [ FOR <length> ] )
-    | Overlay of Expression * Expression * Expression * Expression option
+    | Overlay of Expression * Expression * Expression * Expression option * string option
     // 6.32 <regular expression substring function> ::= SUBSTRING ( <src> SIMILAR <pattern> ESCAPE <escape> )
     | SubstringSimilar of Expression * Expression * Expression
     // 6.32 <fold> ::= { UPPER | LOWER } ( <character value expression> )
@@ -416,6 +431,7 @@ and ExpressionKind =
     // 6.33 <JSON value constructor>
     | JsonObject of JsonNameValue list * JsonConstructorNull option * bool option * JsonOutput option
     | JsonArray of Expression list * JsonConstructorNull option * JsonOutput option
+    | JsonArrayQuery of Query * JsonRepresentation option * JsonConstructorNull option * JsonOutput option
     // 6.34 <JSON query>
     | JsonQuery of
         JsonApiCommon *
@@ -526,7 +542,8 @@ and ExpressionKind =
         WindowDefinition option *
         Expression option *
         (Expression * bool * NullsOrder option) list option
-    // 10.11 <JSON aggregate function>
+    // 10.9 <array aggregate function> — ORDER BY is part of the production, not a
+    // generic SQL argument-list suffix.
     | JsonObjectAgg of JsonNameValue * JsonConstructorNull option * bool option * JsonOutput option
     | JsonArrayAgg of
         Expression *
@@ -2306,7 +2323,7 @@ and StatementKind =
     // 14.9 <delete statement: searched>
     | Delete of DeleteStatement
     // 14.10 <truncate table statement> ::= TRUNCATE TABLE <table name>
-    | Truncate of Expression * bool option
+    | Truncate of Expression * bool * bool option
     // 14.11 <insert statement>
     | Insert of InsertStatement
     // 14.12 <merge statement>

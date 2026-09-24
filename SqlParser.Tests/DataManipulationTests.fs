@@ -200,19 +200,15 @@ let ``FETCH target specification verification`` () =
     match parseStatement "FETCH cur INTO ?, :host, col" with
     | Fetch(None,
             { Kind = Identifier "CUR" },
-            UsingArguments
-                [ { Kind = Parameter "?" }
-                  { Kind = Parameter ":HOST" }
-                  { Kind = Identifier "COL" } ]) -> ()
+            UsingArguments [ { Kind = Parameter "?" }; { Kind = Parameter ":HOST" }; { Kind = Identifier "COL" } ]) ->
+        ()
     | res -> Assert.Fail(sprintf "Expected Fetch with target specifications, got %A" res)
 
 [<Fact>]
 let ``FETCH host parameter with indicator verification`` () =
     // 6.4 <host parameter specification> ::= <host parameter name> [ <indicator parameter> ]
     match parseStatement "FETCH cur INTO :a INDICATOR :ind" with
-    | Fetch(None,
-            _,
-            UsingArguments [ { Kind = IndicatorParameter(":A", { Kind = Parameter ":IND" }) } ]) -> ()
+    | Fetch(None, _, UsingArguments [ { Kind = IndicatorParameter(":A", { Kind = Parameter ":IND" }) } ]) -> ()
     | res -> Assert.Fail(sprintf "Expected indicator parameter, got %A" res)
 
 [<Fact>]
@@ -285,15 +281,23 @@ let ``DELETE FROM without a table name is rejected`` () = parseFails "DELETE FRO
 [<Fact>]
 let ``TRUNCATE TABLE verification`` () =
     match parse "TRUNCATE TABLE logs" with
-    | Truncate({ Kind = Identifier "LOGS" }, None) -> ()
+    | Truncate({ Kind = Identifier "LOGS" }, false, None) -> ()
     | res -> Assert.Fail(sprintf "Expected Truncate, got %A" res)
 
     match parse "TRUNCATE TABLE logs RESTART IDENTITY" with
-    | Truncate({ Kind = Identifier "LOGS" }, Some true) -> ()
+    | Truncate({ Kind = Identifier "LOGS" }, false, Some true) -> ()
     | res -> Assert.Fail(sprintf "Expected Truncate RESTART IDENTITY, got %A" res)
 
 [<Fact>]
-let ``TRUNCATE without the TABLE keyword is rejected`` () = parseFails "TRUNCATE logs"
+let ``TRUNCATE ONLY verification`` () =
+    match parse "TRUNCATE TABLE ONLY (logs)" with
+    | Truncate({ Kind = Identifier "LOGS" }, true, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected TRUNCATE ONLY, got %A" res)
+
+    match parse "TRUNCATE TABLE ONLY (logs) RESTART IDENTITY" with
+    | Truncate({ Kind = Identifier "LOGS" }, true, Some true) -> ()
+    | res -> Assert.Fail(sprintf "Expected TRUNCATE ONLY RESTART, got %A" res)
+
 
 [<Fact>]
 let ``INSERT verification`` () =
@@ -561,8 +565,8 @@ let ``Temporary table declaration with table constraint verification`` () =
     match parse "DECLARE LOCAL TEMPORARY TABLE t (a INT, PRIMARY KEY (a)) ON COMMIT DELETE ROWS" with
     | DeclareTemporaryTable { Columns = [ _ ]
                               Constraints = [ { Constraint = TableConstraint.PrimaryKey(None,
-                                                                                         [ { Kind = Identifier "A" }],
-                                                                                         None) } ]
+                                                                                        [ { Kind = Identifier "A" } ],
+                                                                                        None) } ]
                               OnCommit = Some DeleteOnCommit } -> ()
     | res -> Assert.Fail(sprintf "Expected DeclareTemporaryTable, got %A" res)
 

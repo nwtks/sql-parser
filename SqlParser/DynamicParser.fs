@@ -8,7 +8,7 @@ module DynamicParser =
     // 20.2 <allocate descriptor statement> ::= ALLOCATE [ SQL ] DESCRIPTOR <descriptor name> [ WITH MAX <occurrences> ]
     let pAllocateDescriptorStatement =
         pKeyword "ALLOCATE" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. pIdentifierExpression
+        >>. pSchemaQualifiedNameExpression
         // <occurrences> ::= <simple value specification> (strict)
         .>>. opt (attempt (pKeyword "WITH" >>. pKeyword "MAX" >>. pSimpleValueSpecification))
         |>> fun (name, max) -> AllocateDescriptor(name, max)
@@ -16,7 +16,7 @@ module DynamicParser =
     // 20.3 <deallocate descriptor statement> ::= DEALLOCATE [ SQL ] DESCRIPTOR <descriptor name>
     let pDeallocateDescriptorStatement =
         pKeyword "DEALLOCATE" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. pIdentifierExpression
+        >>. pSchemaQualifiedNameExpression
         |>> DeallocateDescriptor
 
     // 20.4 <header item name> — closed enumeration.
@@ -84,7 +84,7 @@ module DynamicParser =
             |>> fun (target, name) -> target, name
 
         pKeyword "GET" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. pIdentifierExpression
+        >>. pSchemaQualifiedNameExpression
         .>>. (attempt (
                   pKeyword "VALUE" >>. pSimpleValueSpecification
                   .>>. sepBy1 pGetItemInformation (token (pstring ","))

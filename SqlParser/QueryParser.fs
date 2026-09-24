@@ -198,7 +198,7 @@ module QueryParser =
             pKeyword "NULLS"
             >>. (pKeyword "FIRST" >>% NullsFirst <|> (pKeyword "LAST" >>% NullsLast))
 
-        pExpression
+        pNonBooleanValueExpression
         .>>. opt (attempt (pKeyword "ASC" >>% true) <|> attempt (pKeyword "DESC" >>% false))
         .>>. opt (attempt pNullsOrder)
         |>> fun ((expr, asc), nulls) -> expr, Option.defaultValue true asc, nulls
@@ -262,7 +262,12 @@ module QueryParser =
     //   <table primary> (7.6).
     let private pTableValueConstructor =
         let pRow =
-            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ",")))
+            choice
+                [ attempt (
+                      pKeyword "ROW"
+                      >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ",")))
+                  )
+                  between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ","))) ]
 
         pKeyword "VALUES" >>. sepBy1 pRow (token (pstring ","))
 
@@ -731,21 +736,22 @@ module QueryParser =
                   |> withTablePosition
                   // 7.6 <table function derived table>
                   // 7.6 <PTF derived table> ::= TABLE ( <expr> )
-                  // A routine invocation (function call) is classified as a PTF table;
-                  // any other collection value expression as a table function.
+                  // A collection-derived table requires a correlation name; the PTF
+                  // form follows its own production and may omit one.
                   attempt (
                       pKeyword "TABLE"
                       >>. between (token (pstring "(")) (token (pstring ")")) pExpression
                       .>>. opt (attempt pCorrelationOrRecognition)
-                      |>> fun (expr, corr) ->
+                      >>= fun (expr, corr) ->
                           let alias, cols =
                               match corr with
                               | Some(name, cols) -> Some name, cols
                               | None -> None, None
 
                           match expr.Kind with
-                          | FunctionCall _ -> PtfTable(expr, alias, cols)
-                          | _ -> TableFunction(expr, alias, cols)
+                          | FunctionCall _ -> preturn (PtfTable(expr, alias, cols))
+                          | _ when Option.isNone corr -> fail "a table function requires a correlation name"
+                          | _ -> preturn (TableFunction(expr, alias, cols))
                   )
                   |> withTablePosition
                   // <data change delta table> ::= <result option> TABLE ( <data change statement> )
@@ -755,14 +761,8 @@ module QueryParser =
                       <|> (pKeyword "OLD" >>% ResultOption.Old)
                       .>> pKeyword "TABLE"
                       .>>. between (token (pstring "(")) (token (pstring ")")) pDataChangeStatement
-                      .>>. opt (attempt pCorrelationOrRecognition)
-                      |>> fun ((result, stmt), corr) ->
-                          let alias, cols =
-                              match corr with
-                              | Some(name, cols) -> Some name, cols
-                              | None -> None, None
-
-                          DataChangeDelta(result, stmt, alias, cols)
+                      .>>. pCorrelationOrRecognition
+                      |>> fun ((result, stmt), (name, cols)) -> DataChangeDelta(result, stmt, Some name, cols)
                   )
                   |> withTablePosition
                   // <JSON table> <correlation or recognition> — the correlation is MANDATORY.
@@ -904,17 +904,19 @@ module QueryParser =
                 else
                     pJoinType
 
-            joinType .>>. pTablePrimary
-            >>= fun (jt, right) ->
-                // 7.10 <qualified join> ::= { <table reference> | <partitioned join table> }
-                //     [ <join type> ] JOIN <table reference> <join specification>
-                // <cross join> and <natural join> have NO <join specification> slot.
-                if jt = CrossJoin || Option.isSome nat then
-                    preturn (Option.defaultValue false nat, jt, right, None, None, None)
-                else
-                    opt (attempt pPartitionedJoinColumnReferenceList) .>>. pJoinSpecification
-                    |>> fun (partitionBy, (cond, usingAlias)) ->
-                        (Option.defaultValue false nat, jt, right, Some cond, usingAlias, partitionBy)
+            opt (attempt pPartitionedJoinColumnReferenceList)
+            >>= fun partitionBy ->
+                joinType .>>. pTablePrimary
+                >>= fun (jt, right) ->
+                    // 7.10 <qualified join> ::= { <table reference> | <partitioned join table> }
+                    //     [ <join type> ] JOIN <table reference> <join specification>
+                    // <cross join> and <natural join> have NO <join specification> slot.
+                    if jt = CrossJoin || Option.isSome nat then
+                        preturn (Option.defaultValue false nat, jt, right, None, None, partitionBy)
+                    else
+                        pJoinSpecification
+                        |>> fun (cond, usingAlias) ->
+                            (Option.defaultValue false nat, jt, right, Some cond, usingAlias, partitionBy)
 
     // 7.6 <table reference> ::= <table factor> | <joined table>
     pTableReferenceRef.Value <-
