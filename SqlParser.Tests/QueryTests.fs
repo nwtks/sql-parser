@@ -1271,25 +1271,48 @@ let ``JSON table plans need at least two operands (7.11)`` () =
     parseFails "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN (p UNION)) AS jt"
 
 [<Fact>]
-let ``Locking clause verification`` () =
-    // 7.17 <query expression> has NO <updatability clause> slot — FOR UPDATE /
-    // FOR READ ONLY belong to the 14.3 <cursor specification> only.
-    parseFails "SELECT * FROM users FOR UPDATE"
-    parseFails "SELECT * FROM users FOR READ ONLY"
+let ``Updatability clause verification (14.3 / 22.2)`` () =
+    // 22.2 <direct select statement: multiple rows> ::= <cursor specification>, and
+    // 14.3 <cursor specification> ::= <query expression> [ <updatability clause> ].
+    match parse "SELECT * FROM users FOR UPDATE" with
+    | Select(SelectQuery s) -> Assert.Equal(Some(LockingClause.ForUpdate None), s.Locking)
+    | res -> Assert.Fail(sprintf "Expected FOR UPDATE, got %A" res)
 
-[<Fact>]
-let ``Updatability clause OF column list verification`` () =
-    parseFails "SELECT * FROM users FOR UPDATE OF a, b"
+    match parse "SELECT * FROM users FOR READ ONLY" with
+    | Select(SelectQuery s) -> Assert.Equal(Some LockingClause.ForReadOnly, s.Locking)
+    | res -> Assert.Fail(sprintf "Expected FOR READ ONLY, got %A" res)
+
+    match parse "SELECT * FROM users FOR UPDATE OF a, b" with
+    | Select(SelectQuery s) ->
+        match s.Locking with
+        | Some(LockingClause.ForUpdate(Some cols)) ->
+            Assert.Equal<ExpressionKind list>(
+                [ ExpressionKind.Identifier "A"; ExpressionKind.Identifier "B" ],
+                cols |> List.map (fun c -> c.Kind)
+            )
+        | other -> Assert.Fail(sprintf "Expected FOR UPDATE OF a, b, got %A" other)
+    | res -> Assert.Fail(sprintf "Expected FOR UPDATE OF a, b, got %A" res)
+
+    // The clause belongs to the <cursor specification>, so a subquery or an INSERT ... SELECT
+    // (a bare <query expression>) does not accept it.
+    parseFails "SELECT * FROM (SELECT * FROM t FOR UPDATE) AS x"
+    parseFails "INSERT INTO t SELECT * FROM s FOR UPDATE"
+    // 7.17 <query expression> has no <lock clause>, so FOR SHARE stays invalid.
+    parseFails "SELECT * FROM users FOR SHARE"
 
 [<Fact>]
 let ``FOR SHARE is rejected (not in SQL-2016)`` () =
     parseFails "SELECT * FROM users FOR SHARE"
 
 [<Fact>]
-let ``ORDER BY rejects a boolean sort key`` () =
-    parseFails "SELECT a FROM t ORDER BY a = b"
-    parseFails "SELECT a FROM t ORDER BY a IS DISTINCT FROM b"
-    parseFails "SELECT a FROM t ORDER BY EXISTS (SELECT 1)"
+let ``ORDER BY accepts a boolean sort key (10.10)`` () =
+    // 10.10 <sort key> ::= <value expression>, and 6.28 <value expression> includes
+    // <boolean value expression>.
+    parse "SELECT a FROM t ORDER BY a = b" |> ignore
+    parse "SELECT a FROM t ORDER BY a IS DISTINCT FROM b" |> ignore
+    parse "SELECT a FROM t ORDER BY EXISTS (SELECT 1 FROM t)" |> ignore
+    parse "SELECT a FROM t ORDER BY a = b DESC NULLS LAST" |> ignore
+    // OFFSET takes a <simple value specification>, never an arithmetic term.
     parseFails "SELECT * FROM t OFFSET 1 + 1 ROWS"
     parseFails "SELECT * FROM t OFFSET (SELECT 1) ROWS"
 

@@ -3,8 +3,6 @@ namespace SqlParser
 open FParsec
 
 module Lexer =
-    let ws = spaces
-
     // 5.1 <quote> ::= '
     let private pQuote: Parser<char, unit> = pchar '\''
 
@@ -403,14 +401,37 @@ module Lexer =
     // 5.2 <right minus brace> ::= -}
     let pRightMinusBrace: Parser<string, unit> = pstring "-}"
 
+    // 5.2 <newline> — LF, CR or CRLF; the syntax rule leaves the choice to the implementation,
+    // and the library targets both Windows and Linux sources. (pstring rejects newline chars,
+    // so CRLF is spelled with pchar.)
+    let private pNewline =
+        (attempt (pchar '\r' >>. pchar '\n') >>% ())
+        <|> (pchar '\n' >>% ())
+        <|> (pchar '\r' >>% ())
+
+    // 5.2 <simple comment> ::= <simple comment introducer> [ <comment character>... ] <newline>
+    // The end of the input also terminates the comment so that a trailing `-- ...` comment does
+    // not require a final newline — see docs/trade-off.md.
+    let private pSimpleComment =
+        pstring "--" >>. skipMany (noneOf "\r\n") .>> (pNewline <|> eof)
+
+    // 5.2 <bracketed comment> ::= <bracketed comment introducer> <bracketed comment contents>
+    //     <bracketed comment terminator>
+    // The terminator is mandatory (and there is no length limit): an unterminated `/* ...` is
+    // rejected. Each comment alternative is atomic so that a partially read comment backtracks
+    // instead of failing the enclosing `skipMany` after consuming input.
+    let private pBracketedComment =
+        attempt (pstring "/*") >>. skipCharsTillString "*/" true System.Int32.MaxValue
+        >>% ()
+
     // 5.2 <separator> ::= { <comment> | <white space> }...
     // 5.2 <comment> ::= <simple comment> | <bracketed comment>
     let pSeparator =
-        skipMany (
-            spaces1
-            <|> (attempt (pstring "--") >>. skipMany (noneOf "\n") >>. skipChar '\n')
-            <|> (attempt (pstring "/*") >>. skipCharsTillString "*/" true 10000 >>% ())
-        )
+        skipMany (spaces1 <|> attempt pSimpleComment <|> attempt pBracketedComment)
+
+    // 5.2 — a <separator> may follow every <token>, so the "skip white space" parser used
+    // throughout the parser also consumes comments: `SELECT/*c*/1` is `SELECT 1`.
+    let ws = pSeparator
 
     // 5.2 <token> helper — <token> [ <separator> ]
     let token p = p .>> pSeparator
@@ -601,60 +622,69 @@ module Lexer =
     let rec private loopPow10 acc n =
         if n = 0 then acc else loopPow10 (acc * 10m) (n - 1)
 
+    // 5.3 <exact numeric literal> ::= <unsigned integer> [ <period> [ <unsigned integer> ] ] | <period> <unsigned integer>
+    // No trailing <separator>: pApproximateNumericLiteral reuses this as its <mantissa>, and a
+    // <mantissa> must not be separated from its E <exponent> by white space (5.3 tokenisation).
+    let private pExactNumericLiteralRaw =
+        attempt (
+            pipe2 (many1Chars digit) (opt (pchar '.' >>. manyChars digit)) (fun p f ->
+                match f with
+                | Some fStr when fStr <> "" -> p + "." + fStr
+                | _ -> p)
+        )
+        <|> (pchar '.' >>. many1Chars digit |>> fun f -> "0." + f)
+        >>= toDecimal
+
+    // 5.3 <exponent> ::= <signed integer> — the magnitude is bounded so `int` cannot overflow.
+    let private pExponentMagnitude =
+        many1Chars digit
+        >>= fun d ->
+            match System.Int32.TryParse(d, System.Globalization.NumberStyles.None, invariantCulture) with
+            | true, v -> preturn v
+            | _ -> fail "exponent is out of range."
+
+    // 5.3 <approximate numeric literal> ::= <mantissa> E <exponent>
+    // An exponent whose value does not fit `decimal` is rejected instead of being silently clamped
+    // to a different number: <Number> holds a decimal, so an unrepresentable literal cannot round-trip.
+    let private pApproximateNumericLiteralRaw =
+        pipe3
+            pExactNumericLiteralRaw
+            (pchar 'E' <|> pchar 'e')
+            (opt (pchar '+' <|> pchar '-') .>>. pExponentMagnitude)
+            (fun m _ (sign, mag) -> m, (if sign = Some '-' then -mag else mag))
+        >>= fun (m, exponent) ->
+            if exponent > 28 || exponent < -28 then
+                fail "approximate numeric literal is out of range."
+            else
+                let scaled =
+                    try
+                        if exponent >= 0 then
+                            m * loopPow10 1m exponent
+                        else
+                            m / loopPow10 1m -exponent
+                    with :? System.OverflowException ->
+                        System.Decimal.Zero
+
+                if scaled = 0m && m <> 0m then
+                    fail "approximate numeric literal is out of range."
+                else
+                    preturn scaled
+
     // 5.3 <unsigned numeric literal> ::= <exact numeric literal> | <approximate numeric literal>
     // Maximal munch: a numeric token must not be immediately followed by an identifier character,
     // so `1E`, `1E5x` and `0x10` are rejected instead of being re-read as a number plus an alias.
     let private pUnsignedNumericLiteral =
-        // 5.3 <exact numeric literal> ::= <unsigned integer> [ <period> [ <unsigned integer> ] ] | <period> <unsigned integer>
-        // No trailing <separator>: pApproximateNumericLiteral reuses this as its <mantissa>, and a
-        // <mantissa> must not be separated from its E <exponent> by white space (5.3 tokenisation).
-        let pExactNumericLiteralRaw =
-            attempt (
-                pipe2 (many1Chars digit) (opt (pchar '.' >>. manyChars digit)) (fun p f ->
-                    match f with
-                    | Some fStr when fStr <> "" -> p + "." + fStr
-                    | _ -> p)
-            )
-            <|> (pchar '.' >>. many1Chars digit |>> fun f -> "0." + f)
-            >>= toDecimal
-
-        // 5.3 <exponent> ::= <signed integer> — the magnitude is bounded so `int` cannot overflow.
-        let pExponentMagnitude =
-            many1Chars digit
-            >>= fun d ->
-                match System.Int32.TryParse(d, System.Globalization.NumberStyles.None, invariantCulture) with
-                | true, v -> preturn v
-                | _ -> fail "exponent is out of range."
-
-        // 5.3 <approximate numeric literal> ::= <mantissa> E <exponent>
-        // An exponent whose value does not fit `decimal` is rejected instead of being silently clamped
-        // to a different number: <Number> holds a decimal, so an unrepresentable literal cannot round-trip.
-        let pApproximateNumericLiteralRaw =
-            pipe3
-                pExactNumericLiteralRaw
-                (pchar 'E' <|> pchar 'e')
-                (opt (pchar '+' <|> pchar '-') .>>. pExponentMagnitude)
-                (fun m _ (sign, mag) -> m, (if sign = Some '-' then -mag else mag))
-            >>= fun (m, exponent) ->
-                if exponent > 28 || exponent < -28 then
-                    fail "approximate numeric literal is out of range."
-                else
-                    let scaled =
-                        try
-                            if exponent >= 0 then
-                                m * loopPow10 1m exponent
-                            else
-                                m / loopPow10 1m -exponent
-                        with :? System.OverflowException ->
-                            System.Decimal.Zero
-
-                    if scaled = 0m && m <> 0m then
-                        fail "approximate numeric literal is out of range."
-                    else
-                        preturn scaled
-
         attempt (
             attempt pApproximateNumericLiteralRaw <|> pExactNumericLiteralRaw
+            .>>? notFollowedBy (asciiLetter <|> digit <|> pchar '_')
+        )
+        .>> ws
+
+    // 5.3 <approximate numeric literal> ::= <mantissa> E <exponent> — the approximate form only.
+    // Used by <literal> so that an exponent-notation literal is distinguishable from an exact one.
+    let private pApproximateNumericLiteral =
+        attempt (
+            attempt pApproximateNumericLiteralRaw
             .>>? notFollowedBy (asciiLetter <|> digit <|> pchar '_')
         )
         .>> ws
@@ -1009,6 +1039,9 @@ module Lexer =
             [ attempt (pCharacterStringLiteral |>> String |>> Literal)
               attempt (pNationalCharacterStringLiteral |>> NationalString |>> Literal)
               attempt (pUnicodeCharacterStringLiteral |>> UnicodeString |>> Literal)
+              // 5.3 <approximate numeric literal> — tried first so that `1E0` is not read as
+              // the exact literal `1` followed by an identifier `E0`.
+              attempt (pApproximateNumericLiteral |>> ApproximateNumber |>> Literal)
               attempt (pUnsignedNumericLiteral |>> Number |>> Literal)
               attempt (pBooleanLiteral |>> Bool |>> Literal)
               attempt (pDateLiteral |>> Date |>> Literal)

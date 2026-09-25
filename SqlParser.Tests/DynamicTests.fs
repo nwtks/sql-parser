@@ -47,6 +47,22 @@ let ``GET DESCRIPTOR VALUE verification`` () =
     | res -> Assert.Fail(sprintf "Expected GetDescriptor VALUE, got %A" res)
 
 [<Fact>]
+let ``GET DESCRIPTOR targets are simple target specifications (20.4)`` () =
+    // 20.4 <get header information> / <get item information> take a <simple target specification>,
+    // which admits a host parameter as well as a column reference. (A host parameter name is an
+    // <identifier>, so a reserved word such as COUNT cannot follow the colon.)
+    match parseStatement "GET DESCRIPTOR d1 :cnt = COUNT" with
+    | GetDescriptor(_, GetHeader [ ({ Kind = Parameter ":CNT" }, "COUNT") ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected a host parameter target, got %A" res)
+
+    match parseStatement "GET DESCRIPTOR d1 VALUE 1 :len = LENGTH" with
+    | GetDescriptor(_, GetItem(_, [ ({ Kind = Parameter ":LEN" }, "LENGTH") ])) -> ()
+    | res -> Assert.Fail(sprintf "Expected a host parameter item target, got %A" res)
+
+    // a <dynamic parameter specification> is not part of <simple target specification>
+    parseStatementFails "GET DESCRIPTOR d1 ? = COUNT"
+
+[<Fact>]
 let ``SET DESCRIPTOR header verification`` () =
     match parseStatement "SET DESCRIPTOR d1 COUNT = 2" with
     | SetDescriptor({ Kind = Identifier "D1" }, SetHeader [ ("COUNT", { Kind = Literal(Number 2m) }) ]) -> ()
@@ -139,11 +155,14 @@ let ``DESCRIBE INPUT rejects CURSOR`` () =
 
 [<Fact>]
 let ``EXECUTE verification`` () =
-    match parseStatement "EXECUTE stmt INTO a USING 1, 2" with
+    // 20.11 <using argument> ::= <general value specification> — no <literal>.
+    match parseStatement "EXECUTE stmt INTO a USING :x, ?" with
     | Execute({ Kind = Identifier "STMT" },
               Some(UsingArguments [ { Kind = Identifier "A" } ]),
-              Some(UsingArguments [ { Kind = Literal(Number 1m) }; { Kind = Literal(Number 2m) } ])) -> ()
+              Some(UsingArguments [ { Kind = Parameter ":X" }; { Kind = Parameter "?" } ])) -> ()
     | res -> Assert.Fail(sprintf "Expected Execute, got %A" res)
+
+    parseStatementFails "EXECUTE stmt INTO a USING 1, 2"
 
 [<Fact>]
 let ``EXECUTE with descriptors verification`` () =

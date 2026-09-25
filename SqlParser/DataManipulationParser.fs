@@ -53,6 +53,17 @@ module DataManipulationParser =
               Holdability = holdability
               Returnability = returnability }
 
+    // 14.3 <updatability clause> ::= FOR { READ ONLY | UPDATE [ OF <column name list> ] }
+    // Shared with 14.1 <declare cursor> (DataManipulationParser.fs, compiled later).
+    let private pUpdatabilityClause =
+        pKeyword "FOR"
+        >>. (attempt (
+                 pKeyword "UPDATE"
+                 >>. opt (attempt (pKeyword "OF" >>. sepBy1 pIdentifierExpression (token (pstring ","))))
+                 |>> ForUpdate
+             )
+             <|> (pKeyword "READ" >>. pKeyword "ONLY" >>% ForReadOnly))
+
     // 14.1 <declare cursor> ::= DECLARE <cursor name> <cursor properties> FOR <cursor specification>
     // 14.3 <cursor specification> ::= <query expression> [ <updatability clause> ]
     // The <updatability clause> belongs to the <cursor specification>, NOT to the
@@ -60,16 +71,6 @@ module DataManipulationParser =
     // No entry point exposes 14.1 (an SQL-client module statement): neither 13.4 nor
     // 22.1 lists <declare cursor> — see docs/trade-off.md. Kept for a future §21 surface.
     let pDeclareCursor =
-        // 14.3 <updatability clause> ::= FOR { READ ONLY | UPDATE [ OF <column name list> ] }
-        let pUpdatabilityClause =
-            pKeyword "FOR"
-            >>. (attempt (
-                     pKeyword "UPDATE"
-                     >>. opt (attempt (pKeyword "OF" >>. sepBy1 pIdentifierExpression (token (pstring ","))))
-                     |>> ForUpdate
-                 )
-                 <|> (pKeyword "READ" >>. pKeyword "ONLY" >>% ForReadOnly))
-
         pKeyword "DECLARE" >>. pLocalQualifiedNameExpression .>>. pCursorProperties
         .>> pKeyword "FOR"
         .>>. QueryParser.pQueryExpression
@@ -81,17 +82,49 @@ module DataManipulationParser =
               Updatability = updatability }
             |> DeclareCursor
 
-    // 20.4/23.1 <simple target specification> ::= <host parameter name> | <SQL parameter reference>
+    // 14.3 <cursor specification> ::= <query expression> [ <updatability clause> ]
+    // 22.2 <direct select statement: multiple rows> ::= <cursor specification>
+    // The <updatability clause> belongs to the <cursor specification>, not to the <query
+    // expression> it wraps, so subqueries and INSERT ... SELECT do not accept it. SQL-2016 has
+    // no <lock clause> in a <query expression>, so the Locking slot carries the clause.
+    let pCursorSpecification =
+        QueryParser.pQueryExpression .>>. opt (attempt pUpdatabilityClause)
+        |>> fun (q, updatability) ->
+            match updatability with
+            | None -> q
+            | Some u -> QueryParser.applyOrderByOffsetFetch [] None (Some u) q
+
+    // 6.4 <simple target specification> ::= <host parameter name> | <SQL parameter reference>
     //     | <column reference> | <embedded variable name>
     // (<embedded variable name> is a host-language construct and degrades to <host parameter name>,
     //  as elsewhere — see docs/trade-off.md.)
+    // A <dynamic parameter specification> (`?`) is NOT part of this production — that belongs to
+    // <target specification>, used by 14.5 / 14.7 / 20.12 — so `?` is rejected here.
     let pSimpleTargetSpecification =
         choice
             [ pColumnReferenceExpression
-              getPosition .>>. (pQuestionMark >>% "?" <|> pHostParameter)
+              getPosition .>>. pHostParameter
               |>> fun (pos, name) ->
                   { Expression.Kind = Parameter name
                     Pos = { Line = pos.Line; Column = pos.Column } } ]
+
+    // 6.4 <host parameter specification> ::= <host parameter name> [ <indicator parameter> ]
+    // <indicator parameter> ::= [ INDICATOR ] <host parameter name>
+    // Shared by <target specification> (below) and 20.11 <using argument>.
+    let private pHostParameterSpecification =
+        getPosition
+        .>>. pHostParameter
+        .>>. opt (attempt (opt (pKeyword "INDICATOR") >>. pHostParameter))
+        |>> fun ((pos, name), indicator) ->
+            let p = { Line = pos.Line; Column = pos.Column }
+
+            match indicator with
+            | Some ind ->
+                { Expression.Kind = IndicatorParameter(name, { Kind = Parameter ind; Pos = p })
+                  Pos = p }
+            | None ->
+                { Expression.Kind = Parameter name
+                  Pos = p }
 
     // 6.4 <target specification> ::=
     //     <host parameter specification> | <SQL parameter reference> | <column reference>
@@ -100,46 +133,29 @@ module DataManipulationParser =
     // Broader than <simple target specification> (23.1): admits `?`, an
     // <indicator parameter>, and <target array element specification>. Shared by
     // 14.5 <fetch target list>, 14.7 <select target list> and 20.12 <into argument>.
-    let pTargetSpecification =
+    let private pTargetSpecification =
         // 6.4 <target array element specification> ::=
         //   <target array reference> <left bracket> <simple value specification> <right bracket>
         let pTargetArrayElement =
             attempt (
-                (pColumnReferenceExpression
-                 <|> (getPosition .>>. pHostParameter
-                      |>> fun (pos, name) ->
-                          { Expression.Kind = Parameter name
-                            Pos = { Line = pos.Line; Column = pos.Column } }))
+                pColumnReferenceExpression
+                <|> (getPosition .>>. pHostParameter
+                     |>> fun (pos, name) ->
+                         { Expression.Kind = Parameter name
+                           Pos = { Line = pos.Line; Column = pos.Column } })
                 .>>. between (token (pstring "[")) (token (pstring "]")) pSimpleValueSpecification
                 |>> fun (arr, idx) ->
                     { Expression.Kind = ArrayElement(arr, idx)
                       Pos = arr.Pos }
             )
 
-        // 6.4 <host parameter specification> ::= <host parameter name> [ <indicator parameter> ]
-        // <indicator parameter> ::= [ INDICATOR ] <host parameter name>
-        let pHostParameterSpecification =
-            getPosition
-            .>>. pHostParameter
-            .>>. opt (attempt (opt (pKeyword "INDICATOR") >>. pHostParameter))
-            |>> fun ((pos, name), indicator) ->
-                let p = { Line = pos.Line; Column = pos.Column }
-
-                match indicator with
-                | Some ind ->
-                    { Expression.Kind = IndicatorParameter(name, { Kind = Parameter ind; Pos = p })
-                      Pos = p }
-                | None ->
-                    { Expression.Kind = Parameter name
-                      Pos = p }
-
         choice
             [ pTargetArrayElement
               pHostParameterSpecification
-              (getPosition .>>. pQuestionMark
-               |>> fun (pos, _) ->
-                   { Expression.Kind = Parameter "?"
-                     Pos = { Line = pos.Line; Column = pos.Column } })
+              getPosition .>>. pQuestionMark
+              |>> fun (pos, _) ->
+                  { Expression.Kind = Parameter "?"
+                    Pos = { Line = pos.Line; Column = pos.Column } }
               pColumnReferenceExpression ]
 
     // 20.10 <using descriptor> / 20.12 <into descriptor>
@@ -155,10 +171,18 @@ module DataManipulationParser =
 
     // 20.11 <input using clause> ::= <using arguments> | <using input descriptor>
     // <using arguments> ::= USING <using argument> [ { <comma> <using argument> }... ]
+    // 20.11 <input using clause> ::= <using arguments> | <using input descriptor>
+    // <using arguments> ::= USING <using argument> [ { <comma> <using argument> }... ]
+    // 20.11 <using argument> ::= <general value specification> (6.4) — a <literal> is NOT one,
+    // so `OPEN c USING 1` is rejected. The <host parameter specification> form admits an
+    // <indicator parameter>, which the shared 6.4 parser does not carry, so it is tried first.
+    let private pUsingArgument =
+        choice [ pHostParameterSpecification; pGeneralValueSpecification ]
+
     let pInputUsingClause =
         pKeyword "USING"
         >>. (attempt (pDescriptorName |>> UsingClause.UsingDescriptor)
-             <|> (sepBy1 pExpression (token (pstring ",")) |>> UsingClause.UsingArguments))
+             <|> (sepBy1 pUsingArgument (token (pstring ",")) |>> UsingClause.UsingArguments))
 
     // 20.12 <output using clause> ::= <into arguments> | <into descriptor>
     // <into arguments> ::= INTO <into argument> [ { <comma> <into argument> }... ]
@@ -486,11 +510,25 @@ module DataManipulationParser =
     let pUpdateStatement =
         // 14.15 <set clause> ::= <set target> <equals operator> <update source>
         //     | <multiple column assignment> | <mutated set clause>
+        // 14.15 <update target> ::= <object column>
+        //     | <object column> <left bracket or trigraph> <simple value specification> <right bracket or trigraph>
+        // <set target> is an <update target> or a <mutated set clause>, so the array form is
+        // available to the single-assignment, multiple-assignment and mutated forms alike.
+        let pUpdateTarget =
+            pIdentifierExpression
+            .>>. opt (attempt (between (token pLeftBracket) (token pRightBracket) pSimpleValueSpecification))
+            |>> fun (column, index) ->
+                match index with
+                | Some idx ->
+                    { Expression.Kind = ArrayElement(column, idx)
+                      Pos = column.Pos }
+                | None -> column
+
         let pSetClause =
             // 14.15 <multiple column assignment> ::= <set target list> <equals operator> <assigned row>
             // <set target list> ::= ( <set target> [ { <comma> <set target> }... ] )
             attempt (
-                between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
+                between (token (pstring "(")) (token (pstring ")")) (sepBy1 pUpdateTarget (token (pstring ",")))
                 .>> token (pstring "=")
                 // <assigned row> is a <contextually typed row value expression>: NULL is legal.
                 .>>. between
@@ -503,7 +541,7 @@ module DataManipulationParser =
                 // 14.15 <mutated set clause> ::= <mutated target> <period> <method name>
                 // <mutated target> ::= <object column> | <mutated set clause>
                 // <set clause> ::= <mutated set clause> <equals operator> <update source>
-                pIdentifierExpression .>>. many1 (token (pstring ".") >>. pIdentifierExpression)
+                pUpdateTarget .>>. many1 (token (pstring ".") >>. pIdentifierExpression)
                 .>> token (pstring "=")
                 .>>. (pContextuallyTypedValueSpecification <|> pExpression)
                 |>> fun ((first, rest), value) ->
@@ -520,8 +558,8 @@ module DataManipulationParser =
                     MutatedSet(target, List.last rest, value)
             )
             <|> ( // 14.15 <set clause> ::= <set target> <equals operator> <update source>
-            // <set target> ::= <update target> (<object column>)
-            pIdentifierExpression .>> token (pstring "=")
+            // <set target> ::= <update target> (<object column> [ [ <simple value specification> ] ])
+            pUpdateTarget .>> token (pstring "=")
             .>>. (pContextuallyTypedValueSpecification <|> pExpression)
             |>> SingleSet)
 

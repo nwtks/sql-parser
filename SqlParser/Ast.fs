@@ -64,6 +64,9 @@ type Literal =
     | UnicodeString of string
     // 5.3 <exact numeric literal>
     | Number of decimal
+    // 5.3 <approximate numeric literal> ::= <mantissa> E <exponent> — kept apart from <Number>
+    // so that exact-only slots (6.10 <lead or lag function> <offset>) can reject it.
+    | ApproximateNumber of decimal
     // 5.3 <boolean literal>
     | Bool of bool option
     // 5.3 <date literal>
@@ -1371,12 +1374,27 @@ and ReferentialAction =
     | Restrict
     | NoAction
 
-// 11.8 <referential constraint definition> ::= FOREIGN KEY ( <column list> ) REFERENCES <table> [ ( <column list> ) ] [ ON UPDATE <referential action> ] [ ON DELETE <referential action> ]
+// 11.8 <match type> ::= FULL | PARTIAL | SIMPLE
+and MatchType =
+    | MatchFull
+    | MatchPartial
+    | MatchSimple
+
+// 11.8 <referential constraint definition> ::=
+//     FOREIGN KEY ( <referencing column list> [ <comma> <referencing period specification> ] ) <references specification>
+// 11.8 <references specification> ::=
+//     REFERENCES <referenced table and columns> [ MATCH <match type> ] [ <referential triggered action> ]
 and ForeignKeyConstraint =
     { Name: Expression option
       Columns: Expression list
+      // 11.8 <referencing period specification> ::= PERIOD <application time period name>
+      ReferencingPeriod: Expression option
+      // <table name> (5.4) — <local or schema qualified name>, so at most two parts
       Table: Expression
       RefColumns: Expression list option
+      // 11.8 <referenced period specification> ::= PERIOD <application time period name>
+      ReferencedPeriod: Expression option
+      Match: MatchType option
       OnUpdate: ReferentialAction option
       OnDelete: ReferentialAction option }
 
@@ -1564,7 +1582,8 @@ and MethodSpecification =
     { Kind: MethodKind option
       Name: Expression
       Parameters: ParameterDeclaration list
-      Returns: DataType option
+      // 11.51 <partial method specification> requires a <returns clause> (11.60)
+      Returns: ReturnsType
       Specific: Expression option
       SelfAsResult: bool
       SelfAsLocator: bool
@@ -1676,7 +1695,8 @@ and RoutineCharacteristic =
     | NullCall of bool
     | DynamicResultSets of uint64
     | SavepointLevel of bool
-    | ExternalName of Expression
+    // 11.61 NAME <external routine name> — <identifier> | <character string literal>
+    | ExternalName of Choice<string, Expression>
 
 // 11.60 <rights clause> ::= SQL SECURITY INVOKER | SQL SECURITY DEFINER
 and RightsClause =

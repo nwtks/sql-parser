@@ -148,6 +148,13 @@ let ``schema elements are restricted to the CREATE family and GRANT`` () =
     parseFails "CREATE SCHEMA s ALTER DOMAIN d DROP DEFAULT"
     parseFails "CREATE SCHEMA s ALTER SEQUENCE q INCREMENT BY 1"
 
+    // 5.4 <schema name> = [ <catalog name> . ] <unqualified schema name> — at most two parts
+    match parse "CREATE SCHEMA cat.sales" with
+    | CreateSchema { Name = Some { Kind = ColumnReference [ "CAT"; "SALES" ] } } -> ()
+    | res -> Assert.Fail(sprintf "Expected a catalog-qualified schema name, got %A" res)
+
+    parseFails "CREATE SCHEMA cat.sales.extra"
+
 [<Fact>]
 let ``DROP statements verification`` () =
     match parse "DROP TABLE users CASCADE" with
@@ -354,6 +361,46 @@ let ``referential triggered action verification`` () =
     // 11.8 — at most ONE <update rule> and ONE <delete rule>; duplicates are rejected.
     parseFails "CREATE TABLE t (a INT REFERENCES p ON UPDATE CASCADE ON UPDATE SET NULL)"
     parseFails "CREATE TABLE t (a INT REFERENCES p ON DELETE NO ACTION ON DELETE RESTRICT)"
+
+[<Fact>]
+let ``referenced table is a table name (5.4)`` () =
+    // 11.8 <referenced table and columns> takes a <table name>, i.e. at most schema.table.
+    match parse "CREATE TABLE t (a INT REFERENCES app.parent (x))" with
+    | CreateTable { Columns = [ col ] } ->
+        match col.References with
+        | Some r -> Assert.Equal(ColumnReference [ "APP"; "PARENT" ], r.Table.Kind)
+        | None -> Assert.Fail "Expected a column-level REFERENCES"
+    | res -> Assert.Fail(sprintf "Expected a qualified referenced table, got %A" res)
+
+    match parse "CREATE TABLE t (a INT, CONSTRAINT fk FOREIGN KEY (a) REFERENCES app.parent (x) ON DELETE CASCADE)" with
+    | CreateTable { Constraints = [ { Constraint = TableConstraint.ForeignKey fk } ] } ->
+        Assert.Equal(ColumnReference [ "APP"; "PARENT" ], fk.Table.Kind)
+    | res -> Assert.Fail(sprintf "Expected a qualified FK table, got %A" res)
+
+[<Fact>]
+let ``MATCH type and period specifications are parsed (11.8)`` () =
+    // 11.8 <references specification> — [ MATCH <match type> ]
+    match parse "CREATE TABLE t (a INT REFERENCES p (x) MATCH FULL)" with
+    | CreateTable { Columns = [ col ] } ->
+        match col.References with
+        | Some r -> Assert.Equal(Some MatchType.MatchFull, r.Match)
+        | None -> Assert.Fail "Expected a column-level REFERENCES"
+    | res -> Assert.Fail(sprintf "Expected MATCH FULL, got %A" res)
+
+    // 11.8 <referencing period specification> / <referenced period specification>
+    match
+        parse
+            "CREATE TABLE t (a INT, PERIOD FOR p (s, e), CONSTRAINT fk FOREIGN KEY (a, PERIOD p) REFERENCES parent (x, PERIOD q) MATCH SIMPLE ON UPDATE CASCADE)"
+    with
+    | CreateTable { Constraints = [ { Constraint = TableConstraint.ForeignKey fk } ] } ->
+        Assert.Equal(Some(Identifier "P"), fk.ReferencingPeriod |> Option.map (fun e -> e.Kind))
+        Assert.Equal(Some(Identifier "Q"), fk.ReferencedPeriod |> Option.map (fun e -> e.Kind))
+        Assert.Equal(Some MatchType.MatchSimple, fk.Match)
+        Assert.Equal(Some ReferentialAction.Cascade, fk.OnUpdate)
+    | res -> Assert.Fail(sprintf "Expected a period-carrying FK, got %A" res)
+
+    // The period entry is not a column, so `PERIOD` may not be used as a referenced column name.
+    parseFails "CREATE TABLE t (a INT REFERENCES p (a, PERIOD))"
 
 [<Fact>]
 let ``Column-level constraints verification`` () =
@@ -1403,7 +1450,9 @@ let ``CREATE TYPE with method specification verification`` () =
     | CreateType { Methods = [ { Kind = None
                                  Name = { Kind = Identifier "M1" }
                                  Parameters = [ param ]
-                                 Returns = Some Integer
+                                 Returns = ReturnsData { DataType = Integer
+                                                         AsLocator = false
+                                                         CastFrom = None }
                                  Specific = None
                                  SelfAsResult = false
                                  SelfAsLocator = false
@@ -1413,6 +1462,16 @@ let ``CREATE TYPE with method specification verification`` () =
     | res -> Assert.Fail(sprintf "Expected CreateType method, got %A" res)
 
 [<Fact>]
+let ``partial method specification requires a returns clause (11.51)`` () =
+    // 11.51 <partial method specification> has a mandatory <returns clause> (11.60)
+    parseFails "CREATE TYPE my_type AS (a INT) METHOD m1 (x INT)"
+    parseFails "ALTER TYPE my_type ADD METHOD m1 (x INT)"
+    // the full <returns type> alternatives are available (11.60)
+    match parse "CREATE TYPE my_type AS (a INT) METHOD m1 (x INT) RETURNS TABLE (c INT)" with
+    | CreateType { Methods = [ { Returns = ReturnsTable(Some [ { Name = { Kind = Identifier "C" }
+                                                                 DataType = Integer } ]) } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected RETURNS TABLE, got %A" res)
+
 let ``CREATE TYPE method characteristic variants verification`` () =
     match
         parse
@@ -1452,14 +1511,18 @@ let ``CREATE TYPE with INSTANCE and OVERRIDING methods verification`` () =
     match parse "CREATE TYPE my_type AS (a INT) INSTANCE METHOD m1 (x INT) RETURNS INT" with
     | CreateType { Methods = [ { Kind = Some MethodKind.Instance
                                  Name = { Kind = Identifier "M1" }
-                                 Returns = Some Integer
+                                 Returns = ReturnsData { DataType = Integer
+                                                         AsLocator = false
+                                                         CastFrom = None }
                                  Characteristics = [] } ] } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateType INSTANCE method, got %A" res)
 
     match parse "CREATE TYPE my_type AS (a INT) OVERRIDING METHOD m1 (x INT) RETURNS INT" with
     | CreateType { Methods = [ { Kind = None
                                  Name = { Kind = Identifier "M1" }
-                                 Returns = Some Integer } ] } -> ()
+                                 Returns = ReturnsData { DataType = Integer
+                                                         AsLocator = false
+                                                         CastFrom = None } } ] } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateType OVERRIDING method, got %A" res)
 
 [<Fact>]
@@ -1497,7 +1560,9 @@ let ``ALTER TYPE method actions verification`` () =
     match parse "ALTER TYPE my_type ADD METHOD m2 (x INT) RETURNS INT" with
     | AlterType { Action = AlterTypeAction.AddMethod({ Kind = None
                                                        Name = { Kind = Identifier "M2" }
-                                                       Returns = Some Integer },
+                                                       Returns = ReturnsData { DataType = Integer
+                                                                               AsLocator = false
+                                                                               CastFrom = None } },
                                                      false) } -> ()
     | res -> Assert.Fail(sprintf "Expected AlterType ADD METHOD, got %A" res)
 
@@ -1814,9 +1879,15 @@ let ``ALTER ROUTINE characteristic catalogue verification`` () =
     //     | <SQL-data access indication> | <null-call clause> | <returned result sets characteristic>
     //     | NAME <external routine name>
     match parse "ALTER FUNCTION f LANGUAGE SQL NAME ext RETURNS NULL ON NULL INPUT RESTRICT" with
-    | AlterRoutine { Characteristics = [ Language "SQL"; ExternalName { Kind = Identifier "EXT" }; NullCall true ] } ->
-        ()
+    | AlterRoutine { Characteristics = [ Language "SQL"
+                                         ExternalName(Choice2Of2 { Kind = Identifier "EXT" })
+                                         NullCall true ] } -> ()
     | res -> Assert.Fail(sprintf "Expected the 11.61 catalogue, got %A" res)
+
+    // 5.4 <external routine name> also admits a <character string literal> (`NAME 'lib.fn'`)
+    match parse "ALTER FUNCTION f NAME 'lib.fn' RESTRICT" with
+    | AlterRoutine { Characteristics = [ ExternalName(Choice1Of2 "lib.fn") ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected NAME 'lib.fn', got %A" res)
 
     // 11.61 does not allow SPECIFIC / <deterministic characteristic> / <savepoint level indication>
     parseFails "ALTER FUNCTION f DETERMINISTIC RESTRICT"

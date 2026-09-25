@@ -48,15 +48,18 @@ Two public functions, both requiring the trailing `<semicolon>`:
 
 | Function | Grammar rule | Accepts |
 |----------|--------------|---------|
-| `SqlParser.parse` | 22.1 `<direct SQL statement>` | The directly executable families: `<direct SQL data statement>` (searched `DELETE`, `SELECT`, `INSERT`, searched `UPDATE`, `TRUNCATE`, `MERGE`, `<temporary table declaration>`, `WITH ... <query>`), `<SQL schema statement>`, `<SQL transaction statement>`, `<SQL connection statement>`, `<SQL session statement>`. |
+| `SqlParser.parse` | 22.1 `<direct SQL statement>` | The directly executable families: `<direct SQL data statement>` (searched `DELETE`, `SELECT`, `INSERT`, searched `UPDATE`, `TRUNCATE`, `MERGE`, `<temporary table declaration>`, `WITH ... <query>`), `<SQL schema statement>`, `<SQL transaction statement>`, `<SQL connection statement>`, `<SQL session statement>`. A bare `SELECT`/`WITH` is a 22.2 `<cursor specification>`, so it may carry a 14.3 `<updatability clause>`. |
 | `SqlParser.parseStatement` | 13.4 `<SQL procedure statement>` | The `<SQL executable statement>` families: schema, `<SQL data statement>` (`OPEN`/`FETCH`/`CLOSE`, `SELECT ... INTO`, `FREE`/`HOLD LOCATOR`, positioned and searched DML), `CALL`/`RETURN`, transaction, connection, session, `GET DIAGNOSTICS`, and all dynamic-SQL statements. Excludes `DECLARE CURSOR` (14.1, an SQL-client module statement), `<temporary table declaration>` (14.16), multi-row `SELECT` and `WITH` — those are 22.1 forms. |
 
 The two entry points are exact for their clauses — neither is a superset of
 the other: `parse` rejects positioned `UPDATE` (14.13) / `DELETE` (14.8) via
 `pSearchedUpdateStatement` / `pSearchedDeleteStatement`, while `parseStatement`
 rejects the 22.x query forms; both omit 22.1's `<direct implementation-defined
-statement>`. `pStatement` (wired to `parseStatement`, routine bodies and
-triggers) is therefore strict 13.4. See [README.md](../README.md#usage).
+statement>`. The omitted-target DML forms (20.25/20.27) are *preparable* statements —
+the text handed to PREPARE — so both entry points reject them, while the DML parsers
+keep the form for a future preparable-statement surface. `pStatement` (wired to
+`parseStatement`, routine bodies and triggers) is therefore strict 13.4.
+See [README.md](../README.md#usage).
 
 ## 4. Module map
 
@@ -164,9 +167,10 @@ parser until it is assigned. Reference the forwarding *parser* instead.
   `Result<Statement, ParseError>` (with a try/with safety net); `ParseError`
   carries the message and position.
 - **Semantic guards run inside the parser** where the grammar demands more than
-  syntax — `pSearchedUpdateStatement`/`pSearchedDeleteStatement` (22.1),
-  `pOmittedTargetGuard` (20.25/20.27), `validateRoutine` (11.60), the lexer's
-  date/interval value checks — using `>>=` plus `fail`, because `|>>` cannot fail.
+  syntax — `pSearchedUpdateStatement`/`pSearchedDeleteStatement` (22.1), the
+  omitted-target rejection at both entry points (20.25/20.27 are preparable-only),
+  `validateRoutine` (11.60), the lexer's date/interval value checks — using `>>=` plus
+  `fail`, because `|>>` cannot fail.
 - **Backtracking.** A `choice` alternative that has consumed input is not retried
   by `<|>`, so optional or speculative prefixes are wrapped in `attempt`;
   wrapping too little is a common bug — see [gotchas.md](gotchas.md).

@@ -73,14 +73,18 @@ module DynamicParser =
 
     // 20.4 <get descriptor statement> ::= GET [ SQL ] DESCRIPTOR <descriptor name> <get descriptor information>
     let pGetDescriptorStatement =
-        // 20.4 <get header information> ::= <target> <equals operator> <header item name>
+        // 20.4 <get header information> ::= <simple target specification 1> <equals operator> <header item name>
+        // 20.4 <simple target specification 1> ::= <simple target specification> (6.4), so a host
+        // parameter (`:x`) is a legal target — not just a column reference.
         let pGetHeaderInformation =
-            pSchemaQualifiedNameExpression .>> token (pstring "=") .>>. pHeaderItemName
+            DataManipulationParser.pSimpleTargetSpecification .>> token (pstring "=")
+            .>>. pHeaderItemName
             |>> fun (target, name) -> target, name
 
-        // 20.4 <get item information> ::= <target> <equals operator> <descriptor item name> (item form)
+        // 20.4 <get item information> ::= <simple target specification 2> <equals operator> <descriptor item name>
         let pGetItemInformation =
-            pSchemaQualifiedNameExpression .>> token (pstring "=") .>>. pDescriptorItemName
+            DataManipulationParser.pSimpleTargetSpecification .>> token (pstring "=")
+            .>>. pDescriptorItemName
             |>> fun (target, name) -> target, name
 
         pKeyword "GET" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"

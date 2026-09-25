@@ -79,15 +79,61 @@ The parser rejects what the standard does not permit, even in common vendor dial
   parameter defaults. `ARRAY[]` / `MULTISET[]` therefore use the existing constructor
   nodes rather than adding an information-losing marker.
 - Boolean-free parser layers are separate from the full expression operator parser.
-  This keeps non-boolean slots (character/numeric/JSON/point-in-time and ORDER BY sort
-  keys) from consuming comparisons or predicate suffixes while preserving the full parser
-  for search conditions.
+  This keeps non-boolean slots (character/numeric/JSON/point-in-time) from consuming
+  comparisons or predicate suffixes while preserving the full parser for search conditions.
+  ORDER BY sort keys are NOT in that set: 10.10 `<sort key>` is a `<value expression>`, so
+  the full parser serves them and boolean sort keys are accepted.
 - 6.10 is currently represented by the existing `WindowFunction` record; null-treatment
   and from-first/last fields are reserved for a later isolated parser change rather than
   being silently dropped by a partial suffix implementation. The grammar-specific
   aggregate families are validated in the shared routine validation block.
 - `JSON_ARRAY` now has an additive query-constructor AST case; query bodies remain
   opaque to expression traversal, like the other query-bearing constructor nodes.
+
+## 2026-09-25 SQL:2016 conformance sweep
+
+- **5.2 `<separator>` now includes comments.** `ws` — the separator consumer that follows
+  every token — consumes `<simple comment>` and `<bracketed comment>` as well as white
+  space, so `SELECT/*c*/1` is `SELECT 1`. A `<simple comment>` is terminated by LF, CR or
+  CRLF and, as a documented extension, by the end of the input, so a trailing `-- …`
+  comment needs no final newline: `<newline>` is implementation-defined (5.2), which is
+  what makes that extension defensible. Bracketed comments are NOT nested — the checked-in
+  grammar file defers the nesting rule to the Syntax Rules, which are not part of this
+  repository, so the conservative reading is kept; the old 10000-character search limit is
+  gone, and each comment alternative is atomic so an unterminated `/*` backtracks cleanly.
+- **10.10 `<sort key>` is a `<value expression>`** — boolean sort keys are accepted.
+- **6.30/6.32 numeric slots** (`<start position>`, `<regex occurrence>`,
+  `<regex capture group>`) use the numeric value expression parser.
+- **10.9**: `COUNT ( <asterisk> )` rejects a `<set quantifier>`; `<listagg set function>`
+  accepts one (the binary set functions still do not). 6.10 `<lead or lag function>`'s
+  `<offset>` is an `<exact numeric literal>`, so exponent notation is rejected —
+  approximate literals are a distinct `Literal.ApproximateNumber` case.
+- **6.10 `<window row pattern measure>`** — a bare `<measure name>` followed by OVER is a
+  `<window function>`; it reuses `WindowFunction` with an empty argument list.
+- **11.8**: `<references specification>` is shared by 11.4 and 11.8 and now carries
+  `[ MATCH <match type> ]`, the referencing/referenced `<period specification>`s, and a
+  `<table name>` (5.4, at most two parts) for the referenced table.
+- **11.51** `<partial method specification>` requires a `<returns clause>` and stores the
+  full 11.60 `<returns type>`; 11.61 `NAME <external routine name>` accepts the 5.4
+  `<character string literal>` form (`Choice<string, Expression>`).
+- **5.4 `<schema name>`** is at most two parts, so `CREATE SCHEMA cat.sch.name` is rejected.
+- **14.3 `<cursor specification>`** — `parse` (22.2) accepts `[ <updatability clause> ]`
+  after a query expression and stores it on the innermost `SelectStatement.Locking`
+  (SQL-2016 has no `<lock clause>` in a `<query expression>`, so the slot was free). A
+  subquery or `INSERT ... SELECT` is a bare `<query expression>` and does not accept it.
+- **20.25/20.27 are preparable-only.** The omitted `<target table>` forms are the text
+  handed to PREPARE, so both entry points reject them (13.4 lists 20.23/20.24, which carry
+  a target). The DML parsers keep the form for a future preparable-statement surface.
+- **20.4** GET DESCRIPTOR targets are `<simple target specification>`s (host parameters
+  allowed); **23.1** GET DIAGNOSTICS targets are the same production, so `?` is rejected.
+- **20.11 `<using argument>` is a `<general value specification>`** (6.4) — no `<literal>`,
+  so `OPEN c USING 1` is rejected; host parameters (with an indicator), `?`, identifiers
+  and the CURRENT_*/USER/VALUE keywords are accepted.
+- **14.15 `<update target>`** admits the array-element form in all three set-clause shapes.
+- **Still open:** 10.9 `<listagg overflow clause>` (needs a `FunctionCall` field), 11.4's
+  optional `<data type or domain name>` (typed-table columns), and the 20.x extended
+  `<SQL statement name>` / `<dynamic cursor name>` forms (`[ GLOBAL | LOCAL ] :c`,
+  `PTF :c`), which need scope information the `Expression`-shaped name fields cannot hold.
 
 
 - **Types avoid left recursion by construction** — `pDataTypeElement` + a folded

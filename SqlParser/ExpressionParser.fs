@@ -63,6 +63,16 @@ module ExpressionParser =
             | parts -> ColumnReference parts
         |> withExprPosition
 
+    // 5.4 <local or schema qualified name> ::= [ <local or schema qualifier> <period> ] <qualified identifier>
+    // At most TWO parts — this is the <table name> / <domain name-adjacent> shape, which is
+    // narrower than <schema qualified name> (that one admits a catalog part).
+    let pLocalOrSchemaQualifiedNameExpression =
+        pIdentifier .>>. opt (token (pstring ".") >>. pIdentifier)
+        |>> function
+            | s, None -> Identifier s
+            | s, Some n -> ColumnReference [ s; n ]
+        |> withExprPosition
+
     // 6.1 <char length units> ::= CHARACTERS | OCTETS
     // A closed set, so `USING <identifier>` is rejected instead of silently accepted.
     let private pCharLengthUnit =
@@ -445,8 +455,9 @@ module ExpressionParser =
             | first, rest -> ColumnReference(first :: rest)
         |> withExprPosition
 
-    // 6.4 <general value specification> — parameter forms plus keyword forms.
-    let private pGeneralValueSpecification =
+    // 6.4 <general value specification> — parameter forms plus keyword forms. Public because
+    // 20.11 <using argument> is exactly this production.
+    let pGeneralValueSpecification =
         choice
             [ pQuestionMark >>% "?" <|> pHostParameter |>> Parameter |> withExprPosition
               pKeyword "CURRENT_CATALOG" >>% CurrentCatalog |> withExprPosition
@@ -1196,17 +1207,22 @@ module ExpressionParser =
     //   position & substring: false true false true
     //   transliteration: true true true false
     let private pRegexArgument allowWith allowOccurrence allowAll allowGroup =
+        // <XQuery pattern>, <XQuery option flag>, <regex subject string> and the
+        // transliteration replacement are <character value expression>s; the non-boolean
+        // parser is used so `IN` is not read as an 8.4 <in predicate>. The FROM / OCCURRENCE /
+        // GROUP slots are numeric, so they use the numeric value expression parser (6.30/6.32).
         let pOperand = pNonBooleanValueExpression
 
+        // 6.30 <regex occurrence> ::= <numeric value expression>
         let pOccurrence =
             if allowOccurrence then
                 let pOcc =
                     if allowAll then
                         choice
                             [ attempt (pKeyword "ALL" >>% RegexOccurrenceAll)
-                              pExpression |>> RegexOccurrenceNumber ]
+                              pNumericValueExpression |>> RegexOccurrenceNumber ]
                     else
-                        pExpression |>> RegexOccurrenceNumber
+                        pNumericValueExpression |>> RegexOccurrenceNumber
 
                 opt (attempt (pKeyword "OCCURRENCE" >>. pOcc))
             else
@@ -1218,16 +1234,18 @@ module ExpressionParser =
             else
                 preturn None
 
+        // 6.30 <regex capture group> ::= <numeric value expression>
         let pGrp =
             if allowGroup then
-                opt (attempt (pKeyword "GROUP" >>. pOperand))
+                opt (attempt (pKeyword "GROUP" >>. pNumericValueExpression))
             else
                 preturn None
 
         pOperand .>>. opt (attempt (pKeyword "FLAG" >>. pOperand)) .>> pKeyword "IN"
         .>>. pOperand
         .>>. pWith
-        .>>. opt (attempt (pKeyword "FROM" >>. pOperand))
+        // 10.5/6.30 <start position> ::= <numeric value expression>
+        .>>. opt (attempt (pKeyword "FROM" >>. pNumericValueExpression))
         .>>. opt (attempt (pKeyword "USING" >>. pCharLengthUnits))
         .>>. pOccurrence
         .>>. pGrp
@@ -1806,13 +1824,16 @@ module ExpressionParser =
                         | ColumnReference _ -> true
                         | _ -> false
 
-                    // 10.9 — the bare `*` argument is only `COUNT ( <asterisk> )`.
+                    // 10.9 — the bare `*` argument is only `COUNT ( <asterisk> )`, a form
+                    // with no <set quantifier> slot.
                     let hasStarArg = args |> List.exists (fun a -> a.Kind = ExpressionKind.Star)
 
-                    if
-                        (Set.contains functionName binarySetFunctionNames || functionName = "LISTAGG")
-                        && Option.isSome dist
-                    then
+                    if hasStarArg && Option.isSome dist then
+                        failArity "no <set quantifier> in COUNT ( <asterisk> ) (10.9 <aggregate function>)"
+                    elif Set.contains functionName binarySetFunctionNames && Option.isSome dist then
+                        // 10.9 <binary set function> has no <set quantifier> slot; LISTAGG's
+                        // <listagg set function> does, so this rejection is limited to the
+                        // binary set functions.
                         failArity "DISTINCT/ALL is not allowed for this set function"
                     elif hasNonValueArgument && List.contains functionName functionKeywords then
                         failArity "only <value expression> arguments (10.4)"
@@ -2083,6 +2104,21 @@ module ExpressionParser =
               attempt pGroupingOperation
               attempt pSetFunctionSpecification
               attempt pRoutineInvocation
+              // 6.10 <window row pattern measure> ::= <measure name> — the last <window function
+              // type> alternative: a bare name followed by OVER. `<measure name>` is an
+              // <identifier> (5.2), so a qualified name is not a measure.
+              attempt (
+                  pIdentifierExpression .>>. pWindowNameOrSpecification
+                  |>> fun (name, window) ->
+                      WindowFunction
+                          { Function = name
+                            Args = []
+                            IsDistinct = false
+                            Window = window
+                            NullTreatment = None
+                            FromFirstOrLast = None }
+                  |> withExprPosition
+              )
               attempt pScalarSubquery
               attempt pLiteralExpression
               attempt pGeneralValueSpecification

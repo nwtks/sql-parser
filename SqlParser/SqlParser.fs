@@ -27,10 +27,27 @@ module SqlParser =
     // 5.1 <semicolon> ::= ;
     let private pSemicolon = token (pstring ";")
 
+    // 20.25/20.27 omit the <target table>; those are *preparable* statements — the text handed
+    // to PREPARE — so neither 13.4 <SQL procedure statement> (which lists 20.23/20.24, both with
+    // a <target table>) nor 22.1 accepts them. The DML parsers keep the form for a future
+    // preparable-statement surface, like pDeclareCursor (14.1).
+    let private rejectOmittedTarget stmt =
+        match stmt with
+        | Update { Target = DmlTarget.OmittedTarget } ->
+            fail "an omitted <target table> is only valid in a preparable dynamic update statement (20.27)."
+        | Delete { Target = DmlTarget.OmittedTarget } ->
+            fail "an omitted <target table> is only valid in a preparable dynamic delete statement (20.25)."
+        | _ -> preturn stmt
+
     // <data change statement> (7.6) — the DML statements allowed inside a
     // <data change delta table> (FINAL|NEW|OLD TABLE ( ... )). Wired here because
     // the DML parsers live in DataManipulationParser.fs, which is compiled after QueryParser.fs.
-    pDataChangeStatementRef.Value <- choice [ pInsertStatement; pUpdateStatement; pDeleteStatement; pMergeStatement ]
+    pDataChangeStatementRef.Value <-
+        choice
+            [ pInsertStatement
+              pUpdateStatement >>= rejectOmittedTarget
+              pDeleteStatement >>= rejectOmittedTarget
+              pMergeStatement ]
 
     // 7.17 <with clause> + <query expression> — WITH [ RECURSIVE ] <with list>
     // <query expression body>. The body is a query only: <with clause> is a prefix of
@@ -38,7 +55,7 @@ module SqlParser =
     // <SQL statement>. A WITH-prefixed query is a <direct select statement: multiple rows>
     // (22.2), so it is reachable only from `parse` (22.1), not from `parseStatement` (13.4).
     let private pWithStatement =
-        pWithClause .>>. (pQueryExpression |>> Select |> withStmtPosition)
+        pWithClause .>>. (pCursorSpecification |>> Select |> withStmtPosition)
         |>> fun ((recu, ctes), stmt) ->
             { Kind = WithStatement(recu, ctes, stmt.Kind)
               Pos = stmt.Pos }
@@ -134,7 +151,11 @@ module SqlParser =
     // 11.x <schema element>, but both entry points share that choice).
     // A bare multi-row <query expression> (22.2) is not a <SQL data change statement>.
     let private pSqlDataChangeStatement =
-        choice [ pInsertStatement; pUpdateStatement; pDeleteStatement; pMergeStatement ]
+        choice
+            [ pInsertStatement
+              pUpdateStatement >>= rejectOmittedTarget
+              pDeleteStatement >>= rejectOmittedTarget
+              pMergeStatement ]
 
     // 16 <SQL control statement> ::= <call statement> | <return statement>
     let private pSqlControlStatement =
@@ -202,6 +223,8 @@ module SqlParser =
             match stmt with
             | Update { Cursor = Some _ } ->
                 fail "a positioned <update statement> (14.13) is not directly executable (22.1)."
+            | Update { Target = DmlTarget.OmittedTarget } ->
+                fail "an omitted <target table> is only valid in a preparable dynamic update statement (20.27)."
             | _ -> preturn stmt
 
     let private pSearchedDeleteStatement =
@@ -210,6 +233,8 @@ module SqlParser =
             match stmt with
             | Delete { Cursor = Some _ } ->
                 fail "a positioned <delete statement> (14.8) is not directly executable (22.1)."
+            | Delete { Target = DmlTarget.OmittedTarget } ->
+                fail "an omitted <target table> is only valid in a preparable dynamic delete statement (20.25)."
             | _ -> preturn stmt
 
     // 22.1 <direct SQL statement> ::= <directly executable statement> <semicolon>
@@ -226,7 +251,7 @@ module SqlParser =
     let private pDirectSqlStatement =
         choice
             [ attempt pWithStatement
-              attempt (pQueryExpression |>> Select |> withStmtPosition)
+              attempt (pCursorSpecification |>> Select |> withStmtPosition)
               attempt (pInsertStatement |> withStmtPosition)
               attempt (pSearchedUpdateStatement |> withStmtPosition)
               attempt (pSearchedDeleteStatement |> withStmtPosition)

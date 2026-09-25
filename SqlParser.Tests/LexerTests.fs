@@ -26,6 +26,35 @@ let ``SQL terminal characters are parsed correctly`` () =
     Assert.Equal("-}", test pRightMinusBrace "-}")
 
 [<Fact>]
+let ``Separators are white space and comments (5.2)`` () =
+    // <white space> alone
+    test pSeparator "   " |> ignore
+    // <simple comment>: LF, CRLF and CR newlines all terminate it
+    test pSeparator "-- comment\n" |> ignore
+    test pSeparator "-- comment\r\n" |> ignore
+    test pSeparator "-- comment\r" |> ignore
+    // <bracketed comment>, including one longer than the old 10000-character search limit
+    test pSeparator "/* comment */" |> ignore
+    test pSeparator ("/* " + String.replicate 12000 "x" + " */") |> ignore
+    // the end of the input also terminates a <simple comment>
+    test pSeparator "-- trailing" |> ignore
+    // any number of separators may follow one another
+    test pSeparator "  -- a\n/* b */   /* c */" |> ignore
+
+[<Fact>]
+let ``An unterminated bracketed comment is rejected (5.2)`` () =
+    testFails pSeparator "/* comment"
+    test (pSeparator .>> pIdentifier) "/* comment */ x" |> ignore
+    testFails (pSeparator .>> pIdentifier) "/* comment x"
+
+[<Fact>]
+let ``A comment is a separator between tokens (5.2)`` () =
+    test (pKeyword "select") "SELECT/*c*/" |> ignore
+    Assert.Equal("X", test pIdentifier "x/*c*/")
+    Assert.Equal(Literal(Number 1m), test pLiteral "1/*c*/")
+    Assert.Equal(Literal(Number 1m), test pLiteral "1 -- c\n")
+
+[<Fact>]
 let ``Regular identifiers are parsed correctly`` () =
     Assert.Equal("ID", test pIdentifier "id")
     Assert.Equal("MY_TABLE", test pIdentifier "my_table")

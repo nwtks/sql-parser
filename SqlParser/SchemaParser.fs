@@ -138,10 +138,27 @@ module SchemaParser =
     // CREATE SCHEMA parser that consumes these elements) so no forward reference is needed.
     // 11.1 <schema definition> ::= CREATE SCHEMA <schema name clause> [ <schema character set or path> ] [ <schema element>... ]
     let pCreateSchemaStatement pSchemaElement =
+        // 5.4 <schema name> ::= [ <catalog name> <period> ] <unqualified schema name>
+        // At most TWO parts — narrower than <schema qualified name>, which admits an identifier
+        // after the schema as well. Checked after parsing because the AST node is shared.
+        let pSchemaNameExpression =
+            pSchemaQualifiedNameExpression
+            >>= fun name ->
+                let parts =
+                    match name.Kind with
+                    | Identifier _ -> 1
+                    | ColumnReference ps -> List.length ps
+                    | _ -> 1
+
+                if parts > 2 then
+                    fail "<schema name> allows at most two parts (5.4)"
+                else
+                    preturn name
+
         let pNameClause =
             choice
                 [ attempt (
-                      pSchemaQualifiedNameExpression
+                      pSchemaNameExpression
                       .>>. opt (pKeyword "AUTHORIZATION" >>. pIdentifierExpression)
                       |>> fun (name, auth) -> Some name, auth
                   )
@@ -301,6 +318,45 @@ module SchemaParser =
 
                     preturn (onUpd, onDel)
 
+    // 11.8 <match type> ::= FULL | PARTIAL | SIMPLE
+    let private pMatchType =
+        choice
+            [ attempt (pKeyword "FULL" >>% MatchType.MatchFull)
+              attempt (pKeyword "PARTIAL" >>% MatchType.MatchPartial)
+              attempt (pKeyword "SIMPLE" >>% MatchType.MatchSimple) ]
+
+    // 11.8 <referenced table and columns> ::= <table name>
+    //     [ <left paren> <referenced column list> [ <comma> <referenced period specification> ] <right paren> ]
+    // A <table name> (5.4) is a <local or schema qualified name> (at most two parts), and the
+    // column list may be followed by a <referenced period specification> — the period entry is
+    // not a column, so a plain column item must not swallow `PERIOD`.
+    let private pReferencedColumnListAndPeriod =
+        let pColItem = attempt (pIdentifierExpression .>> notFollowedBy (pKeyword "PERIOD"))
+        let pSepCol = attempt (token (pstring ",") >>. pColItem)
+
+        (pColItem .>>. many pSepCol |>> fun (first, rest) -> first :: rest)
+        .>>. opt (attempt (token (pstring ",") >>. pKeyword "PERIOD" >>. pIdentifierExpression))
+        |>> fun (columns, period) -> (columns: Expression list), (period: Expression option)
+
+    let private pReferencedTableAndColumns =
+        pLocalOrSchemaQualifiedNameExpression
+        .>>. opt (between (token (pstring "(")) (token (pstring ")")) pReferencedColumnListAndPeriod)
+
+    // 11.8 <references specification> ::=
+    //     REFERENCES <referenced table and columns> [ MATCH <match type> ] [ <referential triggered action> ]
+    // Shared by 11.4 <column constraint> and 11.8 <referential constraint definition>.
+    let private pReferencesSpecification =
+        pKeyword "REFERENCES" >>. pReferencedTableAndColumns
+        .>>. opt (attempt (pKeyword "MATCH" >>. pMatchType))
+        .>>. pReferentialTriggeredAction
+        |>> fun (((table, refColumns), matchType), triggered) ->
+            let referencedColumns, referencedPeriod =
+                match refColumns with
+                | Some(columns, period) -> Some columns, period
+                | None -> None, None
+
+            table, referencedColumns, referencedPeriod, matchType, triggered
+
     // 11.4 <column constraint definition> ::=
     //     [ <constraint name definition> ] <column constraint> [ <constraint characteristics> ]
     // 11.4 <column constraint> ::= NOT NULL | <unique specification>
@@ -315,20 +371,16 @@ module SchemaParser =
                   attempt (pKeyword "PRIMARY" >>. pKeyword "KEY" >>% ColumnConstraintKind.PrimaryKey)
                   attempt (pKeyword "UNIQUE" >>% ColumnConstraintKind.Unique)
                   attempt (
-                      pKeyword "REFERENCES" >>. pIdentifierExpression
-                      .>>. opt (
-                          between
-                              (token (pstring "("))
-                              (token (pstring ")"))
-                              (sepBy1 pIdentifierExpression (token (pstring ",")))
-                      )
-                      .>>. pReferentialTriggeredAction
-                      |>> fun ((table, refCols), (onUpd, onDel)) ->
+                      pReferencesSpecification
+                      |>> fun (table, refCols, refPeriod, matchType, (onUpd, onDel)) ->
                           ColumnConstraintKind.References
                               { Name = None
                                 Columns = []
+                                ReferencingPeriod = None
                                 Table = table
                                 RefColumns = refCols
+                                ReferencedPeriod = refPeriod
+                                Match = matchType
                                 OnUpdate = onUpd
                                 OnDelete = onDel }
                   )
@@ -514,22 +566,29 @@ module SchemaParser =
     //     [ <constraint name definition> ] <table constraint> [ <constraint characteristics> ]
     // 11.6 <table constraint> ::= PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK
     let pTableConstraintDefinition =
-        // 11.8 <referential constraint definition> ::= FOREIGN KEY ( <column list> ) REFERENCES <table> [ ( <column list> ) ] [ <referential triggered action> ]
+        // 11.8 <referential constraint definition> ::=
+        //     FOREIGN KEY ( <referencing column list> [ <comma> <referencing period specification> ] )
+        //         <references specification>
         let pForeignKeyConstraint =
+            let pReferencingColumnList =
+                let pColItem = attempt (pIdentifierExpression .>> notFollowedBy (pKeyword "PERIOD"))
+                let pSepCol = attempt (token (pstring ",") >>. pColItem)
+
+                (pColItem .>>. many pSepCol |>> fun (first, rest) -> first :: rest)
+                .>>. opt (attempt (token (pstring ",") >>. pKeyword "PERIOD" >>. pIdentifierExpression))
+
             pKeyword "FOREIGN"
             >>. pKeyword "KEY"
-            >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
-            .>> pKeyword "REFERENCES"
-            .>>. pIdentifierExpression
-            .>>. opt (
-                between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
-            )
-            .>>. pReferentialTriggeredAction
-            |>> fun (((cols, table), refCols), (onUpd, onDel)) ->
+            >>. between (token (pstring "(")) (token (pstring ")")) pReferencingColumnList
+            .>>. pReferencesSpecification
+            |>> fun ((cols, referencingPeriod), (table, refCols, refPeriod, matchType, (onUpd, onDel))) ->
                 { Name = None
                   Columns = cols
+                  ReferencingPeriod = referencingPeriod
                   Table = table
                   RefColumns = refCols
+                  ReferencedPeriod = refPeriod
+                  Match = matchType
                   OnUpdate = onUpd
                   OnDelete = onDel }
                 : ForeignKeyConstraint
@@ -1327,6 +1386,54 @@ module SchemaParser =
         >>. pKeyword "STYLE"
         >>. (pKeyword "SQL" >>% "SQL" <|> (pKeyword "GENERAL" >>% "GENERAL"))
 
+    // 5.4 <external routine name> ::= <identifier> | <character string literal>
+    // The canonical ISO form is the string literal (`EXTERNAL NAME 'mylib.myfn'`). Shared by
+    // 11.60 <external body reference> and 11.61 <alter routine characteristic> (NAME).
+    let private pExternalRoutineName =
+        attempt (pCharacterStringLiteral |>> Choice1Of2)
+        <|> (pSchemaQualifiedNameExpression |>> Choice2Of2)
+
+    // 11.60 <returns clause> ::= RETURNS <returns type>
+    // 11.60 <returns data type> ::= <data type> [ <locator indication> ]
+    // 11.60 <result cast> ::= CAST FROM <result cast from type>
+    // 11.60 <returns table type> ::= TABLE [ <table function column list> ] | ONLY PASS THROUGH
+    // 11.60 <table function column list element> ::= <column name> <data type>
+    // Defined here (before 11.51 <partial method specification>) because that rule consumes it:
+    // the dependency wins over the ascending-clause-order convention.
+    let private pReturnsType =
+        let pReturnsDataType =
+            pDataType
+            .>>. opt pLocatorIndication
+            .>>. opt (
+                attempt (
+                    pKeyword "CAST" >>. pKeyword "FROM" >>. pDataType .>>. opt pLocatorIndication
+                    |>> fun (dataType, locator) -> dataType, Option.isSome locator
+                )
+            )
+            |>> fun ((dataType, locator), castFrom) ->
+                { ReturnsDataType.DataType = dataType
+                  AsLocator = Option.isSome locator
+                  CastFrom = castFrom }
+
+        let pTableFunctionColumnList =
+            between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (sepBy1
+                    (pIdentifierExpression .>>. pDataType
+                     |>> fun (name, dataType) ->
+                         { TableFunctionColumn.Name = name
+                           DataType = dataType })
+                    (token (pstring ",")))
+
+        choice
+            [ attempt (pReturnsDataType |>> ReturnsData)
+              attempt (pKeyword "TABLE" >>. opt (attempt pTableFunctionColumnList) |>> ReturnsTable)
+              attempt (
+                  pKeyword "ONLY" >>. pKeyword "PASS" >>. pKeyword "THROUGH"
+                  >>% ReturnsOnlyPassThrough
+              ) ]
+
     // 11.51 <partial method specification> ::= [ INSTANCE | STATIC | CONSTRUCTOR ]
     //     METHOD <method name> <SQL parameter declaration list> <returns clause>
     //     [ SPECIFIC <specific method name> ]
@@ -1336,7 +1443,7 @@ module SchemaParser =
         opt pMethodKind
         .>>. (pKeyword "METHOD" >>. pIdentifierExpression)
         .>>. pParameterDeclarationList
-        .>>. opt (pKeyword "RETURNS" >>. pDataType)
+        .>>. (pKeyword "RETURNS" >>. pReturnsType)
         .>>. opt (pKeyword "SPECIFIC" >>. pSchemaQualifiedNameExpression)
         |>> fun ((((kind, name), parameters), returns), specific) ->
             { Kind = kind
@@ -1689,12 +1796,6 @@ module SchemaParser =
 
         // 11.60 <external body reference> ::= EXTERNAL [ NAME <external routine name> ]
         //     [ <parameter style clause> ] [ <transform group specification> ] [ <external security clause> ]
-        // <external routine name> (5.2) is <identifier> | <character string literal> — the
-        // canonical ISO form is the string literal (`EXTERNAL NAME 'mylib.myfn'`).
-        let pExternalRoutineName =
-            attempt (pCharacterStringLiteral |>> Choice1Of2)
-            <|> (pSchemaQualifiedNameExpression |>> Choice2Of2)
-
         let pExternalBodyReference =
             pKeyword "EXTERNAL" >>. opt (pKeyword "NAME" >>. pExternalRoutineName)
             .>>. opt (attempt pParameterStyleClause)
@@ -1786,44 +1887,6 @@ module SchemaParser =
         |>> CreateProcedure
 
     // 11.60 <returns clause> ::= RETURNS <returns type>
-    // 11.60 <returns data type> ::= <data type> [ <locator indication> ]
-    // 11.60 <result cast> ::= CAST FROM <result cast from type>
-    // 11.60 <returns table type> ::= TABLE [ <table function column list> ] | ONLY PASS THROUGH
-    // 11.60 <table function column list element> ::= <column name> <data type>
-    let private pReturnsType =
-        let pReturnsDataType =
-            pDataType
-            .>>. opt pLocatorIndication
-            .>>. opt (
-                attempt (
-                    pKeyword "CAST" >>. pKeyword "FROM" >>. pDataType .>>. opt pLocatorIndication
-                    |>> fun (dataType, locator) -> dataType, Option.isSome locator
-                )
-            )
-            |>> fun ((dataType, locator), castFrom) ->
-                { ReturnsDataType.DataType = dataType
-                  AsLocator = Option.isSome locator
-                  CastFrom = castFrom }
-
-        let pTableFunctionColumnList =
-            between
-                (token (pstring "("))
-                (token (pstring ")"))
-                (sepBy1
-                    (pIdentifierExpression .>>. pDataType
-                     |>> fun (name, dataType) ->
-                         { TableFunctionColumn.Name = name
-                           DataType = dataType })
-                    (token (pstring ",")))
-
-        choice
-            [ attempt (pReturnsDataType |>> ReturnsData)
-              attempt (pKeyword "TABLE" >>. opt (attempt pTableFunctionColumnList) |>> ReturnsTable)
-              attempt (
-                  pKeyword "ONLY" >>. pKeyword "PASS" >>. pKeyword "THROUGH"
-                  >>% ReturnsOnlyPassThrough
-              ) ]
-
     // 11.60 <schema function> ::= CREATE <SQL-invoked function>
     // 11.60 <SQL-invoked function> ::= { <function specification> | <method specification designator> } <routine body>
     // 11.60 <function specification> ::= FUNCTION <schema qualified routine name> <SQL parameter declaration list>
@@ -1918,7 +1981,7 @@ module SchemaParser =
                       >>. (pUnsignedInteger .>> ws)
                       |>> DynamicResultSets
                   )
-                  attempt (pKeyword "NAME" >>. pSchemaQualifiedNameExpression |>> ExternalName) ]
+                  attempt (pKeyword "NAME" >>. pExternalRoutineName |>> ExternalName) ]
 
         // 11.61 <alter routine characteristics> ::= <alter routine characteristic>...
         let pAlterRoutineCharacteristics =

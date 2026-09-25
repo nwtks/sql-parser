@@ -40,6 +40,33 @@ let ``Direct SQL statement with trailing whitespace verification`` () =
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
+let ``Comments are separators anywhere a separator is allowed (5.2)`` () =
+    // A <comment> is a <separator>, so it may separate any two tokens — including a keyword
+    // from a literal, a literal from a keyword, an identifier from punctuation and a comment
+    // from the statement's semicolon (docs/trade-off.md).
+    for sql in
+        [ "SELECT/*c*/1 FROM t;"
+          "SELECT 1/*c*/FROM t;"
+          "SELECT 1 FROM/*c*/t;"
+          "SELECT 1 FROM t/*c*/;"
+          "SELECT/**/1/**/FROM/**/t;"
+          "SELECT -- c\n1 FROM t;"
+          "SELECT 1 -- c\nFROM t;"
+          "-- leading\nSELECT 1 FROM t;"
+          "/* leading */ SELECT 1 FROM t;"
+          "SELECT/* multi\nline */1 FROM t;"
+          "SELECT 1 FROM t; -- trailing comment" ] do
+        match SqlParser.parse sql with
+        | Ok { Kind = Select _ } -> ()
+        | res -> Assert.Fail(sprintf "Expected Select for %A, got %A" sql res)
+
+[<Fact>]
+let ``An unterminated bracketed comment is rejected (5.2)`` () =
+    match SqlParser.parse "SELECT 1 /* unterminated FROM t;" with
+    | Ok _ -> Assert.Fail "Expected the unterminated comment to be rejected"
+    | Error _ -> ()
+
+[<Fact>]
 let ``Direct SQL statement accepts the direct SQL data families`` () =
     match SqlParser.parse "INSERT INTO t VALUES (1);" with
     | Ok { Kind = Insert _ } -> ()

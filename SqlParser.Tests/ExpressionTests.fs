@@ -360,6 +360,9 @@ let ``Routine invocation arity and suffix restrictions (6.10 / 10.9)`` () =
 
     // <rank function type> takes empty parens in the OVER form
     parseFails "SELECT RANK(1) OVER (ORDER BY x)"
+    // 10.9 — COUNT ( <asterisk> ) has no <set quantifier> slot
+    parseFails "SELECT COUNT(DISTINCT *)"
+    parseFails "SELECT COUNT(ALL *)"
     // <general set function> takes exactly one argument
     parseFails "SELECT SUM(a, b)"
     parseFails "SELECT COUNT(*, x)"
@@ -375,8 +378,22 @@ let ``Routine invocation arity and suffix restrictions (6.10 / 10.9)`` () =
     parseFails "SELECT NTH_VALUE(x) OVER ()"
     // <lead or lag function> offset is an <exact numeric literal>
     parseFails "SELECT LEAD(x, 1 + 2) OVER ()"
-    // <listagg separator> is a <character string literal>
+    // 5.3 — an <approximate numeric literal> is not an <exact numeric literal>
+    parseFails "SELECT LEAD(x, 1E0) OVER ()"
+    parseFails "SELECT LAG(x, 1.5E1) OVER ()"
+
+    match parse "SELECT LEAD(x, 2, 0) OVER ()" with
+    | WindowFunction { Function = { Kind = Identifier "LEAD" }
+                       Args = [ _; { Kind = Literal(Number 2m) }; _ ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected LEAD with an exact offset, got %A" res) // <listagg separator> is a <character string literal>
+
     parseFails "SELECT LISTAGG(x, y) WITHIN GROUP (ORDER BY 1)"
+    // 10.9 <listagg set function> admits a <set quantifier> (unlike the binary set functions)
+    parseFails "SELECT COVAR_POP(DISTINCT a, b)"
+
+    match parse "SELECT LISTAGG(DISTINCT x, ',') WITHIN GROUP (ORDER BY x)" with
+    | FunctionCall({ Kind = Identifier "LISTAGG" }, true, _, _, _, Some _) -> ()
+    | res -> Assert.Fail(sprintf "Expected LISTAGG DISTINCT, got %A" res)
     // <inverse distribution function> takes exactly one argument
     parseFails "SELECT PERCENTILE_CONT(1, 2) WITHIN GROUP (ORDER BY x)"
     // OVER / FILTER / WITHIN GROUP are not <routine invocation> suffixes
@@ -390,6 +407,29 @@ let ``Routine invocation arity and suffix restrictions (6.10 / 10.9)`` () =
     match parse "SELECT SUM(x) FILTER (WHERE p) OVER (PARTITION BY y)" with
     | WindowFunction _ -> ()
     | res -> Assert.Fail(sprintf "Expected WindowFunction, got %A" res)
+
+[<Fact>]
+let ``Window row pattern measure verification (6.10)`` () =
+    // 6.10 <window row pattern measure> ::= <measure name> — the last <window function type>.
+    match parse "SELECT m OVER (PARTITION BY p ORDER BY o)" with
+    | WindowFunction { Function = { Kind = Identifier "M" }
+                       Args = []
+                       Window = { ExistingWindowName = None
+                                  PartitionBy = [ { Kind = Identifier "P" } ]
+                                  OrderBy = [ { Kind = Identifier "O" }, true, None ]
+                                  Frame = None } } -> ()
+    | res -> Assert.Fail(sprintf "Expected a row pattern measure, got %A" res)
+
+    // a named window is a <window name or specification> too
+    match parse "SELECT m OVER w" with
+    | WindowFunction { Function = { Kind = Identifier "M" }
+                       Window = { ExistingWindowName = Some { Kind = Identifier "W" } } } -> ()
+    | res -> Assert.Fail(sprintf "Expected a measure over a named window, got %A" res)
+
+    // without OVER it is an ordinary column reference, not a measure
+    match parse "SELECT m" with
+    | Identifier "M" -> ()
+    | res -> Assert.Fail(sprintf "Expected a plain column reference, got %A" res)
 
 [<Fact>]
 let ``COALESCE requires at least two arguments (6.12)`` () = parseFails "SELECT COALESCE(1)"
@@ -1108,6 +1148,25 @@ let ``Regex functions reject clauses outside their production`` () =
     parseFails "SELECT SUBSTRING_REGEX('a' IN s OCCURRENCE ALL)"
     // 6.32 <regex transliteration> — no GROUP.
     parseFails "SELECT TRANSLATE_REGEX('a' IN s WITH 'b' GROUP 1)"
+
+[<Fact>]
+let ``Regex numeric slots take a numeric value expression (6.30/6.32)`` () =
+    // 6.30 <start position>, <regex occurrence> and <regex capture group> are
+    // <numeric value expression>s, so a character literal is rejected there.
+    parseFails "SELECT SUBSTRING_REGEX('a' IN s FROM 'x')"
+    parseFails "SELECT SUBSTRING_REGEX('a' IN s OCCURRENCE 'x')"
+    parseFails "SELECT SUBSTRING_REGEX('a' IN s GROUP 'x')"
+    // A numeric expression is accepted in every one of those slots.
+    match parse "SELECT SUBSTRING_REGEX('a' IN s FROM 1 + 1 OCCURRENCE 2 * 2 GROUP 1)" with
+    | RegexSubstring arg ->
+        match arg.From with
+        | Some { Kind = BinaryOp(BinaryOperator.Add, _, _) } -> ()
+        | res -> Assert.Fail(sprintf "Expected FROM 1 + 1, got %A" res)
+
+        match arg.Occurrence with
+        | Some(RegexOccurrenceNumber { Kind = BinaryOp(BinaryOperator.Multiply, _, _) }) -> ()
+        | res -> Assert.Fail(sprintf "Expected OCCURRENCE 2 * 2, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected RegexSubstring, got %A" res)
 
 [<Fact>]
 let ``POSITION_REGEX start verification`` () =

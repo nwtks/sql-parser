@@ -55,3 +55,14 @@ let ``GET DIAGNOSTICS rejects a non-enumerated statement information item name``
     // 23.1 <statement information item name> is a closed enumeration.
     parseStatementFails "GET DIAGNOSTICS x = FOO"
     parseStatementFails "GET DIAGNOSTICS x = DATA"
+
+[<Fact>]
+let ``GET DIAGNOSTICS targets are simple target specifications (23.1)`` () =
+    // 23.1 uses <simple target specification> (6.4), which has no <dynamic parameter specification>.
+    parseStatementFails "GET DIAGNOSTICS ? = NUMBER"
+    parseStatementFails "GET DIAGNOSTICS ? = ALL"
+
+    // a host parameter is a legal target
+    match parseStatement "GET DIAGNOSTICS :n = NUMBER" with
+    | GetDiagnostics(StatementInfo [ ({ Kind = Parameter ":N" }, "NUMBER") ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected a host parameter target, got %A" res)

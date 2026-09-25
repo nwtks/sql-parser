@@ -52,6 +52,13 @@ parsers, AST patterns, or tests — every entry is a real failure mode from this
   trailing separator needs `p .>>. many (attempt (sep >>. p))` (`t.*`).
 - **Whitespace is not skipped automatically** — `pKeyword` skips no *leading* ws; raw
   parsers (`pchar '*'`, `pUnsignedInteger`) consume no *trailing* ws — add `.>> ws`.
+- **`pstring` rejects newline characters in its argument** — `pstring "\r\n"` throws at
+  module-initialisation time (a `TypeInitializationException` on the first parse). Spell
+  multi-character newlines with `pchar` (`pchar '\r' >>. pchar '\n'`).
+- **`ws` is the separator consumer, so it eats comments too** (5.2) — a parser that must
+  NOT accept a comment between two tokens (e.g. the `<introducer>` before a character set
+  name, or the intra-literal spaces of a datetime literal) must use `spaces`/`spaces1`,
+  not `ws`.
 - **`pKeyword` returns `Parser<string, unit>`** — mixing it with a `Parser<unit, _>`
   via `<|>` is a type error (coerce with `|>> ignore` / `>>% ()`). The matched string
   keeps the *input casing* (`pstringCI`), so attach the meaning per branch
@@ -143,8 +150,10 @@ parsers, AST patterns, or tests — every entry is a real failure mode from this
   `<parameter style>` and `<char length units>` (`pCharLengthUnits`).
 - **A citation must name the defining clause**, not the using one: `<local qualified
   name>` is 5.4, `<char length units>` is 6.1, `<scope option>` is 5.4, `<semicolon>` is
-  5.1 — `RuleNumberingTests` matches against *mentioning* clauses, so any number works
-  there but only the defining clause is correct.
+  5.1, `<external routine name>` is 5.4 — `RuleNumberingTests` matches against
+  *mentioning* clauses, so any number works there but only the defining clause is correct.
+  Rule names must match the grammar file's casing too (`<direct select statement:
+  multiple rows>` is lowercase in 22.2).
 - **Numeric conversions must be checked *and* culture-invariant** — use
   `toUnsignedInteger` / `toDecimal` / `pUnsignedIntegerAsInt` with
   `CultureInfo.InvariantCulture` (de-DE reads `"1.5"` as 15); `runParser`'s try/with is
@@ -154,6 +163,11 @@ parsers, AST patterns, or tests — every entry is a real failure mode from this
   form at that slot (`pSimpleValueSpecification`) instead of widening `pLiteral`, which
   would change every `SELECT -1` AST. NULL is the 6.5 `pNullSpecification` — folding it
   into `pLiteral` over-accepts `SELECT 1 + NULL`.
+- **A host parameter name is an `<identifier>`**, so a reserved word cannot follow the
+  colon: `GET DESCRIPTOR d :count = COUNT` fails because `COUNT` is reserved, while
+  `:cnt` parses. Test with non-reserved names.
+- **A bare column reference is `Identifier`, not `ColumnReference`** — `SELECT m` yields
+  `Identifier "M"`; `ColumnReference` appears only once a name is qualified.
 - **Non-reserved keywords need explicit handling** — `TYPE`, `UNDER`, `OVERRIDING`,
   `INSTANCE`, `CONSTRUCTOR`, `FINAL`, `OPTIONS`, `DERIVED`, `GENERATED`, `SECURITY`,
   `DEFINER`, `INVOKER`, `TRANSFORM`, `STYLE`, `LOCATOR`, `PRESERVE`, `TEMPORARY`,

@@ -192,13 +192,15 @@ module QueryParser =
     // 10.11 bodies in ExpressionParser.fs (compiled before this module) reach it through the
     // forward refs wired below.
     // 10.10 <sort specification> ::= <sort key> [ <ordering specification> ] [ <null ordering> ]
+    // 10.10 <sort key> ::= <value expression> — booleans are value expressions (6.28), so the
+    // full expression parser is used rather than the boolean-free one.
     // 10.4 <ordering specification> ::= ASC | DESC — 10.10 <null ordering> ::= NULLS FIRST | NULLS LAST
     let pSortSpecification =
         let pNullsOrder =
             pKeyword "NULLS"
             >>. (pKeyword "FIRST" >>% NullsFirst <|> (pKeyword "LAST" >>% NullsLast))
 
-        pNonBooleanValueExpression
+        pExpression
         .>>. opt (attempt (pKeyword "ASC" >>% true) <|> attempt (pKeyword "DESC" >>% false))
         .>>. opt (attempt pNullsOrder)
         |>> fun ((expr, asc), nulls) -> expr, Option.defaultValue true asc, nulls
@@ -1217,7 +1219,7 @@ module QueryParser =
     // For a plain SELECT they are folded into the SelectStatement; for set
     // operations and WITH queries they are attached via QueryExpression so the
     // scope is the entire result, not just the last operand.
-    let private applyOrderByOffsetFetch (orderBy: (Expression * bool * NullsOrder option) list) limitOffset locking q =
+    let applyOrderByOffsetFetch (orderBy: (Expression * bool * NullsOrder option) list) limitOffset locking q =
         let hasTopLevelClauses =
             not orderBy.IsEmpty || Option.isSome limitOffset || Option.isSome locking
 

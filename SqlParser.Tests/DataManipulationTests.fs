@@ -53,10 +53,19 @@ let ``OPEN verification`` () =
 [<Fact>]
 let ``OPEN USING arguments verification`` () =
     // 20.19 <dynamic open statement> ::= OPEN <conventional dynamic cursor name> [ <input using clause> ]
-    match parseStatement "OPEN cur USING 1, 2" with
-    | Open({ Kind = Identifier "CUR" },
-           Some(UsingArguments [ { Kind = Literal(Number 1m) }; { Kind = Literal(Number 2m) } ])) -> ()
+    // 20.11 <using argument> ::= <general value specification> (6.4) — host parameters, dynamic
+    // parameters and the CURRENT_* / USER / VALUE keywords, but no <literal>.
+    match parseStatement "OPEN cur USING :a, ?" with
+    | Open({ Kind = Identifier "CUR" }, Some(UsingArguments [ { Kind = Parameter ":A" }; { Kind = Parameter "?" } ])) ->
+        ()
     | res -> Assert.Fail(sprintf "Expected OPEN USING arguments, got %A" res)
+
+    match parseStatement "OPEN cur USING :a INDICATOR :b" with
+    | Open(_, Some(UsingArguments [ { Kind = IndicatorParameter(":A", { Kind = Parameter ":B" }) } ])) -> ()
+    | res -> Assert.Fail(sprintf "Expected an indicator parameter, got %A" res)
+
+    parseStatementFails "OPEN cur USING 1, 2"
+    parseStatementFails "OPEN cur USING a + 1"
 
 [<Fact>]
 let ``OPEN USING descriptor verification`` () =
@@ -248,13 +257,11 @@ let ``DELETE positioned (WHERE CURRENT OF) verification`` () =
     | res -> Assert.Fail(sprintf "Expected positioned Delete, got %A" res)
 
 [<Fact>]
-let ``DELETE without target table (20.25) verification`` () =
-    // 20.25 <preparable dynamic delete statement: positioned>
-    match parseStatement "DELETE WHERE CURRENT OF cur" with
-    | Delete { Target = OmittedTarget
-               Cursor = Some { Kind = Identifier "CUR" }
-               Where = None } -> ()
-    | res -> Assert.Fail(sprintf "Expected Delete without target table, got %A" res)
+let ``DELETE without target table is preparable only (20.25)`` () =
+    // 20.25 <preparable dynamic delete statement: positioned> — the omitted <target table> is
+    // the text handed to PREPARE, so 13.4 (which lists 20.23, with a target) rejects it.
+    parseStatementFails "DELETE WHERE CURRENT OF cur"
+    parseFails "DELETE WHERE CURRENT OF cur"
 
 [<Fact>]
 let ``DELETE without target table and search WHERE is rejected`` () =
@@ -487,13 +494,11 @@ let ``UPDATE positioned (WHERE CURRENT OF) verification`` () =
     | res -> Assert.Fail(sprintf "Expected positioned Update, got %A" res)
 
 [<Fact>]
-let ``UPDATE without target table (20.27) verification`` () =
-    // 20.27 <preparable dynamic update statement: positioned>
-    match parseStatement "UPDATE SET name = 'x' WHERE CURRENT OF cur" with
-    | Update { Target = OmittedTarget
-               Cursor = Some { Kind = Identifier "CUR" }
-               Where = None } -> ()
-    | res -> Assert.Fail(sprintf "Expected Update without target table, got %A" res)
+let ``UPDATE without target table is preparable only (20.27)`` () =
+    // 20.27 <preparable dynamic update statement: positioned> — the omitted <target table> is
+    // the text handed to PREPARE, so 13.4 (which lists 20.24, with a <target table>) rejects it.
+    parseStatementFails "UPDATE SET name = 'x' WHERE CURRENT OF cur"
+    parseFails "UPDATE SET name = 'x' WHERE CURRENT OF cur"
 
 [<Fact>]
 let ``UPDATE FOR PORTION OF verification`` () =
@@ -521,6 +526,20 @@ let ``UPDATE nested mutated set clause verification`` () =
 
 [<Fact>]
 let ``UPDATE mutated set clause error`` () = parseFails "UPDATE users SET a. = 1"
+
+[<Fact>]
+let ``UPDATE array element target verification (14.15)`` () =
+    // 14.15 <update target> ::= <object column>
+    //     [ <left bracket or trigraph> <simple value specification> <right bracket or trigraph> ]
+    match parse "UPDATE users SET tags[1] = 'x' WHERE id = 1" with
+    | Update { Set = [ SingleSet({ Kind = ArrayElement({ Kind = Identifier "TAGS" }, { Kind = Literal(Number 1m) }) }, _) ] } ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected an array element target, got %A" res)
+
+    match parse "UPDATE users SET (a[1], b) = ('x', 2)" with
+    | Update { Set = [ MultipleSet([ { Kind = ArrayElement({ Kind = Identifier "A" }, _) }; { Kind = Identifier "B" } ],
+                                   _) ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected array elements in a set target list, got %A" res)
 
 [<Fact>]
 let ``UPDATE without target table and no CURRENT OF is rejected`` () =
