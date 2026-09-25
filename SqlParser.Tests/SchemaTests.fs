@@ -363,6 +363,15 @@ let ``referential triggered action verification`` () =
     parseFails "CREATE TABLE t (a INT REFERENCES p ON DELETE NO ACTION ON DELETE RESTRICT)"
 
 [<Fact>]
+let ``REFERENCES column list is optional (11.8)`` () =
+    match parse "CREATE TABLE t (a INT REFERENCES p)" with
+    | CreateTable { Columns = [ col ] } ->
+        match col.References with
+        | Some r -> Assert.True(r.RefColumns.IsNone, "Expected REFERENCES without a column list")
+        | None -> Assert.Fail "Expected a column-level REFERENCES"
+    | res -> Assert.Fail(sprintf "Expected a REFERENCES without column list, got %A" res)
+
+[<Fact>]
 let ``referenced table is a table name (5.4)`` () =
     // 11.8 <referenced table and columns> takes a <table name>, i.e. at most schema.table.
     match parse "CREATE TABLE t (a INT REFERENCES app.parent (x))" with
@@ -644,6 +653,11 @@ let ``User-defined type does not crash`` () =
     match parse "CREATE TABLE t (c MyType)" with
     | CreateTable { Columns = [ { DataType = UserDefinedType { Kind = Identifier "MYTYPE" } } ] } -> ()
     | res -> Assert.Fail(sprintf "Expected UserDefinedType, got %A" res)
+
+    // 6.1 <path-resolved user-defined type name> may be schema-qualified.
+    match parse "CREATE TABLE t (c app.my_type)" with
+    | CreateTable { Columns = [ { DataType = UserDefinedType { Kind = ColumnReference [ "APP"; "MY_TYPE" ] } } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected a schema-qualified UserDefinedType, got %A" res)
 
 [<Fact>]
 let ``CREATE TABLE with REF type verification`` () =
@@ -1472,6 +1486,7 @@ let ``partial method specification requires a returns clause (11.51)`` () =
                                                                  DataType = Integer } ]) } ] } -> ()
     | res -> Assert.Fail(sprintf "Expected RETURNS TABLE, got %A" res)
 
+[<Fact>]
 let ``CREATE TYPE method characteristic variants verification`` () =
     match
         parse
@@ -1989,6 +2004,7 @@ let ``CREATE TRANSFORM verification`` () =
     // — at most one TO SQL and one FROM SQL element.
     parseFails "CREATE TRANSFORM FOR t g (TO SQL WITH f, TO SQL WITH h)"
     parseFails "CREATE TRANSFORM FOR t g (TO SQL WITH f, FROM SQL WITH g, TO SQL WITH h)"
+    parseFails "CREATE TRANSFORM FOR t g (FROM SQL WITH f, FROM SQL WITH g)"
 
     // 11.67 <transform definition>: groups are SPACE-separated repetitions — no comma.
     match parse "CREATE TRANSFORM FOR t g1 (TO SQL WITH f) g2 (FROM SQL WITH g)" with

@@ -45,10 +45,20 @@ let ``malformed DECLARE CURSOR is rejected`` () =
     parseStatementFails "DECLARE cur CURSOR"
 
 [<Fact>]
+let ``Only MODULE is a legal cursor name qualifier (5.4)`` () =
+    parseStatementFails "OPEN a.b"
+    parseStatementFails "FETCH a.b INTO x"
+    parseStatementFails "CLOSE a.b"
+
+[<Fact>]
 let ``OPEN verification`` () =
     match parseStatement "OPEN cur" with
     | Open({ Kind = Identifier "CUR" }, None) -> ()
     | res -> Assert.Fail(sprintf "Expected Open, got %A" res)
+
+    match parseStatement "OPEN MODULE.c" with
+    | Open({ Kind = ColumnReference [ "MODULE"; "C" ] }, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected Open MODULE.c, got %A" res)
 
 [<Fact>]
 let ``OPEN USING arguments verification`` () =
@@ -82,6 +92,10 @@ let ``FETCH verification`` () =
     | Fetch(None, { Kind = Identifier "CUR" }, UsingArguments [ { Kind = Identifier "A" }; { Kind = Identifier "B" } ]) ->
         ()
     | res -> Assert.Fail(sprintf "Expected Fetch, got %A" res)
+
+    match parseStatement "FETCH MODULE.c INTO a" with
+    | Fetch(None, { Kind = ColumnReference [ "MODULE"; "C" ] }, UsingArguments [ { Kind = Identifier "A" } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected Fetch MODULE.c, got %A" res)
 
 [<Fact>]
 let ``FETCH INTO SQL DESCRIPTOR verification`` () =
@@ -140,6 +154,10 @@ let ``CLOSE verification`` () =
     match parseStatement "CLOSE cur" with
     | Close { Kind = Identifier "CUR" } -> ()
     | res -> Assert.Fail(sprintf "Expected Close, got %A" res)
+
+    match parseStatement "CLOSE MODULE.c" with
+    | Close { Kind = ColumnReference [ "MODULE"; "C" ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected Close MODULE.c, got %A" res)
 
 [<Fact>]
 let ``CLOSE without cursor name is rejected`` () = parseStatementFails "CLOSE"

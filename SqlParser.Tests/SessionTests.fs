@@ -52,6 +52,13 @@ let ``SET TIME ZONE interval verification`` () =
     | res -> Assert.Fail(sprintf "Expected SetTimeZone interval, got %A" res)
 
 [<Fact>]
+let ``SET TIME ZONE signed interval verification`` () =
+    // 6.37 <interval factor> ::= [ <sign> ] <interval primary> — an explicit + sign.
+    match parse "SET TIME ZONE + INTERVAL '1' DAY" with
+    | SetTimeZone(Some { Kind = UnaryOp(UnaryOperator.Plus, { Kind = Literal(Interval _) }) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected a signed interval, got %A" res)
+
+[<Fact>]
 let ``SET TIME ZONE datetime difference interval verification`` () =
     // 6.37 4th alternative: ( <datetime value expression> - <datetime term> ) <interval qualifier>
     match parse "SET TIME ZONE (ts1 - ts2) DAY" with

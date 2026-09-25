@@ -219,6 +219,14 @@ let ``Exact numeric type variants are parsed`` () =
     | Cast(_, Numeric(None, None), _) -> ()
     | res -> Assert.Fail(sprintf "Expected NUMERIC, got %A" res)
 
+    match parse "SELECT CAST(x AS DECIMAL)" with
+    | Cast(_, Decimal(None, None), _) -> ()
+    | res -> Assert.Fail(sprintf "Expected bare DECIMAL, got %A" res)
+
+    match parse "SELECT CAST(x AS DEC)" with
+    | Cast(_, Decimal(None, None), _) -> ()
+    | res -> Assert.Fail(sprintf "Expected bare DEC, got %A" res)
+
 [<Fact>]
 let ``Approximate numeric type variants are parsed`` () =
     match parse "SELECT CAST(x AS FLOAT)" with
@@ -409,6 +417,48 @@ let ``Routine invocation arity and suffix restrictions (6.10 / 10.9)`` () =
     | res -> Assert.Fail(sprintf "Expected WindowFunction, got %A" res)
 
 [<Fact>]
+let ``Window function arity forms are parsed (6.10)`` () =
+    match parse "SELECT NTILE(4) OVER (ORDER BY x)" with
+    | WindowFunction { Function = { Kind = Identifier "NTILE" }
+                       Args = [ { Kind = Literal(Number 4m) } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected NTILE(4) OVER ..., got %A" res)
+
+    match parse "SELECT NTH_VALUE(x, 2) OVER (ORDER BY x)" with
+    | WindowFunction { Function = { Kind = Identifier "NTH_VALUE" }
+                       Args = [ _; { Kind = Literal(Number 2m) } ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected NTH_VALUE(x, 2) OVER ..., got %A" res)
+
+    match parse "SELECT FIRST_VALUE(x) OVER ()" with
+    | WindowFunction { Function = { Kind = Identifier "FIRST_VALUE" } } -> ()
+    | res -> Assert.Fail(sprintf "Expected FIRST_VALUE(x) OVER ..., got %A" res)
+
+    match parse "SELECT LAST_VALUE(x) OVER ()" with
+    | WindowFunction { Function = { Kind = Identifier "LAST_VALUE" } } -> ()
+    | res -> Assert.Fail(sprintf "Expected LAST_VALUE(x) OVER ..., got %A" res)
+
+    match parse "SELECT LEAD(x) OVER ()" with
+    | WindowFunction { Function = { Kind = Identifier "LEAD" } } -> ()
+    | res -> Assert.Fail(sprintf "Expected LEAD(x) OVER ..., got %A" res)
+
+    match parse "SELECT LEAD(x, 2) OVER ()" with
+    | WindowFunction { Function = { Kind = Identifier "LEAD" } } -> ()
+    | res -> Assert.Fail(sprintf "Expected LEAD(x, 2) OVER ..., got %A" res)
+
+    match parse "SELECT ARRAY_AGG(x)" with
+    | FunctionCall({ Kind = Identifier "ARRAY_AGG" }, _, SqlValueArguments([ { Kind = Identifier "X" } ], None), _, _, _) ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected ARRAY_AGG(x), got %A" res)
+
+    // <ntile function> / <nth value function> reject a non-<simple value specification>
+    parseFails "SELECT NTILE(x + 1) OVER ()"
+    // 6.10 <window function type> takes no arguments
+    parseFails "SELECT ROW_NUMBER(x) OVER ()"
+    // 10.9 <hypothetical set function> needs a <value expression> in WITHIN GROUP
+    parseFails "SELECT RANK() WITHIN GROUP (ORDER BY x)"
+    // 10.4 — reserved built-ins take <value expression> arguments only
+    parseFails "SELECT SUM(x, TABLE(t)) FROM t"
+
+[<Fact>]
 let ``Window row pattern measure verification (6.10)`` () =
     // 6.10 <window row pattern measure> ::= <measure name> — the last <window function type>.
     match parse "SELECT m OVER (PARTITION BY p ORDER BY o)" with
@@ -455,6 +505,12 @@ let ``Dotted identifier chain without parens stays a column reference`` () =
     match parse "SELECT a.b.c" with
     | ColumnReference [ "A"; "B"; "C" ] -> ()
     | res -> Assert.Fail(sprintf "Expected ColumnReference, got %A" res)
+
+[<Fact>]
+let ``MODULE-qualified column reference verification (6.7)`` () =
+    match parse "SELECT MODULE.a.b" with
+    | ColumnReference [ "MODULE"; "A"; "B" ] -> ()
+    | res -> Assert.Fail(sprintf "Expected MODULE.a.b, got %A" res)
 
 [<Fact>]
 let ``GROUPING operation verification`` () =
@@ -533,6 +589,12 @@ let ``Window partition accepts a collate clause`` () =
 let ``Window partition rejects non column references`` () =
     parseFails "SELECT SUM(x) OVER (PARTITION BY a + 1)"
     parseFails "SELECT SUM(x) OVER (PARTITION BY 1)"
+
+[<Fact>]
+let ``Window partition accepts a multi part column reference`` () =
+    match parse "SELECT SUM(x) OVER (PARTITION BY t.a)" with
+    | WindowFunction { Window = { PartitionBy = [ { Kind = ColumnReference [ "T"; "A" ] } ] } } -> ()
+    | res -> Assert.Fail(sprintf "Expected a multi part partition item, got %A" res)
 
 [<Fact>]
 let ``Window functions verification`` () =
@@ -747,6 +809,21 @@ let ``SQL argument forms (10.4)`` () =
         match arguments.Arguments with
         | [ SqlArgumentValue { Kind = TableQuery _ } ] -> ()
         | res -> Assert.Fail(sprintf "Expected a table query argument, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected my_ptf, got %A" res)
+
+    // With a clause the same query proper becomes a <table argument>.
+    match parse "SELECT my_ptf(TABLE(SELECT x FROM u) AS x PARTITION BY a) FROM t" with
+    | FunctionCall(_, _, arguments, _, _, _) ->
+        match arguments.Arguments with
+        | [ SqlArgumentTable table ] ->
+            match table.Table with
+            | TableArgumentTableQuery _ -> ()
+            | res -> Assert.Fail(sprintf "Expected a table query proper, got %A" res)
+
+            match table.PartitionBy with
+            | Some [ { Kind = Identifier "A" } ] -> ()
+            | res -> Assert.Fail(sprintf "Expected PARTITION BY a, got %A" res)
+        | res -> Assert.Fail(sprintf "Expected a table argument, got %A" res)
     | res -> Assert.Fail(sprintf "Expected my_ptf, got %A" res)
 
     // <copartition clause> ::= COPARTITION <copartition list>
@@ -1003,6 +1080,10 @@ let ``POSITION verification`` () =
     | Position({ Kind = Literal(String "a") }, { Kind = Literal(String "abc") }, None) -> ()
     | res -> Assert.Fail(sprintf "Expected Position, got %A" res)
 
+    match parse "SELECT POSITION('a' IN 'abc' USING OCTETS)" with
+    | Position(_, _, Some { Kind = Identifier "OCTETS" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected Position USING OCTETS, got %A" res)
+
 [<Fact>]
 let ``POSITION rejects a non char length unit`` () =
     parseFails "SELECT POSITION('a' IN 'abc' USING JUNK)"
@@ -1212,6 +1293,10 @@ let ``SUBSTRING FROM FOR verification`` () =
         ()
     | res -> Assert.Fail(sprintf "Expected Substring, got %A" res)
 
+    match parse "SELECT SUBSTRING(name FROM 2)" with
+    | Substring({ Kind = Identifier "NAME" }, { Kind = Literal(Number 2m) }, None, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected Substring without FOR, got %A" res)
+
 [<Fact>]
 let ``Regex functions reject a non char length unit`` () =
     parseFails "SELECT OCCURRENCES_REGEX('a' IN s USING JUNK)"
@@ -1221,11 +1306,23 @@ let ``SUBSTRING rejects a non char length unit`` () =
     parseFails "SELECT SUBSTRING(name FROM 2 USING JUNK)"
 
 [<Fact>]
+let ``Non-boolean value expression slots reject a boolean operand (6.28)`` () =
+    // A boolean operand is rejected in these <value expression> slots
+    // (POSITION / CHAR_LENGTH / SUBSTRING).
+    parseFails "SELECT POSITION(EXISTS (SELECT 1) IN 'abc')"
+    parseFails "SELECT CHAR_LENGTH(EXISTS (SELECT 1))"
+    parseFails "SELECT SUBSTRING(EXISTS (SELECT 1) FROM 1)"
+
+[<Fact>]
 let ``OVERLAY PLACING verification`` () =
     match parse "SELECT OVERLAY(name PLACING 'x' FROM 2)" with
     | Overlay({ Kind = Identifier "NAME" }, { Kind = Literal(String "x") }, { Kind = Literal(Number 2m) }, None, None) ->
         ()
     | res -> Assert.Fail(sprintf "Expected Overlay, got %A" res)
+
+    match parse "SELECT OVERLAY(name PLACING 'x' FROM 2 FOR 3)" with
+    | Overlay(_, _, _, Some { Kind = Literal(Number 3m) }, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected OVERLAY FOR, got %A" res)
 
     match parse "SELECT OVERLAY(name PLACING 'x' FROM 2 USING OCTETS)" with
     | Overlay(_, _, _, None, Some "OCTETS") -> ()
@@ -1325,6 +1422,10 @@ let ``JSON_ARRAY function verification`` () =
     match parse "SELECT JSON_ARRAY(NULL ON NULL RETURNING VARCHAR(50))" with
     | JsonArray([], Some JsonNullOnNull, Some _) -> ()
     | res -> Assert.Fail(sprintf "Expected JsonArray null clause, got %A" res)
+
+    match parse "SELECT JSON_ARRAY(SELECT id FROM t)" with
+    | JsonArrayQuery(_, _, _, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonArrayQuery, got %A" res)
 
 [<Fact>]
 let ``JSON_QUERY function verification`` () =
@@ -1598,6 +1699,13 @@ let ``AT TIME ZONE and AT LOCAL verification`` () =
     match parse "SELECT x AT TIME ZONE INTERVAL '1' HOUR" with
     | AtTimeZone({ Kind = Identifier "X" }, TimeZoneSpecifier.TimeZoneOffset { Kind = Literal(Interval _) }) -> ()
     | res -> Assert.Fail(sprintf "Expected AT TIME ZONE interval, got %A" res)
+
+    match parse "SELECT x AT TIME ZONE y DAY" with
+    | AtTimeZone(_,
+                 TimeZoneSpecifier.TimeZoneOffset { Kind = IntervalPrimary({ Kind = Identifier "Y" },
+                                                                           IntervalQualifier.SingleField(Day, None)) }) ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected AT TIME ZONE interval primary, got %A" res)
 
     // 6.37 <interval primary> uses pValueExpressionPrimary: §8 predicate atoms
     // and the 7.16 '*' wildcard are not <value expression primary>s.

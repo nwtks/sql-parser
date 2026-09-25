@@ -585,6 +585,14 @@ let ``JSON_TABLE plan primary forms verification`` () =
     | Some(JsonPlanUnion [ JsonPlanPrimaryName _; JsonPlanPrimaryName _ ]) -> ()
     | res -> Assert.Fail(sprintf "Expected JsonPlanUnion, got %A" res)
 
+    match planOf "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN (p CROSS q)) AS jt" with
+    | Some(JsonPlanCross [ JsonPlanPrimaryName _; JsonPlanPrimaryName _ ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonPlanCross, got %A" res)
+
+    match planOf "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN (p CROSS q CROSS r)) AS jt" with
+    | Some(JsonPlanCross [ JsonPlanPrimaryName _; JsonPlanPrimaryName _; JsonPlanPrimaryName _ ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected a three-operand JsonPlanCross, got %A" res)
+
     // <JSON table plan> ::= <JSON table path name> | ... — a single path name is a
     // valid plan (a one-element UNION is NOT).
     match planOf "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT) PLAN (p)) AS jt" with
@@ -1255,6 +1263,15 @@ let ``Derived tables require a correlation (7.6)`` () =
 let ``Only joined tables may be parenthesized (7.6)`` () = parseFails "SELECT * FROM (t)"
 
 [<Fact>]
+let ``A parenthesized joined table is accepted (7.6)`` () =
+    match parse "SELECT * FROM (t1 JOIN t2 ON t1.id = t2.id)" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = JoinedTable _ } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected a parenthesized joined table, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
 let ``A bare asterisk is not a select sublist (7.16)`` () =
     parseFails "SELECT *, a FROM t"
     parseFails "SELECT a, * FROM t"
@@ -1410,6 +1427,16 @@ let ``ORDER BY applies to whole set operation`` () =
                              None,
                              None)) -> ()
     | res -> Assert.Fail(sprintf "Expected QueryExpression wrapping set operation, got %A" res)
+
+[<Fact>]
+let ``ORDER BY on an explicit table and a table value constructor (7.17)`` () =
+    match parse "TABLE t ORDER BY 1" with
+    | Select(QueryExpression(ExplicitTable _, [ { Kind = Literal(Number 1m) }, _, _ ], None, None)) -> ()
+    | res -> Assert.Fail(sprintf "Expected an ORDER BY over EXPLICIT TABLE, got %A" res)
+
+    match parse "VALUES (1), (2) ORDER BY 1" with
+    | Select(QueryExpression(TableValueConstructor _, [ { Kind = Literal(Number 1m) }, _, _ ], None, None)) -> ()
+    | res -> Assert.Fail(sprintf "Expected an ORDER BY over VALUES, got %A" res)
 
 [<Fact>]
 let ``ORDER BY OFFSET FETCH and locking on a WITH statement verification`` () =

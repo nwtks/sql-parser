@@ -200,6 +200,11 @@ let ``IN list verification`` () =
              [ { Kind = RowValueConstructor [ _; _ ] }; { Kind = Literal(Number 3m) } ]) -> ()
     | res -> Assert.Fail(sprintf "Expected a row value IN list, got %A" res)
 
+    // A <row subquery> is a <row value expression> too.
+    match parse "SELECT x IN (1, (SELECT y FROM t))" with
+    | InList({ Kind = Identifier "X" }, false, [ { Kind = Literal(Number 1m) }; { Kind = SubqueryExpression _ } ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected a subquery IN list item, got %A" res)
+
     parseFails "SELECT 1 FROM t WHERE x IN (1 + 1)"
     parseFails "SELECT 1 FROM t WHERE x IN ((1), 2)"
     parseFails "SELECT 1 FROM t WHERE x IN (-1)"
