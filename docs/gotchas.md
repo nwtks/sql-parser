@@ -254,3 +254,21 @@ parsers, AST patterns, or tests — every entry is a real failure mode from this
   (`pTypedSpecificRoutineDesignator`) instead of reordering the alternatives.
 - **An inline record inside a record literal does not parse** (FS0764/FS0001) — bind the
   inner value first (`let x: T = { … }`) and then use it as the field value.
+
+## Known residual deviations (out of scope)
+
+- **`1 + 1 = 2` still parses as a comparison.** `opp` (the operator-precedence parser in
+  `ExpressionParser.fs`) forms `BinaryOp(Equal, BinaryOp(Add, 1, 1), 2)` at the
+  *value-expression* level, before `pBooleanTestSuffixes` runs its part-1 guard. By the
+  time the suffix sees it, `isBooleanTopLevel` is already true (Equal is a boolean op), so
+  it offers `pBooleanTestPart2` (IS TRUE) — which fails — and then `preturn e` returns the
+  comparison. Only *suffix-based* predicates catch a term left operand (`1 + 1 IS NULL`
+  is rejected because `IS NULL` goes through `pBooleanTestSuffixes` and `isPredicateOperand`
+  is false). Fixing the term-left-operand case would require gating inside `opp` itself,
+  which is out of scope for the 2026-09 conformance sweep.
+- **TRANSFORM GROUP `<multiple group specification>` types only the last group.** 11.60
+  `pTransformGroupSpecification` accepts `g1, g2 FOR TYPE my_type` and types only the
+  final group (`MultipleTransformGroups [ (g1, None); (g2, Some _) ]`). The strict reading
+  (FOR TYPE mandatory on every group) is rejected by the test
+  `CREATE PROCEDURE external body reference extras verification`; the lenient form is kept
+  to match that test.

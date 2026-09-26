@@ -77,26 +77,16 @@ module PredicateParser =
         let pOperand =
             pExpr
             >>= fun e ->
-                if isBooleanTopLevel e then
-                    fail "a predicate part-2 operand must be a <row value predicand>"
-                else
+                if isPredicateOperand e then
                     preturn e
+                else
+                    fail "a predicate part-2 operand must be a <row value predicand> (7.2)"
 
         // 7.2 <row value expression> ::= <row value special case> | <explicit row value constructor>
         //   <row value special case> ::= <nonparenthesized value expression primary>
         // A parenthesized value expression (`(1)`) is a <value expression primary> but NOT a
         // <row value special case>; a term (`1 + 1`) or a signed primary is not a primary at all.
         // An explicit row value constructor (including a <row subquery>) is the other alternative.
-        let isRowValueExpression e =
-            not (isBooleanTopLevel e)
-            && match e.Kind with
-               | RowValueConstructor _ -> true // <explicit row value constructor>
-               | SubqueryExpression _ -> true // <row subquery>
-               | Parenthesized _ -> false // <parenthesized value expression>
-               | BinaryOp _ -> false // a term, not a primary
-               | UnaryOp _ -> false // [ <sign> ] <numeric primary>, not a primary
-               | _ -> true // a <nonparenthesized value expression primary>
-
         // A grammar slot that requires a *value* expression (8.5/8.6/8.7 pattern and escape,
         // 8.16/8.17 multiset operand): a boolean and an explicit row value constructor are both
         // excluded, so `'a' LIKE (1, 2)` is rejected. Character-vs-numeric distinctions stay

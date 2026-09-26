@@ -1922,7 +1922,7 @@ and ObjectKind =
     | Sequence
 
 // 12.2 <grant privilege statement> — payload shared by the flat StatementKind cases
-// (GrantObject / GrantTable / … / GrantRoutine), which encode the 12.3 <object name> kind.
+// (GrantTable / … / GrantRoutine), which encode the 12.3 <object name> kind.
 and GrantPrivilegeStatement =
     { Privileges: Privileges
       Object: Expression
@@ -1940,7 +1940,7 @@ and RevokeOptionExtension =
     | HierarchyOptionFor
 
 // 12.7 <revoke privilege statement> — payload shared by the flat StatementKind cases
-// (RevokeObject / RevokeTable / … / RevokeRoutine).
+// (RevokeTable / … / RevokeRoutine).
 and RevokePrivilegeStatement =
     { Privileges: Privileges
       Object: Expression
@@ -2313,10 +2313,9 @@ and StatementKind =
     // 11.74 <drop sequence generator statement>
     | DropSequence of Expression * bool
     // 12.2 <grant privilege statement> — one flat StatementKind case per 12.3 <object name>
-    // alternative: the optional-kind form (GrantObject), one case per kind keyword and the
-    // <specific routine designator> form (GrantRoutine, carrying the 10.6 <routine type>).
+    // alternative: the optional-[ TABLE ] form (GrantTable) and one case per kind keyword, plus
+    // the <specific routine designator> form (GrantRoutine, carrying the 10.6 <routine type>).
     // The payload is the shared GrantPrivilegeStatement record.
-    | GrantObject of GrantPrivilegeStatement
     | GrantTable of GrantPrivilegeStatement
     | GrantDomain of GrantPrivilegeStatement
     | GrantCollation of GrantPrivilegeStatement
@@ -2336,7 +2335,6 @@ and StatementKind =
     | DropRole of Expression
     // 12.7 <revoke privilege statement> — flat cases mirroring the GRANT side; the payload
     // is the shared RevokePrivilegeStatement record.
-    | RevokeObject of RevokePrivilegeStatement
     | RevokeTable of RevokePrivilegeStatement
     | RevokeDomain of RevokePrivilegeStatement
     | RevokeCollation of RevokePrivilegeStatement

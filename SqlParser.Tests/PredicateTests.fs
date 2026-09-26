@@ -98,13 +98,23 @@ let ``ANY and SOME stay usable as routine names`` () =
     // The 8.9 <quantified comparison predicate> term is tried before pRoutineInvocation, so a
     // non-query argument must fall through to the routine-call interpretation, not be rejected.
     match parse "SELECT ANY(x)" with
-    | FunctionCall({ Kind = Identifier "ANY" }, false, SqlValueArguments([ { Kind = Identifier "X" } ], None), _, _, _, _) ->
-        ()
+    | FunctionCall({ Kind = Identifier "ANY" },
+                   false,
+                   SqlValueArguments([ { Kind = Identifier "X" } ], None),
+                   _,
+                   _,
+                   _,
+                   _) -> ()
     | res -> Assert.Fail(sprintf "Expected ANY(x) routine call, got %A" res)
 
     match parse "SELECT SOME(x)" with
-    | FunctionCall({ Kind = Identifier "SOME" }, false, SqlValueArguments([ { Kind = Identifier "X" } ], None), _, _, _, _) ->
-        ()
+    | FunctionCall({ Kind = Identifier "SOME" },
+                   false,
+                   SqlValueArguments([ { Kind = Identifier "X" } ], None),
+                   _,
+                   _,
+                   _,
+                   _) -> ()
     | res -> Assert.Fail(sprintf "Expected SOME(x) routine call, got %A" res)
 
 [<Fact>]
@@ -159,6 +169,13 @@ let ``Predicate part-2 operands are row value predicands (8.x)`` () =
     parseFails "SELECT 1 IN (1 = 2)"
     parseFails "SELECT x IS DISTINCT FROM 1 = 2"
     parseFails "SELECT x OVERLAPS 1 = 2"
+
+    // A term (e.g. `1 + 1`) is not a <row value predicand> either — only a parenthesized
+    // expression stays legal (the Parenthesized node keeps the parens).
+    parseFails "SELECT x = 1 + 1"
+    parseFails "SELECT x BETWEEN 1 + 1 AND 2"
+    parseFails "SELECT x OVERLAPS 1 + 1"
+    parseFails "SELECT x IS NOT DISTINCT FROM 1 + 1"
 
     // 8.5/8.6/8.7 — the pattern/escape slots are *value* expressions: an explicit row value
     // constructor is not one.
@@ -451,6 +468,7 @@ let ``COLLATE verification`` () =
 [<Fact>]
 let ``When operands are row value predicands (6.12)`` () =
     parseFails "SELECT CASE x WHEN 1 AND 2 THEN 1 END"
+    parseFails "SELECT CASE x WHEN 1 + 1 THEN 2 END FROM t"
 
     // A PARENTHESIZED boolean form is a 6.39 <boolean predicand> and stays legal
     // (the Parenthesized node keeps the parens).
@@ -519,6 +537,7 @@ let ``Predicate part-1 left operands are row value predicands (8.x)`` () =
     // sit on a boolean result. 6.39 `IS [NOT] TRUE|FALSE|UNKNOWN` is the exception — its
     // <boolean primary> legitimately includes a predicate.
     parseFails "SELECT 1 FROM t WHERE 1 = 2 IS NULL"
+    parseFails "SELECT 1 FROM t WHERE 1 + 1 IS NULL"
     parseFails "SELECT 1 FROM t WHERE 1 = 2 BETWEEN 1 AND 2"
     parseFails "SELECT 1 FROM t WHERE 1 = 2 LIKE 'a'"
     parseFails "SELECT 1 FROM t WHERE x LIKE 'a' IS NULL"

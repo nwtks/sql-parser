@@ -30,7 +30,6 @@ let objectKindFromString (kindName: string) : ObjectKind option =
 
 let grantObjectKind (kind: StatementKind) : ObjectKind option =
     match kind with
-    | GrantObject _ -> None
     | GrantTable _ -> Some ObjectKind.Table
     | GrantDomain _ -> Some ObjectKind.Domain
     | GrantCollation _ -> Some ObjectKind.Collation
@@ -42,7 +41,6 @@ let grantObjectKind (kind: StatementKind) : ObjectKind option =
 
 let grantObjectName (kind: StatementKind) : Expression =
     match kind with
-    | GrantObject stmt
     | GrantTable stmt
     | GrantDomain stmt
     | GrantCollation stmt
@@ -54,7 +52,6 @@ let grantObjectName (kind: StatementKind) : Expression =
 
 let revokeObjectKind (kind: StatementKind) : ObjectKind option =
     match kind with
-    | RevokeObject _ -> None
     | RevokeTable _ -> Some ObjectKind.Table
     | RevokeDomain _ -> Some ObjectKind.Domain
     | RevokeCollation _ -> Some ObjectKind.Collation
@@ -66,7 +63,6 @@ let revokeObjectKind (kind: StatementKind) : ObjectKind option =
 
 let revokeObjectName (kind: StatementKind) : Expression =
     match kind with
-    | RevokeObject stmt
     | RevokeTable stmt
     | RevokeDomain stmt
     | RevokeCollation stmt
@@ -80,11 +76,11 @@ let revokeObjectName (kind: StatementKind) : Expression =
 [<Fact>]
 let ``GRANTED BY grantor verification`` () =
     match parse "GRANT SELECT ON t1 TO alice GRANTED BY CURRENT_USER" with
-    | GrantObject { Grantor = Some Grantor.CurrentUser } -> ()
+    | GrantTable { Grantor = Some Grantor.CurrentUser } -> ()
     | res -> Assert.Fail(sprintf "Expected GRANTED BY CURRENT_USER, got %A" res)
 
     match parse "GRANT SELECT ON t1 TO alice GRANTED BY CURRENT_ROLE" with
-    | GrantObject { Grantor = Some Grantor.CurrentRole } -> ()
+    | GrantTable { Grantor = Some Grantor.CurrentRole } -> ()
     | res -> Assert.Fail(sprintf "Expected GRANTED BY CURRENT_ROLE, got %A" res)
 
     // 12.3 <grantor> ::= CURRENT_USER | CURRENT_ROLE — a closed keyword set; an
@@ -126,9 +122,9 @@ let ``GRANT verification`` () =
         | res -> Assert.Fail(sprintf "Expected no grantor, got %A" res)
     | res -> Assert.Fail(sprintf "Expected GrantTable, got %A" res)
 
-    // 12.3 <object name> — the [ TABLE ] kind is optional: a bare name is GrantObject.
+    // 12.3 <object name> — the [ TABLE ] kind is optional: a bare name is GrantTable.
     match parse "GRANT ALL PRIVILEGES ON users TO PUBLIC" with
-    | GrantObject stmt ->
+    | GrantTable stmt ->
         match stmt.Privileges with
         | Privileges.AllPrivileges -> ()
         | res -> Assert.Fail(sprintf "Expected ALL PRIVILEGES, got %A" res)
@@ -147,10 +143,10 @@ let ``GRANT verification`` () =
         match stmt.Grantor with
         | None -> ()
         | res -> Assert.Fail(sprintf "Expected no grantor, got %A" res)
-    | res -> Assert.Fail(sprintf "Expected GrantObject, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected GrantTable, got %A" res)
 
     match parse "GRANT SELECT ON users TO alice WITH HIERARCHY OPTION WITH GRANT OPTION GRANTED BY CURRENT_USER" with
-    | GrantObject stmt ->
+    | GrantTable stmt ->
         match stmt.Privileges with
         | Privileges.Actions [ PrivilegeAction.Select None ] -> ()
         | res -> Assert.Fail(sprintf "Expected SELECT privilege, got %A" res)
@@ -161,7 +157,7 @@ let ``GRANT verification`` () =
         match stmt.Grantor with
         | Some Grantor.CurrentUser -> ()
         | res -> Assert.Fail(sprintf "Expected grantor CURRENT_USER, got %A" res)
-    | res -> Assert.Fail(sprintf "Expected GrantObject WITH HIERARCHY OPTION, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected GrantTable WITH HIERARCHY OPTION, got %A" res)
 
     // 12.5 <grant role statement>
     match parse "GRANT role_a, role_b TO alice WITH ADMIN OPTION" with
@@ -179,7 +175,7 @@ let ``GRANT verification`` () =
 [<InlineData("GRANT USAGE ON TRANSLATION tr1 TO alice", "Translation", "TR1")>]
 [<InlineData("GRANT USAGE ON TYPE ty1 TO alice", "Type", "TY1")>]
 [<InlineData("GRANT USAGE ON SEQUENCE s1 TO alice", "Sequence", "S1")>]
-[<InlineData("GRANT USAGE ON t1 TO alice", null, "T1")>]
+[<InlineData("GRANT USAGE ON t1 TO alice", "Table", "T1")>]
 let ``GRANT object kind verification`` sql expectedKind expectedName =
     let expected = objectKindFromString expectedKind
     let stmt = parse sql
@@ -195,18 +191,18 @@ let ``GRANT object name as qualified chain verification`` () =
     // A non-reserved kind word used as a schema name must not commit the kind branch:
     // `domain.users` is one <qualified identifier chain>, not kind DOMAIN + name.
     match parse "GRANT USAGE ON domain.users TO alice" with
-    | GrantObject stmt ->
+    | GrantTable stmt ->
         match stmt.Object with
         | { Kind = ColumnReference [ "DOMAIN"; "USERS" ] } -> ()
         | res -> Assert.Fail(sprintf "Expected domain.users chain, got %A" res)
-    | res -> Assert.Fail(sprintf "Expected GrantObject, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected GrantTable, got %A" res)
 
     match parse "REVOKE SELECT ON domain.users FROM alice CASCADE" with
-    | RevokeObject stmt ->
+    | RevokeTable stmt ->
         match stmt.Object with
         | { Kind = ColumnReference [ "DOMAIN"; "USERS" ] } -> ()
         | res -> Assert.Fail(sprintf "Expected domain.users chain, got %A" res)
-    | res -> Assert.Fail(sprintf "Expected RevokeObject, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected RevokeTable, got %A" res)
 
 [<Fact>]
 let ``GRANT UNDER privilege verification`` () =
@@ -288,32 +284,32 @@ let ``GRANT EXECUTE ON specific routine designator verification`` () =
     parseFails "GRANT EXECUTE ON ROUTINE add (INTEGER) TO alice"
     // … and a bare <table name> is still the optional-[ TABLE ] alternative.
     match parse "GRANT EXECUTE ON ROUTINE_TABLE TO alice" with
-    | GrantObject _ -> ()
-    | res -> Assert.Fail(sprintf "Expected GrantObject, got %A" res)
+    | GrantTable _ -> ()
+    | res -> Assert.Fail(sprintf "Expected GrantTable, got %A" res)
 
 [<Fact>]
 let ``GRANT SELECT column list versus method list verification`` () =
     // 12.3 — a <privilege method list> item requires a <routine type> (or SPECIFIC);
     // a bare comma-separated name list is a <privilege column list>.
     match parse "GRANT SELECT (col1, col2) ON t1 TO alice" with
-    | GrantObject stmt ->
+    | GrantTable stmt ->
         match stmt.Privileges with
         | Privileges.Actions [ PrivilegeAction.Select(Some(PrivilegeColumns [ { Kind = Identifier "COL1" }
                                                                               { Kind = Identifier "COL2" } ])) ] -> ()
         | res -> Assert.Fail(sprintf "Expected PrivilegeColumns, got %A" res)
-    | res -> Assert.Fail(sprintf "Expected GrantObject, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected GrantTable, got %A" res)
 
     // A data type list is neither a column nor a method list.
     parseFails "GRANT SELECT (a INT, b INT) ON t1 TO alice"
 
     match parse "GRANT SELECT (FUNCTION f, PROCEDURE p) ON t1 TO alice" with
-    | GrantObject stmt ->
+    | GrantTable stmt ->
         match stmt.Privileges with
         | Privileges.Actions [ PrivilegeAction.Select(Some(PrivilegeMethods [ routine; procedure ])) ] ->
             Assert.Equal(Some RoutineType.Function, routine.RoutineType)
             Assert.Equal(Some RoutineType.Procedure, procedure.RoutineType)
         | res -> Assert.Fail(sprintf "Expected PrivilegeMethods, got %A" res)
-    | res -> Assert.Fail(sprintf "Expected GrantObject, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected GrantTable, got %A" res)
 
 [<Fact>]
 let ``CREATE ROLE verification`` () =
@@ -329,7 +325,7 @@ let ``CREATE ROLE verification`` () =
 [<Fact>]
 let ``REVOKE verification`` () =
     match parse "REVOKE SELECT, DELETE ON users FROM alice CASCADE" with
-    | RevokeObject stmt ->
+    | RevokeTable stmt ->
         match stmt.Privileges with
         | Privileges.Actions [ PrivilegeAction.Select None; PrivilegeAction.Delete ] -> ()
         | res -> Assert.Fail(sprintf "Expected SELECT, DELETE privileges, got %A" res)
@@ -351,25 +347,25 @@ let ``REVOKE verification`` () =
         | res -> Assert.Fail(sprintf "Expected no grantor, got %A" res)
 
         Assert.True(stmt.DropBehavior)
-    | res -> Assert.Fail(sprintf "Expected RevokeObject, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected RevokeTable, got %A" res)
 
     match parse "REVOKE GRANT OPTION FOR SELECT ON users FROM alice RESTRICT" with
-    | RevokeObject stmt ->
+    | RevokeTable stmt ->
         match stmt.Option with
         | GrantOptionFor -> ()
         | res -> Assert.Fail(sprintf "Expected GRANT OPTION FOR, got %A" res)
 
         Assert.False(stmt.DropBehavior)
-    | res -> Assert.Fail(sprintf "Expected RevokeObject GRANT OPTION FOR, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected RevokeTable GRANT OPTION FOR, got %A" res)
 
     match parse "REVOKE HIERARCHY OPTION FOR SELECT ON users FROM alice CASCADE" with
-    | RevokeObject stmt ->
+    | RevokeTable stmt ->
         match stmt.Option with
         | HierarchyOptionFor -> ()
         | res -> Assert.Fail(sprintf "Expected HIERARCHY OPTION FOR, got %A" res)
 
         Assert.True(stmt.DropBehavior)
-    | res -> Assert.Fail(sprintf "Expected RevokeObject HIERARCHY OPTION FOR, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected RevokeTable HIERARCHY OPTION FOR, got %A" res)
 
     // 12.7 <revoke privilege statement> — the <specific routine designator> form
     match parse "REVOKE EXECUTE ON FUNCTION add FROM alice CASCADE" with
@@ -428,7 +424,7 @@ let ``REVOKE verification`` () =
 [<InlineData("REVOKE SELECT ON TRANSLATION tr1 FROM alice CASCADE", "Translation", "TR1")>]
 [<InlineData("REVOKE SELECT ON TYPE ty1 FROM alice CASCADE", "Type", "TY1")>]
 [<InlineData("REVOKE SELECT ON SEQUENCE s1 FROM alice CASCADE", "Sequence", "S1")>]
-[<InlineData("REVOKE SELECT ON t1 FROM alice CASCADE", null, "T1")>]
+[<InlineData("REVOKE SELECT ON t1 FROM alice CASCADE", "Table", "T1")>]
 let ``REVOKE object kind verification`` sql expectedKind expectedName =
     let expected = objectKindFromString expectedKind
     let stmt = parse sql
@@ -447,20 +443,20 @@ let ``REVOKE requires drop behavior`` () =
 [<Fact>]
 let ``GRANT to PUBLIC verification`` () =
     match parse "GRANT SELECT ON users TO PUBLIC" with
-    | GrantObject stmt ->
+    | GrantTable stmt ->
         match stmt.Grantees with
         | [ Grantee.Public ] -> ()
         | res -> Assert.Fail(sprintf "Expected grantee PUBLIC, got %A" res)
-    | res -> Assert.Fail(sprintf "Expected GrantObject, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected GrantTable, got %A" res)
 
 [<Fact>]
 let ``REVOKE from PUBLIC verification`` () =
     match parse "REVOKE SELECT ON users FROM PUBLIC CASCADE" with
-    | RevokeObject stmt ->
+    | RevokeTable stmt ->
         match stmt.Grantees with
         | [ Grantee.Public ] -> ()
         | res -> Assert.Fail(sprintf "Expected grantee PUBLIC, got %A" res)
-    | res -> Assert.Fail(sprintf "Expected RevokeObject, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected RevokeTable, got %A" res)
 
 [<Fact>]
 let ``GRANT with invalid grantee is rejected`` () =

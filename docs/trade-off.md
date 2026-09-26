@@ -254,7 +254,7 @@ The parser rejects what the standard does not permit, even in common vendor dial
   OmittedTarget` guards positioned forms; `ONLY ( t )` applies to UPDATE/DELETE/MERGE,
   not `INSERT` (14.11 has no ONLY form).
 - **Flat `StatementKind` cases** for every `DROP` variant and every 12.3 `<object name>`
-  kind of `GRANT`/`REVOKE` (`GrantObject`, `GrantTable`, …, `GrantRoutine`), wrapping
+  kind of `GRANT`/`REVOKE` (`GrantTable`, …, `GrantRoutine`), wrapping
   shared payload records; `GrantRoles`/`RevokeRoles` stay separate. `PrivilegeSelectTarget`
   separates method lists from column lists.
 
@@ -306,11 +306,15 @@ of flattening, so `(1 = 1)` is a `<boolean predicand>` and `x BETWEEN (1 = 1) AN
   primary>`s (`1 = 2 IS NULL`, `x IS TRUE IS FALSE`, `1 + 1 IS TRUE` all rejected) —
   hence one suffix at a time (`pBooleanTestSuffixes`) and a separate
   `pPredicateNoBooleanTest`.
-- **Operand categories**: `pOperand` = `<row value predicand>` (BETWEEN / IS DISTINCT /
-  OVERLAPS), `pInValueItem` = `<row value expression>` (`x IN (1 + 1)` / `x IN ((1), 2)` /
-  `x IN (-1)` rejected), `pValueOperand` = value-shaped (LIKE/SIMILAR/regex pattern,
-  escape, FLAG, multiset operands reject explicit rows). Type-level distinctions stay
-  unchecked — semantic.
+- **Operand categories**: `pOperand` (BETWEEN / IS DISTINCT / OVERLAPS part-2) and the
+  `<when operand>` / `<case operand>` slots accept a `<row value predicand>` **or a
+  parenthesized expression** — the project keeps the `Parenthesized` node, so `(1 = 1)`
+  and `(1 + 2)` stay legal — but never a TOP-LEVEL boolean (`1 = 1`) or a term (`1 + 1`);
+  `isPredicateOperand` (ExpressionParser.fs) encodes the rule. `pInValueItem` =
+  `<row value expression>` (`x IN (1 + 1)` / `x IN ((1), 2)` / `x IN (-1)` rejected —
+  parenthesized items are NOT accepted there), `pValueOperand` = value-shaped
+  (LIKE/SIMILAR/regex pattern, escape, FLAG, multiset operands reject explicit rows).
+  Type-level distinctions stay unchecked — semantic.
 - **Comparison / period**: `pValueExpressionChecked` rejects top-level boolean operands of
   comparisons; a `<period predicate>`'s left operand is checked post-parse
   (`findExpressionViolationIn`) since it parses before the suffix runs.

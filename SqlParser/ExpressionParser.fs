@@ -736,6 +736,35 @@ module ExpressionParser =
         | JsonExists _ -> true
         | _ -> false
 
+    // 7.2 <row value expression> ::= <row value special case> | <explicit row value constructor>
+    //   <row value special case> ::= <nonparenthesized value expression primary>
+    // A parenthesized value expression (`(1)`) is a <value expression primary> but NOT a
+    // <row value special case>; a term (`1 + 1`) or a signed primary is not a primary at all.
+    // An explicit row value constructor (including a <row subquery>) is the other alternative.
+    // Shared by PredicateParser (part-2 / IN-list operands) and ExpressionParser (when / case
+    // operands, pBooleanTestSuffixes part-1 guard).
+    let isRowValueExpression e =
+        not (isBooleanTopLevel e)
+        && match e.Kind with
+           | RowValueConstructor _ -> true // <explicit row value constructor>
+           | SubqueryExpression _ -> true // <row subquery>
+           | Parenthesized _ -> false // <parenthesized value expression>
+           | BinaryOp _ -> false // a term, not a primary
+           | UnaryOp _ -> false // [ <sign> ] <numeric primary>, not a primary
+           | _ -> true // a <nonparenthesized value expression primary>
+
+    // An operand slot (predicate part-1 / part-2, <when operand>, <case operand>): a <row value
+    // predicand> (7.2) or a parenthesized expression. The project keeps a Parenthesized node, so
+    // `(1 = 1)` and `(1 + 2)` stay legal, but a TOP-LEVEL boolean (`1 = 1`) or a term (`1 + 1`)
+    // is never a valid operand.
+    let isPredicateOperand e =
+        not (isBooleanTopLevel e)
+        && match e.Kind with
+           | Parenthesized _ -> true
+           | BinaryOp _ -> false
+           | UnaryOp _ -> false
+           | _ -> true
+
     // 6.12 <when operand> — the 8.2/8.3/8.4/8.5/8.6/8.7/8.8/8.9/8.12/8.13/8.14 predicate
     // part-2 forms as a function applied to the <case operand> (defined in
     // PredicateParser.fs, wired in SqlParser.fs).
@@ -763,10 +792,10 @@ module ExpressionParser =
             let pWhenOperandExpr =
                 pExpression
                 >>= fun e ->
-                    if isBooleanTopLevel e then
-                        fail "a <when operand> must be a <row value predicand> (6.12)"
-                    else
+                    if isPredicateOperand e then
                         preturn e
+                    else
+                        fail "a <when operand> must be a <row value predicand> (6.12)"
 
             let pWhenOperand caseOp =
                 attempt (pWhenOperandPart2 |>> fun applyToCaseOp -> Choice2Of2(applyToCaseOp caseOp))
@@ -781,9 +810,7 @@ module ExpressionParser =
                 attempt (
                     pExpression
                     >>= fun caseOp ->
-                        if isBooleanTopLevel caseOp then
-                            fail "a <case operand> must be a <row value predicand> (6.12)"
-                        else
+                        if isPredicateOperand caseOp then
                             many1 (pSimpleWhenClause caseOp)
                             |>> fun clauses ->
                                 let hasPart2 =
@@ -826,6 +853,8 @@ module ExpressionParser =
                                                 | Choice2Of2 predicate -> predicate, result))
 
                                     Case(Some caseOp, flattened, None)
+                        else
+                            fail "a <case operand> must be a <row value predicand> (6.12)"
                 )
 
             let pSearchedWhenClause =
@@ -1055,21 +1084,22 @@ module ExpressionParser =
 
     // 10.14 <JSON API common syntax> ::= <JSON context item> , <JSON path specification>
     //     [ AS <JSON table path name> ] [ <JSON passing clause> ]
-    // <JSON context item> ::= <JSON value expression> (value expression — no boolean ops,
-    // plus an optional FORMAT clause)
+    // <JSON context item> ::= <JSON value expression> ::= <value expression> [ <JSON input clause> ]
+    // — boolean expressions are permitted (6.28 <value expression> includes <boolean value expression>).
     // <JSON path specification> ::= <character string literal> — stored as a plain string.
     let pJsonApiCommonSyntax =
         // 10.14 <JSON argument> ::= <JSON value expression> [ <JSON input clause> ] AS <identifier>
-        // <JSON value expression> is a value expression — boolean expressions are not allowed.
+        // <JSON value expression> ::= <value expression> [ <JSON input clause> ] — boolean
+        // expressions are permitted (6.28 <value expression> includes <boolean value expression>).
         let pJsonArgument =
-            pNonBooleanValueExpression .>>. opt pJsonInputClause .>> pKeyword "AS"
+            pExpression .>>. opt pJsonInputClause .>> pKeyword "AS"
             .>>. pIdentifierExpression
             |>> fun ((value, inputFormat), name) ->
                 { JsonPassingArgument.Value = value
                   InputFormat = inputFormat
                   Name = name }
 
-        pNonBooleanValueExpression .>>. opt pJsonInputClause .>> token (pstring ",")
+        pExpression .>>. opt pJsonInputClause .>> token (pstring ",")
         .>>. pCharacterStringLiteral
         .>>. opt (attempt (pKeyword "AS" >>. pIdentifierExpression))
         .>>. opt (pKeyword "PASSING" >>. sepBy1 pJsonArgument (token (pstring ",")))
@@ -2602,10 +2632,11 @@ module ExpressionParser =
             match e.Kind with
             | IsBoolean _ -> None
             | _ when isBooleanTopLevel e -> Some(pBooleanTestPart2 |>> fun applySuffix -> applySuffix e)
-            | BinaryOp _
-            | UnaryOp _
-            | RowValueConstructor _ -> Some(pPredicateNoBooleanTest |>> fun applySuffix -> applySuffix e)
-            | _ -> Some(pPredicate |>> fun applySuffix -> applySuffix e)
+            | _ when isPredicateOperand e ->
+                match e.Kind with
+                | RowValueConstructor _ -> Some(pPredicateNoBooleanTest |>> fun applySuffix -> applySuffix e)
+                | _ -> Some(pPredicate |>> fun applySuffix -> applySuffix e)
+            | _ -> None
 
         let suffix =
             match predicateSuffix with

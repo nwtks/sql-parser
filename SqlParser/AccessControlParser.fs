@@ -136,7 +136,7 @@ module AccessControlParser =
                           | Some ObjectKind.Translation, _ -> GrantTranslation stmt
                           | Some ObjectKind.Type, _ -> GrantType stmt
                           | Some ObjectKind.Sequence, _ -> GrantSequence stmt
-                          | None, None -> GrantObject stmt
+                          | None, None -> GrantTable stmt
                   )
                   // 12.5 <grant role statement> ::= GRANT <role granted> [ { , <role granted> }... ]
                   //     TO <grantee> [ { , <grantee> }... ] [ WITH ADMIN OPTION ] [ GRANTED BY <grantor> ]
@@ -196,7 +196,7 @@ module AccessControlParser =
                           | Some ObjectKind.Translation, _ -> RevokeTranslation stmt
                           | Some ObjectKind.Type, _ -> RevokeType stmt
                           | Some ObjectKind.Sequence, _ -> RevokeSequence stmt
-                          | None, None -> RevokeObject stmt
+                          | None, None -> RevokeTable stmt
                   )
                   // 12.7 <revoke role statement> ::= REVOKE [ ADMIN OPTION FOR ] <role revoked>
                   //     [ { , <role revoked> }... ] FROM <grantee> [ { , <grantee> }... ]
