@@ -227,10 +227,12 @@ let ``GRANT UNDER privilege verification`` () =
 
 [<Fact>]
 let ``GRANT EXECUTE ON routine verification`` () =
-    // 12.3 <object name> — the <specific routine designator> alternative keeps the
-    // 10.6 <routine type> in the AST.
+    // 12.3 <object name> — the <specific routine designator> alternative keeps the whole
+    // 10.6 designator in the AST.
     match parse "GRANT EXECUTE ON FUNCTION add TO alice" with
-    | GrantRoutine(RoutineType.Function, stmt) ->
+    | GrantRoutine({ IsSpecific = false
+                     RoutineType = Some RoutineType.Function },
+                   stmt) ->
         match stmt.Object with
         | { Kind = Identifier "ADD" } -> ()
         | res -> Assert.Fail(sprintf "Expected object add, got %A" res)
@@ -241,7 +243,9 @@ let ``GRANT EXECUTE ON routine verification`` () =
     | res -> Assert.Fail(sprintf "Expected GrantRoutine FUNCTION, got %A" res)
 
     match parse "GRANT SELECT ON PROCEDURE p TO bob" with
-    | GrantRoutine(RoutineType.Procedure, stmt) ->
+    | GrantRoutine({ IsSpecific = false
+                     RoutineType = Some RoutineType.Procedure },
+                   stmt) ->
         match stmt.Object with
         | { Kind = Identifier "P" } -> ()
         | res -> Assert.Fail(sprintf "Expected object p, got %A" res)
@@ -261,6 +265,31 @@ let ``GRANT EXECUTE ON routine verification`` () =
             | res -> Assert.Fail(sprintf "Expected object my_type, got %A" res)
         | res -> Assert.Fail(sprintf "Expected SELECT (method list), got %A" res)
     | res -> Assert.Fail(sprintf "Expected GrantType, got %A" res)
+
+[<Fact>]
+let ``GRANT EXECUTE ON specific routine designator verification`` () =
+    // 12.3 <object name> — the <specific routine designator> alternative has two forms,
+    // and both keep the whole designator in the AST.
+    match parse "GRANT EXECUTE ON SPECIFIC FUNCTION app.add TO alice" with
+    | GrantRoutine({ IsSpecific = true
+                     RoutineType = Some RoutineType.Function },
+                   stmt) -> Assert.Equal(ColumnReference [ "APP"; "ADD" ], stmt.Object.Kind)
+    | res -> Assert.Fail(sprintf "Expected GrantRoutine SPECIFIC FUNCTION, got %A" res)
+
+    match parse "GRANT EXECUTE ON ROUTINE add FOR my_udt TO alice" with
+    | GrantRoutine({ IsSpecific = false
+                     RoutineType = Some RoutineType.Routine
+                     ForType = Some { Kind = Identifier "MY_UDT" } },
+                   stmt) -> Assert.Equal(Identifier "ADD", stmt.Object.Kind)
+    | res -> Assert.Fail(sprintf "Expected GrantRoutine ROUTINE FOR, got %A" res)
+
+    // The <member name> form carries no <data type list> here (10.6), so this is not a
+    // 12.3 <object name> …
+    parseFails "GRANT EXECUTE ON ROUTINE add (INTEGER) TO alice"
+    // … and a bare <table name> is still the optional-[ TABLE ] alternative.
+    match parse "GRANT EXECUTE ON ROUTINE_TABLE TO alice" with
+    | GrantObject _ -> ()
+    | res -> Assert.Fail(sprintf "Expected GrantObject, got %A" res)
 
 [<Fact>]
 let ``GRANT SELECT column list versus method list verification`` () =
@@ -344,13 +373,27 @@ let ``REVOKE verification`` () =
 
     // 12.7 <revoke privilege statement> — the <specific routine designator> form
     match parse "REVOKE EXECUTE ON FUNCTION add FROM alice CASCADE" with
-    | RevokeRoutine(RoutineType.Function, stmt) ->
+    | RevokeRoutine({ IsSpecific = false
+                      RoutineType = Some RoutineType.Function },
+                    stmt) ->
         match stmt.Object with
         | { Kind = Identifier "ADD" } -> ()
         | res -> Assert.Fail(sprintf "Expected object add, got %A" res)
 
         Assert.True(stmt.DropBehavior)
     | res -> Assert.Fail(sprintf "Expected RevokeRoutine FUNCTION, got %A" res)
+
+    match parse "REVOKE EXECUTE ON SPECIFIC ROUTINE app.add FROM alice RESTRICT" with
+    | RevokeRoutine({ IsSpecific = true
+                      RoutineType = Some RoutineType.Routine },
+                    stmt) ->
+        Assert.Equal(ColumnReference [ "APP"; "ADD" ], stmt.Object.Kind)
+        Assert.False(stmt.DropBehavior)
+    | res -> Assert.Fail(sprintf "Expected RevokeRoutine SPECIFIC ROUTINE, got %A" res)
+
+    match parse "REVOKE EXECUTE ON ROUTINE add FOR my_udt FROM alice CASCADE" with
+    | RevokeRoutine({ ForType = Some { Kind = Identifier "MY_UDT" } }, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected RevokeRoutine ROUTINE FOR, got %A" res)
 
     // 12.7 <revoke role statement>
     match parse "REVOKE role_a FROM alice CASCADE" with

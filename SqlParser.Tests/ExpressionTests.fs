@@ -201,6 +201,18 @@ let ``String type modifiers are parsed (6.1)`` () =
     // … and a <national character string type> has no CHARACTER SET slot.
     parseFails "SELECT CAST(x AS NCHAR(8) CHARACTER SET utf8) FROM t"
 
+    // 10.5 <character set specification> is always a <character set name>, i.e.
+    // [ <schema name> <period> ] <SQL language identifier> (5.4) — at most two parts.
+    match parse "SELECT CAST(x AS VARCHAR(10) CHARACTER SET info.utf8) FROM t" with
+    | Cast(_, CharacterTypeWithModifiers(Varchar _, modifiers), _) ->
+        Assert.Equal<ExpressionKind option>(
+            Some(ColumnReference [ "INFO"; "UTF8" ]),
+            modifiers.CharacterSet |> Option.map (fun e -> e.Kind)
+        )
+    | res -> Assert.Fail(sprintf "Expected a schema-qualified character set, got %A" res)
+
+    parseFails "SELECT CAST(x AS VARCHAR(10) CHARACTER SET cat.info.utf8) FROM t"
+
 [<Fact>]
 let ``Exact numeric type variants are parsed`` () =
     match parse "SELECT CAST(x AS DECIMAL(10,2))" with

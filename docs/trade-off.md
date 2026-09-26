@@ -72,6 +72,49 @@ The parser rejects what the standard does not permit, even in common vendor dial
 
 ## 2026-09 SQL:2016 conformance changes
 
+- **5.4 name arity is enforced per production.** `pSchemaQualifiedNameExpression` (three
+  parts) is shared, but the slots whose production is narrower now use a dedicated parser
+  in `ExpressionParser.fs`:
+  - `pIdentifierNameExpression` — a bare `<identifier>`. `<statement name>` (20.15) and
+    `<non-extended descriptor name>` (hence `<conventional descriptor name>`) are this
+    production, so `EXECUTE a.b`, `DEALLOCATE PREPARE a.b` and
+    `ALLOCATE SQL DESCRIPTOR a.b` are rejected.
+  - `pSchemaNameExpression` / `pCharacterSetNameExpression` — at most two parts. Applies
+    to `DROP SCHEMA` (11.2), `CREATE SCHEMA … DEFAULT CHARACTER SET` (11.1), the
+    `CREATE`/`DROP CHARACTER SET` slots (11.41/11.42), the `CREATE COLLATION … FOR` slot
+    (11.43) and the 6.1 `<character string type>` `CHARACTER SET` modifier. The
+    `<collate clause>` slots keep three parts — `<collation name>` *is* a
+    `<schema qualified name>`.
+  - `pLocalQualifiedNameExpression` — `<local qualified name>`, hoisted out of
+    `DataManipulationParser.fs` and reused by every `<cursor name>` slot (14.1/14.4/14.5/
+    14.6, 14.8/14.13, 20.10, 20.15, 20.18). `MODULE.c` is a cursor name, `a.b.c` is not.
+  Arity is checked *after* parsing (`pNameOfArity`) because the AST node is shared with
+  the three-part form, so the failure message can name the production.
+  The other direction was widened in the same pass: `<constraint name>` (10.8) is a
+  `<schema qualified name>`, so 11.4/11.6/11.24/11.25/11.26 accept qualified names, and
+  11.8's `<referenced table and columns>` is a `<table name>` — a `<local or schema
+  qualified name>` whose qualifier may itself be a `<schema name>`, i.e. three parts.
+- **20.15 uses `<statement name>`, not `<extended statement name>`.** The grammar has
+  both (`<statement name> ::= <identifier>`, `<extended statement name> ::=
+  [ <scope option> ] <simple value specification>`); 20.15 takes the plain one, so
+  `DECLARE c CURSOR FOR LOCAL :s` is rejected while 20.17's `ALLOCATE … FOR LOCAL :s`
+  still works. The AST keeps the `ExtendedName` record with `Scope = None`.
+- **12.3 `<object name>` now accepts both `<specific routine designator>` alternatives.**
+  `SPECIFIC <routine type> <specific name>` and the `FOR <schema-resolved user-defined
+  type name>` tail were missing, so `GRANT EXECUTE ON SPECIFIC FUNCTION f TO u` and
+  `GRANT EXECUTE ON ROUTINE add FOR t TO u` were rejected. `StatementKind.GrantRoutine` /
+  `RevokeRoutine` now carry the whole `SpecificRoutineDesignator` (instead of a bare
+  `RoutineType`), so the `SPECIFIC` keyword and the `FOR` type survive. A literal variant
+  `pTypedSpecificRoutineDesignator` (mandatory `<routine type>`, no `<data type list>`) was
+  added because the permissive one accepts a bare name and would swallow the kind-keyword
+  and `[ TABLE ] <table name>` alternatives of the same `<object name>`.
+- **11.3 `<as subquery clause>` requires the `<subquery>` parentheses.** The production is
+  `AS <table subquery>` and `<table subquery> ::= <subquery> ::= ( <query expression> )`,
+  so `CREATE TABLE t AS (SELECT 1 FROM u) WITH DATA` is the conforming form and
+  `CREATE TABLE t AS SELECT 1 FROM u WITH DATA` is rejected. This is a real-world
+  regression risk (most dialects write the bare form), accepted for conformance; the
+  view form (11.32) is unaffected because it takes a `<query expression>` directly.
+
 - 6.4 `<SQL parameter reference>` is represented by the existing `Identifier` /
   `ColumnReference` AST; parameter-vs-column resolution remains semantic. 6.5 shares
   `<implicitly typed value specification>` and `<contextually typed value specification>`
@@ -142,9 +185,10 @@ The parser rejects what the standard does not permit, even in common vendor dial
   and the CURRENT_*/USER/VALUE keywords are accepted.
 - **14.15 `<update target>`** admits the array-element form in all three set-clause shapes.
 - **Still open:** 11.4's optional `<data type or domain name>` (typed-table columns) and
-  the 20.x extended `<SQL statement name>` / `<dynamic cursor name>` forms
+  the 20.x extended `<SQL statement name>` / `<descriptor name>` forms
   (`[ GLOBAL | LOCAL ] :c`, `PTF :c`), which need scope information the
-  `Expression`-shaped name fields cannot hold.
+  `Expression`-shaped name fields cannot hold. 20.2/20.3 now parse the plain
+  `<identifier>` form only, which is the non-extended half of that gap.
 
 
 - **Types avoid left recursion by construction** — `pDataTypeElement` + a folded

@@ -5,19 +5,8 @@ open SqlParser.Lexer
 open SqlParser.ExpressionParser
 
 module DataManipulationParser =
-    // 5.4 <local qualified name> ::= [ <local qualifier> <period> ] <qualified identifier>
-    // 14.1 <cursor name> ::= <local qualified name>; <local qualifier> ::= MODULE is the only
-    // qualifier a cursor name admits, so `DECLARE a.b CURSOR ...` is rejected.
-    let private pLocalQualifiedNameExpression =
-        getPosition
-        .>>. opt (attempt (pKeyword "MODULE" >>. token (pstring ".")))
-        .>>. pIdentifier
-        |>> fun ((pos, qualifier), name) ->
-            { Expression.Kind =
-                (match qualifier with
-                 | Some _ -> ColumnReference [ "MODULE"; name ]
-                 | None -> Identifier name)
-              Pos = { Line = pos.Line; Column = pos.Column } }
+    // 5.4 <cursor name> ::= <local qualified name> — shared with the 20.x cursor-name slots
+    // in DynamicParser.fs (at most two parts, MODULE being the only qualifier).
 
     // 14.2 <cursor properties> ::= [ <cursor sensitivity> ] [ <cursor scrollability> ] CURSOR
     //     [ <cursor holdability> ] [ <cursor returnability> ]
@@ -269,7 +258,7 @@ module DataManipulationParser =
     let private pWhereClause =
         pKeyword "WHERE"
         >>. (attempt (
-                 pKeyword "CURRENT" >>. pKeyword "OF" >>. pSchemaQualifiedNameExpression
+                 pKeyword "CURRENT" >>. pKeyword "OF" >>. pLocalQualifiedNameExpression
                  |>> fun c -> Some c, None
              )
              <|> (pExpression |>> fun e -> None, Some e))

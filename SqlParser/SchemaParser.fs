@@ -53,7 +53,7 @@ module SchemaParser =
     // 10.6 <member name> ::= <member name alternatives> [ <data type list> ]
     // A bare <schema qualified routine name> is also accepted (RoutineType = None) so that
     // callers such as `ALTER ROUTINE add` keep working — see docs/trade-off.md.
-    let pSpecificRoutineDesignator =
+    let private pSpecificRoutineDesignatorImpl (allowBareRoutineName: bool) =
         // 10.6 <data type list> ::= ( [ <data type> [ { <comma> <data type> }... ] ] )
         let pDataTypeList =
             between (token (pstring "(")) (token (pstring ")")) (sepBy pDataType (token (pstring ",")))
@@ -65,19 +65,46 @@ module SchemaParser =
               DataTypeList = dataTypeList
               ForType = forType }
 
+        // The <data type list> belongs to 10.6 <member name> only, so a caller that wants the
+        // production transcribed literally (a 12.3 <object name>) passes false and gets neither
+        // the bare-name form nor the list.
+        let pMemberName =
+            if allowBareRoutineName then
+                choice
+                    [ attempt (
+                          opt pRoutineType
+                          .>>. pSchemaQualifiedNameExpression
+                          .>>. opt (attempt pDataTypeList)
+                          .>>. opt (attempt (pKeyword "FOR" >>. pSchemaQualifiedNameExpression))
+                          |>> fun (((routineType, name), dataTypeList), forType) ->
+                              mk false routineType name dataTypeList forType
+                      )
+                      attempt (
+                          pRoutineType
+                          .>>. pSchemaQualifiedNameExpression
+                          .>>. opt (attempt (pKeyword "FOR" >>. pSchemaQualifiedNameExpression))
+                          |>> fun ((routineType, name), forType) -> mk false (Some routineType) name None forType
+                      ) ]
+            else
+                pRoutineType
+                .>>. pSchemaQualifiedNameExpression
+                .>>. opt (attempt (pKeyword "FOR" >>. pSchemaQualifiedNameExpression))
+                |>> fun ((routineType, name), forType) -> mk false (Some routineType) name None forType
+
         choice
             [ attempt (
                   pKeyword "SPECIFIC" >>. pRoutineType .>>. pSchemaQualifiedNameExpression
                   |>> fun (routineType, name) -> mk true (Some routineType) name None None
               )
-              attempt (
-                  opt pRoutineType
-                  .>>. pSchemaQualifiedNameExpression
-                  .>>. opt (attempt pDataTypeList)
-                  .>>. opt (attempt (pKeyword "FOR" >>. pSchemaQualifiedNameExpression))
-                  |>> fun (((routineType, name), dataTypeList), forType) ->
-                      mk false routineType name dataTypeList forType
-              ) ]
+              pMemberName ]
+
+    let pSpecificRoutineDesignator = pSpecificRoutineDesignatorImpl true
+
+    // 10.6 <specific routine designator> transcribed literally: <routine type> is mandatory in
+    // both alternatives and <member name> carries no <data type list>. A 12.3 <object name>
+    // needs this shape, because its other alternatives (a kind keyword or a bare
+    // <table name>) would otherwise be shadowed by the bare-name form.
+    let pTypedSpecificRoutineDesignator = pSpecificRoutineDesignatorImpl false
 
     // 10.8 <constraint enforcement> ::= [ NOT ] ENFORCED   (true = ENFORCED, false = NOT ENFORCED)
     // Also used by 11.25 <alter table constraint definition>, and by the
@@ -138,23 +165,6 @@ module SchemaParser =
     // CREATE SCHEMA parser that consumes these elements) so no forward reference is needed.
     // 11.1 <schema definition> ::= CREATE SCHEMA <schema name clause> [ <schema character set or path> ] [ <schema element>... ]
     let pCreateSchemaStatement pSchemaElement =
-        // 5.4 <schema name> ::= [ <catalog name> <period> ] <unqualified schema name>
-        // At most TWO parts — narrower than <schema qualified name>, which admits an identifier
-        // after the schema as well. Checked after parsing because the AST node is shared.
-        let pSchemaNameExpression =
-            pSchemaQualifiedNameExpression
-            >>= fun name ->
-                let parts =
-                    match name.Kind with
-                    | Identifier _ -> 1
-                    | ColumnReference ps -> List.length ps
-                    | _ -> 1
-
-                if parts > 2 then
-                    fail "<schema name> allows at most two parts (5.4)"
-                else
-                    preturn name
-
         let pNameClause =
             choice
                 [ attempt (
@@ -175,7 +185,7 @@ module SchemaParser =
                 pKeyword "DEFAULT"
                 >>. pKeyword "CHARACTER"
                 >>. pKeyword "SET"
-                >>. pSchemaQualifiedNameExpression
+                >>. pCharacterSetNameExpression
 
             // 10.3 <path specification> ::= PATH <path-resolved user-defined type name> [ { <comma> ... }... ]
             let pPath =
@@ -225,7 +235,7 @@ module SchemaParser =
 
         pKeyword "DROP"
         >>. choice
-                [ attempt (pKeyword "SCHEMA" >>. pSchemaQualifiedNameExpression .>>. pDropBehavior)
+                [ attempt (pKeyword "SCHEMA" >>. pSchemaNameExpression .>>. pDropBehavior)
                   |>> DropSchema
                   attempt (pKeyword "TABLE" >>. pSchemaQualifiedNameExpression .>>. pDropBehavior)
                   |>> DropTable
@@ -233,7 +243,7 @@ module SchemaParser =
                   |>> DropView
                   attempt (pKeyword "DOMAIN" >>. pSchemaQualifiedNameExpression .>>. pDropBehavior)
                   |>> DropDomain
-                  attempt (pKeyword "CHARACTER" >>. pKeyword "SET" >>. pSchemaQualifiedNameExpression)
+                  attempt (pKeyword "CHARACTER" >>. pKeyword "SET" >>. pCharacterSetNameExpression)
                   |>> DropCharacterSet
                   attempt (pKeyword "COLLATION" >>. pSchemaQualifiedNameExpression .>>. pDropBehavior)
                   |>> DropCollation
@@ -338,8 +348,11 @@ module SchemaParser =
         .>>. opt (attempt (token (pstring ",") >>. pKeyword "PERIOD" >>. pIdentifierExpression))
         |>> fun (columns, period) -> (columns: Expression list), (period: Expression option)
 
+    // 5.4 <table name> is a <local or schema qualified name>, whose <local or schema qualifier>
+    // is a <schema name> — so the catalog part makes three parts legal here, the same as in
+    // every other <table name> slot.
     let private pReferencedTableAndColumns =
-        pLocalOrSchemaQualifiedNameExpression
+        pSchemaQualifiedNameExpression
         .>>. opt (between (token (pstring "(")) (token (pstring ")")) pReferencedColumnListAndPeriod)
 
     // 11.8 <references specification> ::=
@@ -363,7 +376,9 @@ module SchemaParser =
     //     | <references specification> | <check constraint definition>
     // (the <default clause> is NOT a column constraint — see pDefaultClause below)
     let private pColumnConstraintDefinition =
-        let pName = opt (pKeyword "CONSTRAINT" >>. pIdentifierExpression)
+        // 10.8 <constraint name definition> ::= CONSTRAINT <constraint name>, and
+        // <constraint name> ::= <schema qualified name> (5.4) — up to three parts.
+        let pName = opt (pKeyword "CONSTRAINT" >>. pSchemaQualifiedNameExpression)
 
         let pKind =
             choice
@@ -593,7 +608,9 @@ module SchemaParser =
                   OnDelete = onDel }
                 : ForeignKeyConstraint
 
-        let pName = opt (pKeyword "CONSTRAINT" >>. pIdentifierExpression)
+        // 10.8 <constraint name definition> ::= CONSTRAINT <constraint name>, and
+        // <constraint name> ::= <schema qualified name> (5.4) — up to three parts.
+        let pName = opt (pKeyword "CONSTRAINT" >>. pSchemaQualifiedNameExpression)
 
         // 11.7 <without overlap specification> ::= <application time period name> WITHOUT OVERLAPS
         let pWithoutOverlapSpecification =
@@ -717,10 +734,13 @@ module SchemaParser =
                   attempt (pLikeClause |>> Choice4Of4) ]
 
         // 11.3 <as subquery clause> ::= [ ( <column name list> ) ] AS <table subquery> <with or without data>
+        // 11.3 <table subquery> ::= <subquery> ::= ( <query expression> ) — the parentheses
+        //     are part of the production, so `AS SELECT ...` without them is not SQL-2016.
         // 11.3 <with or without data> ::= WITH NO DATA | WITH DATA
         // The <with or without data> clause is mandatory (true = WITH DATA) — see docs/trade-off.md.
         let pAsSubqueryClause =
-            pKeyword "AS" >>. QueryParser.pQueryExpression
+            pKeyword "AS"
+            >>. between (token (pstring "(")) (token (pstring ")")) QueryParser.pQueryExpression
             .>>. (pKeyword "WITH" >>. opt (pKeyword "NO") .>> pKeyword "DATA" |>> Option.isNone)
 
         // 11.3 <table scope> ::= GLOBAL TEMPORARY | LOCAL TEMPORARY
@@ -943,8 +963,9 @@ module SchemaParser =
                   )
                   // 11.26 <drop table constraint definition>
                   //     ::= DROP CONSTRAINT <constraint name> <drop behavior>
+                  // (<constraint name> is a <schema qualified name>, 5.4.)
                   attempt (
-                      pKeyword "DROP" >>. pKeyword "CONSTRAINT" >>. pIdentifierExpression
+                      pKeyword "DROP" >>. pKeyword "CONSTRAINT" >>. pSchemaQualifiedNameExpression
                       .>>. pDropBehavior
                       |>> AlterTableAction.DropConstraint
                   )
@@ -970,8 +991,9 @@ module SchemaParser =
                   )
                   // 11.25 <alter table constraint definition>
                   //     ::= ALTER CONSTRAINT <constraint name> <constraint enforcement>
+                  // (<constraint name> is a <schema qualified name>, 5.4.)
                   attempt (
-                      pKeyword "ALTER" >>. pKeyword "CONSTRAINT" >>. pIdentifierExpression
+                      pKeyword "ALTER" >>. pKeyword "CONSTRAINT" >>. pSchemaQualifiedNameExpression
                       .>>. pConstraintEnforcement
                       |>> AlterTableAction.AlterConstraint
                   )
@@ -1111,17 +1133,18 @@ module SchemaParser =
         |>> fun (name, action) -> AlterDomain(name, action)
 
     // 11.41 <character set definition> ::= CREATE CHARACTER SET <character set name> [ AS GET <character set name> ] [ <collate clause> ]
+    // Both name slots are <character set name> (at most two parts, 5.4).
     let pCharacterSetDefinition =
         pKeyword "CREATE"
         >>. pKeyword "CHARACTER"
         >>. pKeyword "SET"
-        >>. pSchemaQualifiedNameExpression
+        >>. pCharacterSetNameExpression
         .>>. opt (pKeyword "AS")
-        .>>. (pKeyword "GET" >>. pSchemaQualifiedNameExpression)
+        .>>. (pKeyword "GET" >>. pCharacterSetNameExpression)
         .>>. opt (pKeyword "COLLATE" >>. pSchemaQualifiedNameExpression)
         |>> fun (((name, _), source), collate) -> CreateCharacterSet(name, source, collate)
 
-    // 11.43 <collation definition> ::= CREATE COLLATION <collation name> FOR <character set name> FROM <collation name> [ <pad characteristic> ]
+    // 11.43 <collation definition> ::= CREATE COLLATION <collation name> FOR <character set specification> FROM <collation name> [ <pad characteristic> ]
     let pCollationDefinition =
         // 11.43 <pad characteristic> ::= NO PAD | PAD SPACE
         let pPadCharacteristic =
@@ -1129,7 +1152,7 @@ module SchemaParser =
             <|> (pKeyword "PAD" >>. pKeyword "SPACE" >>% false)
 
         pKeyword "CREATE" >>. pKeyword "COLLATION" >>. pSchemaQualifiedNameExpression
-        .>>. (pKeyword "FOR" >>. pSchemaQualifiedNameExpression)
+        .>>. (pKeyword "FOR" >>. pCharacterSetNameExpression)
         .>>. (pKeyword "FROM" >>. pSchemaQualifiedNameExpression)
         .>>. opt pPadCharacteristic
         |>> fun (((name, cs), existing), pad) -> CreateCollation(name, cs, existing, pad)

@@ -212,6 +212,12 @@ parser until it is assigned. Reference the forwarding *parser* instead.
   the 6.10 null-treatment and from-first/last modifiers are implemented and preserved
   on `WindowFunction`; the figures above are not yet an alternative-level conformance
   matrix.
+- 5.4 name productions have three different arities, so the shared
+  `pSchemaQualifiedNameExpression` (three parts) is *not* the default name parser.
+  `ExpressionParser.fs` exposes `pIdentifierNameExpression` (one part),
+  `pSchemaNameExpression` / `pCharacterSetNameExpression` (two) and
+  `pLocalQualifiedNameExpression` (two, `MODULE` only) for the narrower slots; see
+  [trade-off.md](trade-off.md) and [gotchas.md](gotchas.md).
 
 ## 10. Supported SQL features
 

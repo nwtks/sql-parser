@@ -67,15 +67,45 @@ module ExpressionParser =
             | parts -> ColumnReference parts
         |> withExprPosition
 
-    // 5.4 <local or schema qualified name> ::= [ <local or schema qualifier> <period> ] <qualified identifier>
-    // At most TWO parts — this is the <table name> / <domain name-adjacent> shape, which is
-    // narrower than <schema qualified name> (that one admits a catalog part).
-    let pLocalOrSchemaQualifiedNameExpression =
-        pIdentifier .>>. opt (token (pstring ".") >>. pIdentifier)
-        |>> function
-            | s, None -> Identifier s
-            | s, Some n -> ColumnReference [ s; n ]
-        |> withExprPosition
+    // 5.4 name arity check — shared by the name productions that are narrower than
+    // <schema qualified name> (three parts). The AST node is shared with the three-part
+    // form, so the arity is validated after parsing rather than by a narrower parser.
+    let private pNameOfArity maxParts (ruleName: string) =
+        pSchemaQualifiedNameExpression
+        >>= fun name ->
+            let parts =
+                match name.Kind with
+                | Identifier _ -> 1
+                | ColumnReference ps -> List.length ps
+                | _ -> 1
+
+            if parts > maxParts then
+                fail (sprintf "%s allows at most %d part(s) (5.4)." ruleName maxParts)
+            else
+                preturn name
+
+    // 5.4 <schema name> ::= [ <catalog name> <period> ] <unqualified schema name>
+    // At most TWO parts — narrower than <schema qualified name>, which admits a third.
+    let pSchemaNameExpression = pNameOfArity 2 "<schema name>"
+
+    // 5.4 <character set name> ::= [ <schema name> <period> ] <SQL language identifier>
+    // The same two-part shape: <character set specification> is always this production,
+    // so 11.1 / 11.41 / 11.42 / 11.43 and the 6.1 type-level clause share the check.
+    let pCharacterSetNameExpression = pNameOfArity 2 "<character set name>"
+
+    // 5.4 <local qualified name> ::= [ <local qualifier> <period> ] <qualified identifier>
+    // 5.4 <cursor name> ::= <local qualified name>; MODULE is the only <local qualifier>,
+    // so `a.b.c` is not a cursor name and `MODULE.c` is.
+    let pLocalQualifiedNameExpression =
+        getPosition
+        .>>. opt (attempt (pKeyword "MODULE" >>. token (pstring ".")))
+        .>>. pIdentifier
+        |>> fun ((pos, qualifier), name) ->
+            { Expression.Kind =
+                (match qualifier with
+                 | Some _ -> ColumnReference [ "MODULE"; name ]
+                 | None -> Identifier name)
+              Pos = { Line = pos.Line; Column = pos.Column } }
 
     // 6.1 <char length units> ::= CHARACTERS | OCTETS
     // A closed set, so `USING <identifier>` is rejected instead of silently accepted.
@@ -145,8 +175,10 @@ module ExpressionParser =
             opt (attempt (between (token (pstring "(")) (token (pstring ")")) pCharacterLargeObjectLength))
 
         // 6.1 <predefined type> — the type-level modifiers of a character string type.
+        // <character set specification> is always a <character set name> (at most two
+        // parts), so `CHARACTER SET s.c.s` is rejected.
         let pModifiers =
-            opt (attempt (pKeyword "CHARACTER" >>. pKeyword "SET" >>. pSchemaQualifiedNameExpression))
+            opt (attempt (pKeyword "CHARACTER" >>. pKeyword "SET" >>. pCharacterSetNameExpression))
             .>>. opt (attempt (pKeyword "COLLATE" >>. pSchemaQualifiedNameExpression))
             |>> fun (charSet, collation) ->
                 match charSet, collation with
@@ -341,6 +373,12 @@ module ExpressionParser =
 
     // 6.7 <column reference> / 5.4 <identifier> — <identifier> | <column reference>
     let pIdentifierExpression = pIdentifier |>> Identifier |> withExprPosition
+
+    // 5.4 <identifier> — a single part, with no qualifier at all. <statement name> and
+    // <non-extended descriptor name> (hence <conventional descriptor name>) are this
+    // production, so a qualified name in those slots is not SQL-2016. Defined here rather
+    // than beside the other 5.4 name parsers because it reuses pIdentifierExpression.
+    let pIdentifierNameExpression = pIdentifierExpression
 
     // 6.1 <row type> ::= ROW <row type body> — <row type body> ::= ( <field definition> [ { , <field definition> }... ] )
     let private pRowType =

@@ -274,6 +274,13 @@ let ``DELETE positioned (WHERE CURRENT OF) verification`` () =
                Where = None } -> ()
     | res -> Assert.Fail(sprintf "Expected positioned Delete, got %A" res)
 
+    // 5.4 <cursor name> ::= <local qualified name> — MODULE is the only <local qualifier>.
+    match parseStatement "DELETE FROM users WHERE CURRENT OF MODULE.cur" with
+    | Delete { Cursor = Some { Kind = ColumnReference [ "MODULE"; "CUR" ] } } -> ()
+    | res -> Assert.Fail(sprintf "Expected a MODULE-qualified cursor name, got %A" res)
+
+    parseStatementFails "DELETE FROM users WHERE CURRENT OF a.b.c"
+
 [<Fact>]
 let ``DELETE without target table is preparable only (20.25)`` () =
     // 20.25 <preparable dynamic delete statement: positioned> — the omitted <target table> is
@@ -510,6 +517,13 @@ let ``UPDATE positioned (WHERE CURRENT OF) verification`` () =
                Cursor = Some { Kind = Identifier "CUR" }
                Where = None } -> ()
     | res -> Assert.Fail(sprintf "Expected positioned Update, got %A" res)
+
+    // 5.4 <cursor name> — at most two parts, MODULE being the only <local qualifier>.
+    match parseStatement "UPDATE users SET name = 'x' WHERE CURRENT OF MODULE.cur" with
+    | Update { Cursor = Some { Kind = ColumnReference [ "MODULE"; "CUR" ] } } -> ()
+    | res -> Assert.Fail(sprintf "Expected a MODULE-qualified cursor name, got %A" res)
+
+    parseStatementFails "UPDATE users SET name = 'x' WHERE CURRENT OF a.b.c"
 
 [<Fact>]
 let ``UPDATE without target table is preparable only (20.27)`` () =

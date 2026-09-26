@@ -237,3 +237,20 @@ parsers, AST patterns, or tests — every entry is a real failure mode from this
 - **Reordering source definitions means reordering their tests** (AGENTS.md: compile
   order, then definition order; review-only, so drift is silent). Order each test block
   by the rule it names, not the umbrella parser it calls.
+- **A name slot is only as strict as the parser it names.** `pSchemaQualifiedNameExpression`
+  accepts up to three parts, and most 5.4 productions are narrower — `<identifier>`,
+  `<schema name>` and `<character set name>` (two), `<cursor name>` / `<local qualified
+  name>` (two, `MODULE` only). Reaching for the three-part parser "because it is the
+  name parser" silently admits `EXECUTE a.b` and `DROP SCHEMA a.b.c`. Use
+  `pIdentifierNameExpression` / `pSchemaNameExpression` / `pCharacterSetNameExpression` /
+  `pLocalQualifiedNameExpression` from `ExpressionParser.fs`; when a new narrower
+  production is needed, add it through `pNameOfArity` so the AST node stays shared with
+  the three-part form and the error message can name the production.
+- **A permissive sub-parser inside a `choice` swallows its siblings.** 12.3
+  `<object name>` lists a `<specific routine designator>` alongside the kind keywords and
+  the bare `[ TABLE ] <table name>`; using the *permissive* designator parser (which
+  accepts a bare name) made every `GRANT SELECT ON t1` resolve to `GrantRoutine`. When a
+  shared production is more permissive than the slot needs, add a literal variant
+  (`pTypedSpecificRoutineDesignator`) instead of reordering the alternatives.
+- **An inline record inside a record literal does not parse** (FS0764/FS0001) — bind the
+  inner value first (`let x: T = { … }`) and then use it as the field value.

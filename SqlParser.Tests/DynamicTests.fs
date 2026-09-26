@@ -34,6 +34,16 @@ let ``DEALLOCATE DESCRIPTOR verification`` () =
     | res -> Assert.Fail(sprintf "Expected DeallocateDescriptor, got %A" res)
 
 [<Fact>]
+let ``descriptor statement names are single identifiers`` () =
+    // 20.2 / 20.3 <conventional descriptor name> ::= <non-extended descriptor name> | <extended
+    // descriptor name>, and <non-extended descriptor name> ::= <identifier> (5.4) — no qualifier.
+    parseStatementFails "ALLOCATE SQL DESCRIPTOR app.d1"
+    parseStatementFails "ALLOCATE SQL DESCRIPTOR cat.app.d1"
+    parseStatementFails "DEALLOCATE SQL DESCRIPTOR app.d1"
+    // The <descriptor name> of 20.4 / 20.5 / 20.6 also admits a <PTF descriptor name>.
+    parseStatementFails "DEALLOCATE SQL DESCRIPTOR PTF d1"
+
+[<Fact>]
 let ``GET DESCRIPTOR header verification`` () =
     match parseStatement "GET DESCRIPTOR d1 x = COUNT" with
     | GetDescriptor({ Kind = Identifier "D1" }, GetHeader [ ({ Kind = Identifier "X" }, "COUNT") ]) -> ()
@@ -137,6 +147,14 @@ let ``DESCRIBE OUTPUT CURSOR verification`` () =
                  Nesting = Some true } -> ()
     | res -> Assert.Fail(sprintf "Expected Describe OUTPUT CURSOR, got %A" res)
 
+    // 5.4 <cursor name> — at most two parts, MODULE being the only <local qualifier>.
+    match parseStatement "DESCRIBE CURSOR MODULE.cur STRUCTURE USING DESCRIPTOR d1" with
+    | Describe { IsCursor = true
+                 Name = { Kind = ColumnReference [ "MODULE"; "CUR" ] } } -> ()
+    | res -> Assert.Fail(sprintf "Expected a MODULE-qualified cursor name, got %A" res)
+
+    parseStatementFails "DESCRIBE CURSOR a.b.c STRUCTURE USING DESCRIPTOR d1"
+
 [<Fact>]
 let ``DESCRIBE statement name verification`` () =
     match parseStatement "DESCRIBE stmt USING DESCRIPTOR d1 WITHOUT NESTING" with
@@ -191,6 +209,16 @@ let ``EXECUTE without clauses verification`` () =
 let ``EXECUTE without statement name is rejected`` () = parseStatementFails "EXECUTE"
 
 [<Fact>]
+let ``SQL statement names are single identifiers`` () =
+    // <SQL statement name> ::= <statement name> | <extended statement name>, and
+    // <statement name> ::= <identifier> (5.4) — 20.9, 20.10 and 20.13.
+    parseStatementFails "DEALLOCATE PREPARE app.stmt"
+    parseStatementFails "DEALLOCATE PREPARE cat.app.stmt"
+    parseStatementFails "DESCRIBE INPUT app.stmt USING DESCRIPTOR d1"
+    parseStatementFails "DESCRIBE app.stmt USING DESCRIPTOR d1"
+    parseStatementFails "EXECUTE app.stmt"
+
+[<Fact>]
 let ``EXECUTE IMMEDIATE verification`` () =
     match parseStatement "EXECUTE IMMEDIATE 'SELECT 1'" with
     | ExecuteImmediate { Kind = Literal(String "SELECT 1") } -> ()
@@ -206,10 +234,13 @@ let ``Dynamic SQL slots take only a simple value specification`` () =
 
 [<Fact>]
 let ``DYNAMIC DECLARE CURSOR verification`` () =
-    match parseStatement "DECLARE c CURSOR FOR :s1" with
+    // 20.15 <dynamic declare cursor> ::= DECLARE <cursor name> <cursor properties> FOR <statement name>
+    // and <statement name> ::= <identifier> — the plain 5.4 identifier, not the 20.17
+    // <extended statement name>.
+    match parseStatement "DECLARE c CURSOR FOR s1" with
     | DynamicDeclareCursor dc ->
         match dc.Name.Kind, dc.Statement.Scope, dc.Statement.SimpleValue.Kind with
-        | Identifier "C", None, Parameter ":S1" -> ()
+        | Identifier "C", None, Identifier "S1" -> ()
         | _ -> Assert.Fail(sprintf "Unexpected DynamicDeclareCursor %A" dc)
 
         Assert.Equal(None, dc.Properties.Sensitivity)
@@ -218,27 +249,39 @@ let ``DYNAMIC DECLARE CURSOR verification`` () =
         Assert.Equal(None, dc.Properties.Returnability)
     | res -> Assert.Fail(sprintf "Expected DynamicDeclareCursor, got %A" res)
 
+    // 5.4 <cursor name> ::= <local qualified name> — at most two parts, MODULE being the
+    // only <local qualifier> (MODULE is reserved, so the qualified form is the only one).
+    match parseStatement "DECLARE MODULE.c CURSOR FOR s1" with
+    | DynamicDeclareCursor dc ->
+        match dc.Name.Kind with
+        | ColumnReference [ "MODULE"; "C" ] -> ()
+        | _ -> Assert.Fail(sprintf "Unexpected cursor name %A" dc.Name)
+    | res -> Assert.Fail(sprintf "Expected DynamicDeclareCursor, got %A" res)
+
 [<Fact>]
-let ``DYNAMIC DECLARE CURSOR with properties and scope verification`` () =
-    match parseStatement "DECLARE c INSENSITIVE CURSOR WITH HOLD FOR GLOBAL :s1" with
+let ``DYNAMIC DECLARE CURSOR with properties verification`` () =
+    match parseStatement "DECLARE c INSENSITIVE CURSOR WITH HOLD FOR s1" with
     | DynamicDeclareCursor dc ->
         Assert.Equal(Some Insensitive, dc.Properties.Sensitivity)
         Assert.Equal(Some WithHold, dc.Properties.Holdability)
-        Assert.Equal(Some ScopeGlobal, dc.Statement.Scope)
+        Assert.Equal(None, dc.Statement.Scope)
 
         match dc.Statement.SimpleValue.Kind with
-        | Parameter ":S1" -> ()
+        | Identifier "S1" -> ()
         | _ -> Assert.Fail(sprintf "Unexpected statement name %A" dc.Statement)
     | res -> Assert.Fail(sprintf "Expected DynamicDeclareCursor, got %A" res)
 
 [<Fact>]
-let ``DYNAMIC DECLARE CURSOR with literal statement name verification`` () =
-    match parseStatement "DECLARE c CURSOR FOR 's1'" with
-    | DynamicDeclareCursor dc ->
-        match dc.Statement.SimpleValue.Kind with
-        | Literal(String "s1") -> ()
-        | _ -> Assert.Fail(sprintf "Unexpected statement name %A" dc.Statement)
-    | res -> Assert.Fail(sprintf "Expected DynamicDeclareCursor, got %A" res)
+let ``DYNAMIC DECLARE CURSOR name arity is checked`` () =
+    // <cursor name> admits at most two parts …
+    parseStatementFails "DECLARE a.b.c CURSOR FOR s1"
+    // … and a <statement name> is a bare <identifier>, so the 20.17 extended form,
+    // a host parameter and a string literal are all rejected here.
+    parseStatementFails "DECLARE c CURSOR FOR GLOBAL :s1"
+    parseStatementFails "DECLARE c CURSOR FOR LOCAL :s1"
+    parseStatementFails "DECLARE c CURSOR FOR :s1"
+    parseStatementFails "DECLARE c CURSOR FOR 's1'"
+    parseStatementFails "DECLARE c CURSOR FOR a.b"
 
 [<Fact>]
 let ``DYNAMIC DECLARE CURSOR without CURSOR keyword is rejected`` () = parseStatementFails "DECLARE c FOR s1"
@@ -281,6 +324,13 @@ let ``ALLOCATE RECEIVED CURSOR without CURSOR keyword verification`` () =
         | Identifier "C" -> ()
         | _ -> Assert.Fail(sprintf "Unexpected AllocateReceivedCursor %A" ar)
     | res -> Assert.Fail(sprintf "Expected AllocateReceivedCursor, got %A" res)
+
+    // 20.18 <allocate received cursor statement> takes a <cursor name> (5.4) — at most two parts.
+    match parseStatement "ALLOCATE MODULE.c FOR PROCEDURE p" with
+    | AllocateReceivedCursor ar -> Assert.Equal<ExpressionKind>(ColumnReference [ "MODULE"; "C" ], ar.Name.Kind)
+    | res -> Assert.Fail(sprintf "Expected AllocateReceivedCursor, got %A" res)
+
+    parseStatementFails "ALLOCATE a.b.c FOR PROCEDURE p"
 
 [<Fact>]
 let ``ALLOCATE RECEIVED CURSOR with specific routine designator verification`` () =

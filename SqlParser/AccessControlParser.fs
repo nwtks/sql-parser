@@ -74,10 +74,10 @@ module AccessControlParser =
     //     | CHARACTER SET <character set name> | TRANSLATION <transliteration name>
     //     | TYPE <schema-resolved user-defined type name> | SEQUENCE <sequence generator name>
     //     | <specific routine designator>
-    // Returns the kind keyword (None = the optional [ TABLE ] is absent), the 10.6 <routine type>
-    // of the routine-designator alternative (None = absent) and the qualified name. The two
-    // options are mutually exclusive; pGrantStatement / pRevokeStatement turn them into the
-    // flat StatementKind cases.
+    // Returns the kind keyword (None = the optional [ TABLE ] is absent), the 10.6
+    // <specific routine designator> (None = absent) and the qualified name. The two
+    // options are mutually exclusive; pGrantStatement / pRevokeStatement turn them into
+    // the flat StatementKind cases.
     let private pObjectName =
         let pKind =
             choice
@@ -94,11 +94,12 @@ module AccessControlParser =
         // plain <qualified name>. The kind branch is separate from the bare <qualified
         // name> branch so a non-reserved kind word used as a schema name
         // (`domain.users`) does not commit to kind + name and then fail on `.users`.
+        // 10.6 <specific routine designator> ::= SPECIFIC <routine type> <specific name>
+        //     | <routine type> <member name> [ FOR <schema-resolved user-defined type name> ]
+        // — both alternatives are legal in a 12.3 <object name>, and the literal (typed) form
+        // is required: the permissive one would swallow the bare-`<table name>` alternatives.
         choice
-            [ attempt (
-                  SchemaParser.pRoutineType .>>. pSchemaQualifiedNameExpression
-                  |>> fun (rt, name) -> None, Some rt, name
-              )
+            [ attempt (SchemaParser.pTypedSpecificRoutineDesignator |>> fun d -> None, Some d, d.Name)
               attempt (
                   pKind .>>. pSchemaQualifiedNameExpression
                   |>> fun (kind, name) -> Some kind, None, name

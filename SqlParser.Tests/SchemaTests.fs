@@ -196,6 +196,16 @@ let ``DROP SCHEMA verification`` () =
     | res -> Assert.Fail(sprintf "Expected DropSchema RESTRICT, got %A" res)
 
 [<Fact>]
+let ``DROP SCHEMA name arity is checked`` () =
+    // 11.2 <drop schema statement> takes a <schema name>, i.e. at most a catalog and a schema.
+    match parse "DROP SCHEMA cat.sales CASCADE" with
+    | DropSchema({ Kind = ColumnReference [ "CAT"; "SALES" ] }, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected a catalog-qualified schema name, got %A" res)
+
+    parseFails "DROP SCHEMA cat.sch.sales CASCADE"
+    parseFails "DROP SCHEMA sales"
+
+[<Fact>]
 let ``DROP DOMAIN verification`` () =
     match parse "DROP DOMAIN d CASCADE" with
     | DropDomain({ Kind = Identifier "D" }, true) -> ()
@@ -212,6 +222,13 @@ let ``DROP CHARACTER SET verification`` () =
     match parse "DROP CHARACTER SET utf8" with
     | DropCharacterSet { Kind = Identifier "UTF8" } -> ()
     | res -> Assert.Fail(sprintf "Expected DropCharacterSet, got %A" res)
+
+    // 11.42 <character set name> ::= [ <schema name> <period> ] <SQL language identifier> (5.4)
+    match parse "DROP CHARACTER SET info.utf8" with
+    | DropCharacterSet({ Kind = ColumnReference [ "INFO"; "UTF8" ] }) -> ()
+    | res -> Assert.Fail(sprintf "Expected a schema-qualified character set, got %A" res)
+
+    parseFails "DROP CHARACTER SET cat.info.utf8"
 
 [<Fact>]
 let ``DROP COLLATION verification`` () =
@@ -373,13 +390,21 @@ let ``REFERENCES column list is optional (11.8)`` () =
 
 [<Fact>]
 let ``referenced table is a table name (5.4)`` () =
-    // 11.8 <referenced table and columns> takes a <table name>, i.e. at most schema.table.
+    // 11.8 <referenced table and columns> takes a <table name>, i.e. a <local or schema
+    // qualified name> whose qualifier may itself be a <schema name> — so three parts.
     match parse "CREATE TABLE t (a INT REFERENCES app.parent (x))" with
     | CreateTable { Columns = [ col ] } ->
         match col.References with
         | Some r -> Assert.Equal(ColumnReference [ "APP"; "PARENT" ], r.Table.Kind)
         | None -> Assert.Fail "Expected a column-level REFERENCES"
     | res -> Assert.Fail(sprintf "Expected a qualified referenced table, got %A" res)
+
+    match parse "CREATE TABLE t (a INT REFERENCES cat.app.parent (x))" with
+    | CreateTable { Columns = [ col ] } ->
+        match col.References with
+        | Some r -> Assert.Equal(ColumnReference [ "CAT"; "APP"; "PARENT" ], r.Table.Kind)
+        | None -> Assert.Fail "Expected a column-level REFERENCES"
+    | res -> Assert.Fail(sprintf "Expected a catalog-qualified referenced table, got %A" res)
 
     match parse "CREATE TABLE t (a INT, CONSTRAINT fk FOREIGN KEY (a) REFERENCES app.parent (x) ON DELETE CASCADE)" with
     | CreateTable { Constraints = [ { Constraint = TableConstraint.ForeignKey fk } ] } ->
@@ -440,6 +465,23 @@ let ``named column constraint with characteristics verification`` () =
         Assert.Equal(ColumnConstraintKind.NotNull, columnConstraint.Kind)
         Assert.Equal(Some false, columnConstraint.Characteristics.Deferrable)
     | res -> Assert.Fail(sprintf "Expected a named column constraint, got %A" res)
+
+[<Fact>]
+let ``qualified constraint name verification`` () =
+    // 10.8 <constraint name definition> ::= CONSTRAINT <constraint name> and
+    // <constraint name> ::= <schema qualified name> (5.4) — up to three parts, in 11.4 and 11.6.
+    match parse "CREATE TABLE t (c INT CONSTRAINT app.nn NOT NULL)" with
+    | CreateTable { Columns = [ { Constraints = [ columnConstraint ] } ] } ->
+        Assert.Equal(ColumnReference [ "APP"; "NN" ], columnConstraint.Name.Value.Kind)
+    | res -> Assert.Fail(sprintf "Expected a qualified column constraint name, got %A" res)
+
+    match parse "CREATE TABLE t (a INT, CONSTRAINT cat.app.uq UNIQUE (a))" with
+    | CreateTable { Constraints = [ constraintDef ] } ->
+        match constraintDef.Constraint with
+        | TableConstraint.Unique(Some name, [ _ ], None) ->
+            Assert.Equal(ColumnReference [ "CAT"; "APP"; "UQ" ], name.Kind)
+        | c -> Assert.Fail(sprintf "Expected Unique, got %A" c)
+    | res -> Assert.Fail(sprintf "Expected a qualified table constraint name, got %A" res)
 
 [<Fact>]
 let ``DEFAULT CURRENT_TIMESTAMP verification`` () =
@@ -728,14 +770,17 @@ let ``CREATE TEMPORARY TABLE verification`` () =
 
 [<Fact>]
 let ``CREATE TABLE AS SELECT verification`` () =
-    match parse "CREATE TABLE backup AS SELECT * FROM users WITH DATA" with
+    // 11.3 <as subquery clause> ::= [ ( <column name list> ) ] AS <table subquery> <with or without data>
+    // and <table subquery> ::= <subquery> ::= ( <query expression> ) — the parentheses are part
+    // of the production, so the query must be parenthesised.
+    match parse "CREATE TABLE backup AS (SELECT * FROM users) WITH DATA" with
     | CreateTable { Table = { Kind = Identifier "BACKUP" }
                     Columns = []
                     AsQuery = Some(SelectQuery _)
                     WithData = Some true } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateTable AS SELECT, got %A" res)
 
-    match parse "CREATE TABLE backup (id, name) AS SELECT id, name FROM users WITH NO DATA" with
+    match parse "CREATE TABLE backup (id, name) AS (SELECT id, name FROM users) WITH NO DATA" with
     | CreateTable { Table = { Kind = Identifier "BACKUP" }
                     AsColumns = Some [ { Kind = Identifier "ID" }; { Kind = Identifier "NAME" } ]
                     AsQuery = Some(SelectQuery _)
@@ -743,7 +788,10 @@ let ``CREATE TABLE AS SELECT verification`` () =
     | res -> Assert.Fail(sprintf "Expected CreateTable AS SELECT WITH NO DATA, got %A" res)
 
     // <with or without data> is mandatory in SQL-2016
-    parseFails "CREATE TABLE backup AS SELECT * FROM users"
+    parseFails "CREATE TABLE backup AS (SELECT * FROM users)"
+
+    // … and so are the <subquery> parentheses
+    parseFails "CREATE TABLE backup AS SELECT * FROM users WITH DATA"
 
 [<Fact>]
 let ``CREATE TABLE with like clause verification`` () =
@@ -997,6 +1045,24 @@ let ``ALTER TABLE DROP CONSTRAINT verification`` () =
     | res -> Assert.Fail(sprintf "Expected DropConstraint RESTRICT, got %A" res)
 
 [<Fact>]
+let ``ALTER TABLE constraint name arity`` () =
+    // 11.24 / 11.25 / 11.26 take a <constraint name>, i.e. a <schema qualified name> (5.4).
+    match parse "ALTER TABLE users ADD CONSTRAINT app.fk_dept FOREIGN KEY (dept_id) REFERENCES departments (id)" with
+    | AlterTable { Action = AlterTableAction.AddConstraint { Constraint = TableConstraint.ForeignKey fk } } ->
+        Assert.Equal(ColumnReference [ "APP"; "FK_DEPT" ], fk.Name.Value.Kind)
+    | res -> Assert.Fail(sprintf "Expected a qualified AddConstraint name, got %A" res)
+
+    match parse "ALTER TABLE users ALTER CONSTRAINT app.fk_dept ENFORCED" with
+    | AlterTable { Action = AlterTableAction.AlterConstraint({ Kind = ColumnReference [ "APP"; "FK_DEPT" ] }, true) } ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected a qualified AlterConstraint name, got %A" res)
+
+    match parse "ALTER TABLE users DROP CONSTRAINT app.fk_dept CASCADE" with
+    | AlterTable { Action = AlterTableAction.DropConstraint({ Kind = ColumnReference [ "APP"; "FK_DEPT" ] }, true) } ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected a qualified DropConstraint name, got %A" res)
+
+[<Fact>]
 let ``ALTER TABLE ADD PERIOD verification`` () =
     match parse "ALTER TABLE orders ADD PERIOD FOR SYSTEM_TIME (valid_from, valid_to)" with
     | AlterTable { Table = { Kind = Identifier "ORDERS" }
@@ -1220,6 +1286,16 @@ let ``CREATE CHARACTER SET verification`` () =
         ()
     | res -> Assert.Fail(sprintf "Expected CreateCharacterSet with collation, got %A" res)
 
+    // 11.41 — both name slots are <character set name> (5.4): at most a schema and a name.
+    match parse "CREATE CHARACTER SET info.utf8 AS GET info.utf8" with
+    | CreateCharacterSet({ Kind = ColumnReference [ "INFO"; "UTF8" ] },
+                         { Kind = ColumnReference [ "INFO"; "UTF8" ] },
+                         None) -> ()
+    | res -> Assert.Fail(sprintf "Expected qualified CreateCharacterSet names, got %A" res)
+
+    parseFails "CREATE CHARACTER SET cat.info.utf8 AS GET cat.info.utf8"
+    parseFails "CREATE CHARACTER SET cat.info.utf8 AS GET utf8"
+
 [<Fact>]
 let ``CREATE COLLATION verification`` () =
     match parse "CREATE COLLATION my_coll FOR utf8 FROM existing_coll NO PAD" with
@@ -1236,6 +1312,14 @@ let ``CREATE COLLATION verification`` () =
     match parse "CREATE COLLATION c3 FOR utf8 FROM ec" with
     | CreateCollation({ Kind = Identifier "C3" }, _, _, None) -> ()
     | res -> Assert.Fail(sprintf "Expected CreateCollation without pad, got %A" res)
+
+    // 11.43 — the `FOR` slot is a <character set specification>, always a
+    // <character set name> (5.4): at most a schema and a name.
+    match parse "CREATE COLLATION c4 FOR info.utf8 FROM ec" with
+    | CreateCollation({ Kind = Identifier "C4" }, { Kind = ColumnReference [ "INFO"; "UTF8" ] }, _, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected a schema-qualified character set, got %A" res)
+
+    parseFails "CREATE COLLATION c5 FOR cat.info.utf8 FROM ec"
 
 [<Fact>]
 let ``CREATE TRANSLATION verification`` () =

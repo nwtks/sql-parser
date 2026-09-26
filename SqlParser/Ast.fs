@@ -1910,7 +1910,8 @@ and Grantee =
 // 12.3 <object name> — the kind keyword of each qualified-name alternative. TABLE is
 // optional in the grammar ([ TABLE ] <table name>); the other six are mandatory. The
 // <specific routine designator> alternative is not a kind keyword — it is modelled by
-// StatementKind.GrantRoutine / RevokeRoutine (carrying the 10.6 <routine type>).
+// StatementKind.GrantRoutine / RevokeRoutine (carrying the whole 10.6
+// <specific routine designator>).
 and ObjectKind =
     | Table
     | Domain
@@ -2323,7 +2324,10 @@ and StatementKind =
     | GrantTranslation of GrantPrivilegeStatement
     | GrantType of GrantPrivilegeStatement
     | GrantSequence of GrantPrivilegeStatement
-    | GrantRoutine of RoutineType * GrantPrivilegeStatement
+    // 10.6 <specific routine designator> — the whole designator is kept, so the
+    // SPECIFIC keyword and the `FOR <schema-resolved user-defined type name>` tail
+    // (both legal in a 12.3 <object name>) survive in the AST.
+    | GrantRoutine of SpecificRoutineDesignator * GrantPrivilegeStatement
     // 12.4 <role definition> ::= CREATE ROLE <role name> [ WITH ADMIN <grantor> ]
     | CreateRole of Expression * Grantor option
     // 12.5 <grant role statement>
@@ -2340,7 +2344,7 @@ and StatementKind =
     | RevokeTranslation of RevokePrivilegeStatement
     | RevokeType of RevokePrivilegeStatement
     | RevokeSequence of RevokePrivilegeStatement
-    | RevokeRoutine of RoutineType * RevokePrivilegeStatement
+    | RevokeRoutine of SpecificRoutineDesignator * RevokePrivilegeStatement
     // 12.7 <revoke role statement>
     | RevokeRoles of Expression list * Grantee list * bool * Grantor option * bool
     // 14.1 <declare cursor>

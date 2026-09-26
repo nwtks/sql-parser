@@ -5,18 +5,22 @@ open SqlParser.Lexer
 open SqlParser.ExpressionParser
 
 module DynamicParser =
-    // 20.2 <allocate descriptor statement> ::= ALLOCATE [ SQL ] DESCRIPTOR <descriptor name> [ WITH MAX <occurrences> ]
+    // 20.2 <allocate descriptor statement> ::= ALLOCATE [ SQL ] DESCRIPTOR <conventional descriptor name> [ WITH MAX <occurrences> ]
+    // <conventional descriptor name> ::= <non-extended descriptor name> | <extended descriptor name>, and
+    // <non-extended descriptor name> ::= <identifier> — a single part, with no catalog or
+    // schema qualifier (the extended form, `[ <scope option> ] <simple value specification>`,
+    // is the separately documented open item).
     let pAllocateDescriptorStatement =
         pKeyword "ALLOCATE" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. pSchemaQualifiedNameExpression
+        >>. pIdentifierNameExpression
         // <occurrences> ::= <simple value specification> (strict)
         .>>. opt (attempt (pKeyword "WITH" >>. pKeyword "MAX" >>. pSimpleValueSpecification))
         |>> fun (name, max) -> AllocateDescriptor(name, max)
 
-    // 20.3 <deallocate descriptor statement> ::= DEALLOCATE [ SQL ] DESCRIPTOR <descriptor name>
+    // 20.3 <deallocate descriptor statement> ::= DEALLOCATE [ SQL ] DESCRIPTOR <conventional descriptor name>
     let pDeallocateDescriptorStatement =
         pKeyword "DEALLOCATE" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. pSchemaQualifiedNameExpression
+        >>. pIdentifierNameExpression
         |>> DeallocateDescriptor
 
     // 20.4 <header item name> — closed enumeration.
@@ -88,7 +92,7 @@ module DynamicParser =
             |>> fun (target, name) -> target, name
 
         pKeyword "GET" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. pSchemaQualifiedNameExpression
+        >>. pIdentifierNameExpression
         .>>. (attempt (
                   pKeyword "VALUE" >>. pSimpleValueSpecification
                   .>>. sepBy1 pGetItemInformation (token (pstring ","))
@@ -173,8 +177,9 @@ module DynamicParser =
         |>> fun ((name, attrs), stmt) -> Prepare(name, attrs, stmt)
 
     // 20.9 <deallocate prepared statement> ::= DEALLOCATE PREPARE <SQL statement name>
+    // <SQL statement name> ::= <statement name> | <extended statement name>; <statement name> ::= <identifier>.
     let pDeallocatePreparedStatement =
-        pKeyword "DEALLOCATE" >>. pKeyword "PREPARE" >>. pSchemaQualifiedNameExpression
+        pKeyword "DEALLOCATE" >>. pKeyword "PREPARE" >>. pIdentifierNameExpression
         |>> DeallocatePrepare
 
     // 20.10 <describe statement> ::= <describe input statement> | <describe output statement>
@@ -188,14 +193,14 @@ module DynamicParser =
             pKeyword "WITH" >>. pKeyword "NESTING" >>% true
             <|> (pKeyword "WITHOUT" >>. pKeyword "NESTING" >>% false)
 
-        // 20.10 <using descriptor> ::= USING [ SQL ] DESCRIPTOR <descriptor name> (DESCRIBE <using descriptor>)
+        // 20.10 <using descriptor> ::= USING [ SQL ] DESCRIPTOR <descriptor name>
         let pUsingDescriptor =
             pKeyword "USING" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-            >>. pSchemaQualifiedNameExpression
+            >>. pIdentifierNameExpression
 
         pKeyword "DESCRIBE"
         >>= fun _ ->
-            (pKeyword "INPUT" >>. pSchemaQualifiedNameExpression
+            (pKeyword "INPUT" >>. pIdentifierNameExpression
              >>= fun name ->
                  pUsingDescriptor
                  >>= fun desc ->
@@ -209,10 +214,10 @@ module DynamicParser =
             <|> (opt (pKeyword "OUTPUT" >>% ())
                  >>= fun _ ->
                      attempt (
-                         pKeyword "CURSOR" >>. pSchemaQualifiedNameExpression .>> pKeyword "STRUCTURE"
+                         pKeyword "CURSOR" >>. pLocalQualifiedNameExpression .>> pKeyword "STRUCTURE"
                          |>> fun c -> true, c
                      )
-                     <|> (pSchemaQualifiedNameExpression |>> fun n -> false, n)
+                     <|> (pIdentifierNameExpression |>> fun n -> false, n)
                      >>= fun (isCursor, name) ->
                          pUsingDescriptor
                          >>= fun desc ->
@@ -227,7 +232,7 @@ module DynamicParser =
 
     // 20.13 <execute statement> ::= EXECUTE <SQL statement name> [ <output using clause> ] [ <input using clause> ]
     let pExecuteStatement =
-        pKeyword "EXECUTE" >>. pSchemaQualifiedNameExpression
+        pKeyword "EXECUTE" >>. pIdentifierNameExpression
         .>>. opt (attempt DataManipulationParser.pOutputUsingClause)
         .>>. opt (attempt DataManipulationParser.pInputUsingClause)
         |>> fun ((name, result), param) -> Execute(name, result, param)
@@ -239,7 +244,6 @@ module DynamicParser =
         pKeyword "EXECUTE" >>. pKeyword "IMMEDIATE" >>. pSimpleValueSpecification
         |>> ExecuteImmediate
 
-    // 20.15 <statement name>
     // 20.17 <extended statement name>
     // 20.17 <extended cursor name>
     //     ::= [ <scope option> ] <simple value specification>
@@ -250,15 +254,24 @@ module DynamicParser =
               SimpleValue = simpleValue }
 
     // 20.15 <dynamic declare cursor> ::= DECLARE <cursor name> <cursor properties> FOR <statement name>
+    // <statement name> ::= <identifier> — the plain form, NOT the 20.17
+    // <extended statement name> (`[ <scope option> ] <simple value specification>`).
     let pDynamicDeclareCursorStatement =
-        pKeyword "DECLARE" >>. pSchemaQualifiedNameExpression
+        pKeyword "DECLARE" >>. pLocalQualifiedNameExpression
         .>>. DataManipulationParser.pCursorProperties
         .>> pKeyword "FOR"
-        .>>. pExtendedName
+        .>>. pIdentifierNameExpression
         |>> fun ((name, properties), statement) ->
+            // A 20.15 <statement name> has no <scope option>, so the <extended statement name>
+            // record is filled with the absent scope. The intermediate binding is required:
+            // an inline record inside a record literal does not parse here.
+            let statementName: ExtendedName =
+                { Scope = None
+                  SimpleValue = statement }
+
             { Name = name
               Properties = properties
-              Statement = statement }
+              Statement = statementName }
             |> DynamicDeclareCursor
 
     // 20.17 <allocate extended dynamic cursor statement> ::= ALLOCATE <extended cursor name>
@@ -277,7 +290,7 @@ module DynamicParser =
     // 20.18 <allocate received cursor statement> ::= ALLOCATE <cursor name> [ CURSOR ]
     //     FOR PROCEDURE <specific routine designator>
     let pAllocateReceivedCursorStatement =
-        pKeyword "ALLOCATE" >>. pSchemaQualifiedNameExpression
+        pKeyword "ALLOCATE" >>. pLocalQualifiedNameExpression
         .>>. opt (pKeyword "CURSOR" >>% ())
         .>> pKeyword "FOR"
         .>> pKeyword "PROCEDURE"
