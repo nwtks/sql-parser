@@ -98,12 +98,12 @@ let ``ANY and SOME stay usable as routine names`` () =
     // The 8.9 <quantified comparison predicate> term is tried before pRoutineInvocation, so a
     // non-query argument must fall through to the routine-call interpretation, not be rejected.
     match parse "SELECT ANY(x)" with
-    | FunctionCall({ Kind = Identifier "ANY" }, false, SqlValueArguments([ { Kind = Identifier "X" } ], None), _, _, _) ->
+    | FunctionCall({ Kind = Identifier "ANY" }, false, SqlValueArguments([ { Kind = Identifier "X" } ], None), _, _, _, _) ->
         ()
     | res -> Assert.Fail(sprintf "Expected ANY(x) routine call, got %A" res)
 
     match parse "SELECT SOME(x)" with
-    | FunctionCall({ Kind = Identifier "SOME" }, false, SqlValueArguments([ { Kind = Identifier "X" } ], None), _, _, _) ->
+    | FunctionCall({ Kind = Identifier "SOME" }, false, SqlValueArguments([ { Kind = Identifier "X" } ], None), _, _, _, _) ->
         ()
     | res -> Assert.Fail(sprintf "Expected SOME(x) routine call, got %A" res)
 

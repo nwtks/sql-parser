@@ -207,6 +207,11 @@ parser until it is assigned. Reference the forwarding *parser* instead.
   limited to the deliberate deviations in [trade-off.md](trade-off.md).
 - A rule name absent from the source does **not** imply it is unimplemented — it
   may be a sub-rule of a cited parent production.
+- Clause-level counts are an inventory summary, not proof that every alternative
+  has positive, negative, reachability, and AST-fidelity test evidence. In particular,
+  the 6.10 null-treatment and from-first/last modifiers are implemented and preserved
+  on `WindowFunction`; the figures above are not yet an alternative-level conformance
+  matrix.
 
 ## 10. Supported SQL features
 

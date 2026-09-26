@@ -426,7 +426,7 @@ and ExpressionKind =
     // 6.32 <regex transliteration>
     | RegexTransliterate of RegexArgument
     // 6.32 <normalize function> ::= NORMALIZE ( <character value expression> [ , <normal form> [ , <result length> ] ] )
-    | NormalizeFunction of Expression * NormalForm option * Expression option
+    | NormalizeFunction of Expression * NormalForm option * NormalizeResultLength option
     // 6.32 <specific type method> ::= <user-defined type value expression> <period> SPECIFICTYPE [ ( ) ]
     | SpecificTypeMethod of Expression * bool
     // 6.32 <classifier function> ::= CLASSIFIER ( [ <row pattern variable name> ] )
@@ -544,7 +544,8 @@ and ExpressionKind =
         SqlArgumentList *
         WindowDefinition option *
         Expression option *
-        (Expression * bool * NullsOrder option) list option
+        (Expression * bool * NullsOrder option) list option *
+        ListaggOverflowBehavior option
     // 10.9 <array aggregate function> — ORDER BY is part of the production, not a
     // generic SQL argument-list suffix.
     | JsonObjectAgg of JsonNameValue * JsonConstructorNull option * bool option * JsonOutput option
@@ -1027,6 +1028,11 @@ and NormalForm =
     | Nfkc
     | Nfkd
 
+// 6.32 <normalize function result length> ::= <character length> | <character large object length>
+and NormalizeResultLength =
+    | NormalizeCharacterLength of CharacterLength
+    | NormalizeCharacterLargeObjectLength of LargeObjectLength
+
 // 8.13 <match predicate part 2> ::= MATCH [ UNIQUE ] [ SIMPLE | PARTIAL | FULL ] <table subquery>
 and MatchOption =
     | Simple
@@ -1143,6 +1149,13 @@ and ConstraintCharacteristics =
     { InitiallyDeferred: bool option
       Deferrable: bool option
       Enforced: bool option }
+
+// 10.9 <overflow behavior> ::= ERROR | TRUNCATE [ <listagg truncation filler> ] <listagg count indication>
+// Carried as a seventh `FunctionCall` field — the <listagg overflow clause> is a
+// <listagg set function> slot, so it is validated against the routine name there.
+and ListaggOverflowBehavior =
+    | ListaggError
+    | ListaggTruncate of Expression option * bool
 
 // 10.12 <JSON representation> ::= JSON [ ENCODING { UTF8 | UTF16 | UTF32 } ]
 and JsonRepresentation = JsonEncoding of JsonEncoding option

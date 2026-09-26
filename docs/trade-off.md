@@ -83,12 +83,23 @@ The parser rejects what the standard does not permit, even in common vendor dial
   comparisons or predicate suffixes while preserving the full parser for search conditions.
   ORDER BY sort keys are NOT in that set: 10.10 `<sort key>` is a `<value expression>`, so
   the full parser serves them and boolean sort keys are accepted.
-- 6.10 is currently represented by the existing `WindowFunction` record; null-treatment
-  and from-first/last fields are reserved for a later isolated parser change rather than
-  being silently dropped by a partial suffix implementation. The grammar-specific
-  aggregate families are validated in the shared routine validation block.
+- 6.10 is represented by the existing `WindowFunction` record. `RESPECT NULLS` /
+  `IGNORE NULLS` are parsed for LEAD/LAG, FIRST_VALUE/LAST_VALUE and NTH_VALUE;
+  `FROM FIRST` / `FROM LAST` are parsed for NTH_VALUE only. Both modifier choices are
+  retained in the AST, and unsupported functions or invalid modifier ordering are rejected.
+  The grammar-specific aggregate families are validated in the shared routine validation
+  block.
 - `JSON_ARRAY` now has an additive query-constructor AST case; query bodies remain
   opaque to expression traversal, like the other query-bearing constructor nodes.
+- 6.32 `<normalize function result length>` gets a typed `NormalizeResultLength`
+  (`<character length> | <character large object length>`) instead of a free expression,
+  so `NORMALIZE(x, NFC, 10 + 1)` is rejected. A bare integer is ambiguous between the
+  two alternatives, so `<character length>` wins and the large-object case is reached
+  only by a `<multiplier>` (`2K OCTETS`).
+- 10.9 `<listagg overflow clause>` is a seventh `FunctionCall` field
+  (`ListaggError | ListaggTruncate of Expression option * bool`). It is parsed inside
+  the argument parentheses, per the production, and rejected for any routine other than
+  `LISTAGG`.
 
 ## 2026-09-25 SQL:2016 conformance sweep
 
@@ -130,10 +141,10 @@ The parser rejects what the standard does not permit, even in common vendor dial
   so `OPEN c USING 1` is rejected; host parameters (with an indicator), `?`, identifiers
   and the CURRENT_*/USER/VALUE keywords are accepted.
 - **14.15 `<update target>`** admits the array-element form in all three set-clause shapes.
-- **Still open:** 10.9 `<listagg overflow clause>` (needs a `FunctionCall` field), 11.4's
-  optional `<data type or domain name>` (typed-table columns), and the 20.x extended
-  `<SQL statement name>` / `<dynamic cursor name>` forms (`[ GLOBAL | LOCAL ] :c`,
-  `PTF :c`), which need scope information the `Expression`-shaped name fields cannot hold.
+- **Still open:** 11.4's optional `<data type or domain name>` (typed-table columns) and
+  the 20.x extended `<SQL statement name>` / `<dynamic cursor name>` forms
+  (`[ GLOBAL | LOCAL ] :c`, `PTF :c`), which need scope information the
+  `Expression`-shaped name fields cannot hold.
 
 
 - **Types avoid left recursion by construction** — `pDataTypeElement` + a folded
@@ -298,8 +309,7 @@ positions; reserved built-ins take value arguments only (`SUM(a, TABLE(t))` reje
   the slot) and character-vs-numeric predicate operands.
 - **Syntactic ambiguities**: kind-less `GRANT ... ON <name>` reads as a table grant;
   `TABLE (expr)` PTF classification is shape-based; a lone `TRANSFORM GROUP g` is
-  reported as `<single group specification>`; `NORMALIZE`'s result length is parsed as
-  a plain expression.
+  reported as `<single group specification>`.
 - **Opaque embedded languages**: the SQL/JSON path grammar (9.38/9.39) and XQuery-regex
   patterns (8.6) are kept as strings by design.
 - **`BEGIN ATOMIC`** bodies go beyond 13.4 (no `<compound statement>` in the grammar).

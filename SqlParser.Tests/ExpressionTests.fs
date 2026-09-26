@@ -108,7 +108,7 @@ let ``NULL is a null specification, not a literal`` () =
 
     // 10.4 <SQL argument> admits a <contextually typed value specification>.
     match parse "SELECT my_func(NULL)" with
-    | FunctionCall({ Kind = Identifier "MY_FUNC" }, _, SqlValueArguments([ { Kind = Literal Null } ], None), _, _, _) ->
+    | FunctionCall({ Kind = Identifier "MY_FUNC" }, _, SqlValueArguments([ { Kind = Literal Null } ], None), _, _, _, _) ->
         ()
     | res -> Assert.Fail(sprintf "Expected my_func(NULL), got %A" res)
 
@@ -363,6 +363,7 @@ let ``Routine invocation arity and suffix restrictions (6.10 / 10.9)`` () =
                    SqlValueArguments([ { Kind = ExpressionKind.Star } ], None),
                    _,
                    _,
+                   _,
                    _) -> ()
     | res -> Assert.Fail(sprintf "Expected COUNT(*), got %A" res)
 
@@ -380,7 +381,7 @@ let ``Routine invocation arity and suffix restrictions (6.10 / 10.9)`` () =
     parseFails "SELECT COVAR_POP(ALL a, b)"
 
     match parse "SELECT COVAR_POP(a, b)" with
-    | FunctionCall({ Kind = Identifier "COVAR_POP" }, _, _, _, _, _) -> ()
+    | FunctionCall({ Kind = Identifier "COVAR_POP" }, _, _, _, _, _, _) -> ()
     | res -> Assert.Fail(sprintf "Expected binary set function, got %A" res)
     // <nth value function> takes exactly two arguments
     parseFails "SELECT NTH_VALUE(x) OVER ()"
@@ -400,7 +401,7 @@ let ``Routine invocation arity and suffix restrictions (6.10 / 10.9)`` () =
     parseFails "SELECT COVAR_POP(DISTINCT a, b)"
 
     match parse "SELECT LISTAGG(DISTINCT x, ',') WITHIN GROUP (ORDER BY x)" with
-    | FunctionCall({ Kind = Identifier "LISTAGG" }, true, _, _, _, Some _) -> ()
+    | FunctionCall({ Kind = Identifier "LISTAGG" }, true, _, _, _, Some _, _) -> ()
     | res -> Assert.Fail(sprintf "Expected LISTAGG DISTINCT, got %A" res)
     // <inverse distribution function> takes exactly one argument
     parseFails "SELECT PERCENTILE_CONT(1, 2) WITHIN GROUP (ORDER BY x)"
@@ -445,8 +446,13 @@ let ``Window function arity forms are parsed (6.10)`` () =
     | res -> Assert.Fail(sprintf "Expected LEAD(x, 2) OVER ..., got %A" res)
 
     match parse "SELECT ARRAY_AGG(x)" with
-    | FunctionCall({ Kind = Identifier "ARRAY_AGG" }, _, SqlValueArguments([ { Kind = Identifier "X" } ], None), _, _, _) ->
-        ()
+    | FunctionCall({ Kind = Identifier "ARRAY_AGG" },
+                   _,
+                   SqlValueArguments([ { Kind = Identifier "X" } ], None),
+                   _,
+                   _,
+                   _,
+                   _) -> ()
     | res -> Assert.Fail(sprintf "Expected ARRAY_AGG(x), got %A" res)
 
     // <ntile function> / <nth value function> reject a non-<simple value specification>
@@ -457,6 +463,41 @@ let ``Window function arity forms are parsed (6.10)`` () =
     parseFails "SELECT RANK() WITHIN GROUP (ORDER BY x)"
     // 10.4 — reserved built-ins take <value expression> arguments only
     parseFails "SELECT SUM(x, TABLE(t)) FROM t"
+
+[<Fact>]
+let ``Window function null treatment and from-first-last modifiers are parsed (6.10)`` () =
+    match parseExpr "LEAD(x, 2) IGNORE NULLS OVER ()" |> fun e -> e.Kind with
+    | WindowFunction { Function = { Kind = Identifier "LEAD" }
+                       NullTreatment = Some IgnoreNulls
+                       FromFirstOrLast = None } -> ()
+    | res -> Assert.Fail(sprintf "Expected LEAD IGNORE NULLS, got %A" res)
+
+    match parseExpr "FIRST_VALUE(x) RESPECT NULLS OVER ()" |> fun e -> e.Kind with
+    | WindowFunction { Function = { Kind = Identifier "FIRST_VALUE" }
+                       NullTreatment = Some RespectNulls
+                       FromFirstOrLast = None } -> ()
+    | res -> Assert.Fail(sprintf "Expected FIRST_VALUE RESPECT NULLS, got %A" res)
+
+    match parseExpr "(NTH_VALUE(x, 2) FROM LAST IGNORE NULLS OVER ())" |> fun e -> e.Kind with
+    | Parenthesized { Kind = WindowFunction { Function = { Kind = Identifier "NTH_VALUE" }
+                                              NullTreatment = Some IgnoreNulls
+                                              FromFirstOrLast = Some FromLast } } -> ()
+    | res -> Assert.Fail(sprintf "Expected NTH_VALUE FROM LAST IGNORE NULLS, got %A" res)
+
+    match
+        parseExpr "(NTH_VALUE(x, 2) FROM FIRST RESPECT NULLS OVER ())"
+        |> fun e -> e.Kind
+    with
+    | Parenthesized { Kind = WindowFunction { Function = { Kind = Identifier "NTH_VALUE" }
+                                              NullTreatment = Some RespectNulls
+                                              FromFirstOrLast = Some FromFirst } } -> ()
+    | res -> Assert.Fail(sprintf "Expected NTH_VALUE FROM FIRST RESPECT NULLS, got %A" res)
+
+    parseFails "SELECT SUM(x) IGNORE NULLS OVER () FROM t"
+    parseFails "SELECT LEAD(x) FROM LAST OVER () FROM t"
+    parseFails "SELECT FIRST_VALUE(x) FROM FIRST OVER () FROM t"
+    parseFails "SELECT NTH_VALUE(x, 2) IGNORE NULLS FROM LAST OVER () FROM t"
+    parseFails "SELECT NTH_VALUE(x, 2) FROM LAST RESPECT NULLS IGNORE NULLS OVER () FROM t"
 
 [<Fact>]
 let ``Window row pattern measure verification (6.10)`` () =
@@ -638,12 +679,47 @@ let ``Set functions that need a suffix are accepted with one`` () =
     | res -> Assert.Fail(sprintf "Expected RANK OVER, got %A" res)
 
     match parse "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x)" with
-    | FunctionCall(_, _, _, _, _, Some _) -> ()
+    | FunctionCall(_, _, _, _, _, Some _, _) -> ()
     | res -> Assert.Fail(sprintf "Expected PERCENTILE_CONT WITHIN GROUP, got %A" res)
 
     match parse "SELECT LISTAGG(x, ',') WITHIN GROUP (ORDER BY x)" with
-    | FunctionCall(_, _, _, _, _, Some _) -> ()
+    | FunctionCall(_, _, _, _, _, Some _, _) -> ()
     | res -> Assert.Fail(sprintf "Expected LISTAGG WITHIN GROUP, got %A" res)
+
+[<Fact>]
+let ``LISTAGG overflow clause verification`` () =
+    // 10.9 <listagg set function> ::= LISTAGG ( [ <set quantifier> ] <character value expression>
+    //     <comma> <listagg separator> [ <listagg overflow clause> ] )
+    //     <within group specification> — the overflow clause is INSIDE the parentheses.
+    match parse "SELECT LISTAGG(name, ',' ON OVERFLOW ERROR) WITHIN GROUP (ORDER BY id)" with
+    | FunctionCall({ Kind = Identifier "LISTAGG" }, _, _, _, _, Some _, Some ListaggError) -> ()
+    | res -> Assert.Fail(sprintf "Expected LISTAGG ON OVERFLOW ERROR, got %A" res)
+
+    // ON OVERFLOW TRUNCATE with filler and WITH COUNT
+    match
+        parse "SELECT LISTAGG(DISTINCT name, ',' ON OVERFLOW TRUNCATE '...' WITH COUNT) WITHIN GROUP (ORDER BY id)"
+    with
+    | FunctionCall({ Kind = Identifier "LISTAGG" },
+                   true,
+                   _,
+                   _,
+                   _,
+                   Some _,
+                   Some(ListaggTruncate(Some { Kind = Literal(String "...") }, true))) -> ()
+    | res -> Assert.Fail(sprintf "Expected LISTAGG TRUNCATE WITH COUNT, got %A" res)
+
+    // ON OVERFLOW TRUNCATE WITHOUT COUNT
+    match parse "SELECT LISTAGG(name, ',' ON OVERFLOW TRUNCATE WITHOUT COUNT) WITHIN GROUP (ORDER BY id)" with
+    | FunctionCall({ Kind = Identifier "LISTAGG" }, _, _, _, _, Some _, Some(ListaggTruncate(None, false))) -> ()
+    | res -> Assert.Fail(sprintf "Expected LISTAGG TRUNCATE WITHOUT COUNT, got %A" res)
+
+    // 10.9 <overflow behavior> ::= ERROR | TRUNCATE [ <listagg truncation filler> ] <listagg count indication>
+    // — the <listagg count indication> is REQUIRED, so bare TRUNCATE is rejected.
+    parseFails "SELECT LISTAGG(name, ',' ON OVERFLOW TRUNCATE) WITHIN GROUP (ORDER BY id)"
+    // <listagg overflow clause> is a <listagg set function> slot only.
+    parseFails "SELECT my_func(x ON OVERFLOW ERROR) FROM t"
+    // <listagg separator> is a <character string literal>, so the filler cannot stand in for it.
+    parseFails "SELECT LISTAGG(name ON OVERFLOW ERROR) WITHIN GROUP (ORDER BY id)"
 
 [<Fact>]
 let ``Nested row number function verification`` () =
@@ -716,7 +792,7 @@ let ``CAST FORMAT template verification (6.13)`` () =
 [<Fact>]
 let ``Descriptor arguments in SQL argument lists (10.4)`` () =
     match parse "SELECT my_func(DESCRIPTOR (a INT, b)) FROM t" with
-    | FunctionCall(_, _, arguments, _, _, _) ->
+    | FunctionCall(_, _, arguments, _, _, _, _) ->
         match arguments.Arguments with
         | [ SqlArgumentDescriptor { Kind = DescriptorValueConstructor [ ({ Kind = Identifier "A" }, Some Integer)
                                                                         ({ Kind = Identifier "B" }, None) ] } ] -> ()
@@ -724,7 +800,7 @@ let ``Descriptor arguments in SQL argument lists (10.4)`` () =
     | res -> Assert.Fail(sprintf "Expected a descriptor value constructor argument, got %A" res)
 
     match parse "SELECT my_func(CAST(NULL AS DESCRIPTOR)) FROM t" with
-    | FunctionCall(_, _, arguments, _, _, _) ->
+    | FunctionCall(_, _, arguments, _, _, _, _) ->
         match arguments.Arguments with
         | [ SqlArgumentDescriptor { Kind = DescriptorCast } ] -> ()
         | res -> Assert.Fail(sprintf "Expected a CAST ( NULL AS DESCRIPTOR ) argument, got %A" res)
@@ -735,14 +811,14 @@ let ``Descriptor arguments in SQL argument lists (10.4)`` () =
 
     // A routine named DESCRIPTOR still parses as a plain identifier argument.
     match parse "SELECT my_func(DESCRIPTOR) FROM t" with
-    | FunctionCall(_, _, SqlValueArguments([ { Kind = Identifier "DESCRIPTOR" } ], None), _, _, _) -> ()
+    | FunctionCall(_, _, SqlValueArguments([ { Kind = Identifier "DESCRIPTOR" } ], None), _, _, _, _) -> ()
     | res -> Assert.Fail(sprintf "Expected a plain DESCRIPTOR argument, got %A" res)
 
 [<Fact>]
 let ``SQL argument forms (10.4)`` () =
     // <generalized expression> ::= <value expression> AS <path-resolved user-defined type name>
     match parse "SELECT my_func(x AS my_type) FROM t" with
-    | FunctionCall(_, _, arguments, _, _, _) ->
+    | FunctionCall(_, _, arguments, _, _, _, _) ->
         match arguments.Arguments with
         | [ SqlArgumentGeneralized({ Kind = Identifier "X" }, UserDefinedType { Kind = Identifier "MY_TYPE" }) ] -> ()
         | res -> Assert.Fail(sprintf "Expected a generalized expression argument, got %A" res)
@@ -750,7 +826,7 @@ let ``SQL argument forms (10.4)`` () =
 
     // <named argument specification> ::= <SQL parameter name> => <named argument SQL argument>
     match parse "SELECT my_func(a => 1, b => 'x') FROM t" with
-    | FunctionCall(_, _, arguments, _, _, _) ->
+    | FunctionCall(_, _, arguments, _, _, _, _) ->
         match arguments.Arguments with
         | [ SqlArgumentNamed({ Kind = Identifier "A" }, SqlArgumentValue { Kind = Literal(Number 1m) })
             SqlArgumentNamed({ Kind = Identifier "B" }, SqlArgumentValue { Kind = Literal(String "x") }) ] -> ()
@@ -762,7 +838,7 @@ let ``SQL argument forms (10.4)`` () =
     // <table argument> — `TABLE ( <name> )` is unambiguous, so it needs no clause; its
     // correlation, partitioning, pruning and ordering are kept.
     match parse "SELECT my_ptf(TABLE(t) AS x PARTITION BY a KEEP WHEN EMPTY ORDER BY b DESC) FROM t" with
-    | FunctionCall(_, _, arguments, _, _, _) ->
+    | FunctionCall(_, _, arguments, _, _, _, _) ->
         match arguments.Arguments with
         | [ SqlArgumentTable table ] ->
             match table.Table with
@@ -788,7 +864,7 @@ let ``SQL argument forms (10.4)`` () =
     // A <table function invocation> proper is also a <value expression>, so it needs a
     // table-argument clause (see docs/trade-off.md).
     match parse "SELECT my_ptf(f(x) PARTITION BY (a, b) PRUNE WHEN EMPTY) FROM t" with
-    | FunctionCall(_, _, arguments, _, _, _) ->
+    | FunctionCall(_, _, arguments, _, _, _, _) ->
         match arguments.Arguments with
         | [ SqlArgumentTable table ] ->
             match table.Table with
@@ -805,7 +881,7 @@ let ``SQL argument forms (10.4)`` () =
 
     // Without any table-argument clause the same text stays a <value expression>.
     match parse "SELECT my_ptf(TABLE(SELECT x FROM u)) FROM t" with
-    | FunctionCall(_, _, arguments, _, _, _) ->
+    | FunctionCall(_, _, arguments, _, _, _, _) ->
         match arguments.Arguments with
         | [ SqlArgumentValue { Kind = TableQuery _ } ] -> ()
         | res -> Assert.Fail(sprintf "Expected a table query argument, got %A" res)
@@ -813,7 +889,7 @@ let ``SQL argument forms (10.4)`` () =
 
     // With a clause the same query proper becomes a <table argument>.
     match parse "SELECT my_ptf(TABLE(SELECT x FROM u) AS x PARTITION BY a) FROM t" with
-    | FunctionCall(_, _, arguments, _, _, _) ->
+    | FunctionCall(_, _, arguments, _, _, _, _) ->
         match arguments.Arguments with
         | [ SqlArgumentTable table ] ->
             match table.Table with
@@ -828,7 +904,7 @@ let ``SQL argument forms (10.4)`` () =
 
     // <copartition clause> ::= COPARTITION <copartition list>
     match parse "SELECT my_ptf(TABLE(t1) PARTITION BY a, TABLE(t2) COPARTITION (t1, t2)) FROM t" with
-    | FunctionCall(_, _, arguments, _, _, _) ->
+    | FunctionCall(_, _, arguments, _, _, _, _) ->
         match arguments.Copartition with
         | Some [ [ { Kind = Identifier "T1" }; { Kind = Identifier "T2" } ] ] -> ()
         | res -> Assert.Fail(sprintf "Expected a copartition clause, got %A" res)
@@ -1361,11 +1437,27 @@ let ``NORMALIZE function verification`` () =
     | NormalizeFunction({ Kind = Identifier "NAME" }, None, None) -> ()
     | res -> Assert.Fail(sprintf "Expected NORMALIZE, got %A" res)
 
-    match parse "SELECT NORMALIZE(name, NFC, CHARACTER_LENGTH(10))" with
+    // 6.32 <normalize function result length> ::= <character length> | <character large object length>
+    // — the bare length forms; there is no type name and no parentheses.
+    match parse "SELECT NORMALIZE(name, NFC, 10)" with
     | NormalizeFunction({ Kind = Identifier "NAME" },
                         Some Nfc,
-                        Some { Kind = LengthExpression(LengthFunction.CharacterLength, _, _) }) -> ()
+                        Some(NormalizeCharacterLength { Value = 10; Unit = None })) -> ()
     | res -> Assert.Fail(sprintf "Expected NORMALIZE with form and length, got %A" res)
+
+    match parse "SELECT NORMALIZE(name, NFD, 2K OCTETS)" with
+    | NormalizeFunction({ Kind = Identifier "NAME" },
+                        Some Nfd,
+                        Some(NormalizeCharacterLargeObjectLength { Value = 2
+                                                                   Multiplier = Some Kilo
+                                                                   Unit = Some Octets })) -> ()
+    | res -> Assert.Fail(sprintf "Expected NORMALIZE with a large object result length, got %A" res)
+
+    // The length is a 6.1 length production, not a type name.
+    parseFails "SELECT NORMALIZE(name, NFC, CHARACTER_LENGTH(10))"
+    parseFails "SELECT NORMALIZE(name, NFC, CLOB(2K OCTETS))"
+    // A <large object length token> is an implementation-defined token, not a bare integer.
+    parseFails "SELECT NORMALIZE(name, NFC, 10 + 1)"
 
 [<Fact>]
 let ``CLASSIFIER function verification`` () =
@@ -1591,7 +1683,8 @@ let ``Function call verification`` () =
                    SqlValueArguments([ { Kind = ExpressionKind.Star } ], None),
                    None,
                    None,
-                   None) -> ()
+                   None,
+                   _) -> ()
     | res -> Assert.Fail(sprintf "Expected COUNT(*), got %A" res)
 
 [<Fact>]
@@ -1602,7 +1695,8 @@ let ``Aggregate functions verification`` () =
                    SqlValueArguments([ { Kind = Identifier "ID" } ], None),
                    None,
                    None,
-                   None) -> ()
+                   None,
+                   _) -> ()
     | res -> Assert.Fail(sprintf "Expected COUNT(DISTINCT id), got %A" res)
 
 [<Fact>]
@@ -1613,7 +1707,8 @@ let ``FILTER clause verification`` () =
                    SqlValueArguments([ { Kind = ExpressionKind.Star } ], None),
                    None,
                    Some { Kind = BinaryOp(GreaterThan, { Kind = Identifier "X" }, { Kind = Literal(Number 0m) }) },
-                   None) -> ()
+                   None,
+                   _) -> ()
     | res -> Assert.Fail(sprintf "Expected FILTER clause, got %A" res)
 
 [<Fact>]
@@ -1624,7 +1719,8 @@ let ``WITHIN GROUP verification`` () =
                    SqlValueArguments([ { Kind = Literal(Number 0.5m) } ], None),
                    None,
                    None,
-                   Some [ { Kind = Identifier "X" }, true, None ]) -> ()
+                   Some [ { Kind = Identifier "X" }, true, None ],
+                   _) -> ()
     | res -> Assert.Fail(sprintf "Expected WITHIN GROUP, got %A" res)
 
 [<Fact>]
@@ -1650,7 +1746,8 @@ let ``Non reserved names are accepted as routine names`` () =
                    SqlValueArguments([ { Kind = Identifier "X" } ], None),
                    None,
                    None,
-                   None) -> ()
+                   None,
+                   _) -> ()
     | res -> Assert.Fail(sprintf "Expected a FunctionCall for foo, got %A" res)
 
 [<Fact>]
@@ -1674,7 +1771,7 @@ let ``RUNNING and FINAL set function verification`` () =
     match parse "SELECT RUNNING SUM(x)" with
     | SetFunction(Some RunningOrFinal.Running, inner) ->
         match inner.Kind with
-        | FunctionCall({ Kind = Identifier "SUM" }, false, arguments, None, None, None) ->
+        | FunctionCall({ Kind = Identifier "SUM" }, false, arguments, None, None, None, _) ->
             match arguments.Arguments with
             | [ SqlArgumentValue { Kind = Identifier "X" } ] -> ()
             | res -> Assert.Fail(sprintf "Expected the SUM argument, got %A" res)
@@ -1682,7 +1779,7 @@ let ``RUNNING and FINAL set function verification`` () =
     | res -> Assert.Fail(sprintf "Expected RUNNING SUM, got %A" res)
 
     match parse "SELECT FINAL COUNT(*)" with
-    | SetFunction(Some RunningOrFinal.Final, { Kind = FunctionCall({ Kind = Identifier "COUNT" }, _, _, _, _, _) }) ->
+    | SetFunction(Some RunningOrFinal.Final, { Kind = FunctionCall({ Kind = Identifier "COUNT" }, _, _, _, _, _, _) }) ->
         ()
     | res -> Assert.Fail(sprintf "Expected FINAL COUNT, got %A" res)
 

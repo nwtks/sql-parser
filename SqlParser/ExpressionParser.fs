@@ -22,6 +22,10 @@ module ExpressionParser =
               "LAST_VALUE"
               "NTH_VALUE" ]
 
+    // 6.10 <null treatment> is only present in these three window-function productions.
+    let private nullTreatmentFunctionNames =
+        Set.ofList [ "LEAD"; "LAG"; "FIRST_VALUE"; "LAST_VALUE"; "NTH_VALUE" ]
+
     // 6.10 <rank function type> — RANK | DENSE_RANK | PERCENT_RANK | CUME_DIST.
     // Used both as a <window function type> (empty parens + OVER) and as a
     // <hypothetical set function> (>= 1 arguments + WITHIN GROUP).
@@ -1422,15 +1426,26 @@ module ExpressionParser =
 
     // 6.32 <normalize function> ::= NORMALIZE ( <character value expression>
     //     [ , <normal form> [ , <normalize function result length> ] ] )
-    // (<normalize function result length> is parsed as an expression; modelling the
-    //  CHARACTER_LENGTH ( n ) / CLOB ( n ) shape separately is not worthwhile —
-    //  see docs/trade-off.md.)
+    // The result length uses the type-length productions directly (without type-name
+    // keywords or parentheses around the length). A bare <unsigned integer> satisfies
+    // both alternatives, so the FIRST one wins and the large-object form is only taken
+    // when it actually carries a <multiplier> (K/M/G/T/P), which a <character length>
+    // does not admit.
     let private pNormalizeFunction =
+        let pNormalizeResultLength =
+            attempt (
+                pCharacterLargeObjectLength
+                >>= function
+                    | l when Option.isSome l.Multiplier -> preturn (NormalizeCharacterLargeObjectLength l)
+                    | _ -> fail "a <character length> is matched first."
+            )
+            <|> (pCharacterLength |>> NormalizeCharacterLength)
+
         let pRest =
             opt (
                 attempt (
                     token (pstring ",") >>. pNormalForm
-                    .>>. opt (attempt (token (pstring ",") >>. pExpression))
+                    .>>. opt (attempt (token (pstring ",") >>. pNormalizeResultLength))
                 )
             )
 
@@ -1721,12 +1736,35 @@ module ExpressionParser =
                             Pos = { Line = pos.Line; Column = pos.Column } } ]
                   Copartition = None }
 
+        let pListaggOverflowBehavior =
+            let pCountIndication =
+                pKeyword "WITH" >>. pKeyword "COUNT" >>% true
+                <|> (pKeyword "WITHOUT" >>. pKeyword "COUNT" >>% false)
+
+            let pTruncation =
+                pKeyword "TRUNCATE"
+                >>. opt (
+                    attempt (
+                        getPosition .>>. pCharacterStringLiteral
+                        |>> fun (pos, value) ->
+                            { Expression.Kind = Literal(String value)
+                              Pos = { Line = pos.Line; Column = pos.Column } }
+                    )
+                )
+                .>>. pCountIndication
+                |>> fun (filler, withCount) -> ListaggTruncate(filler, withCount)
+
+            pKeyword "ON"
+            >>. pKeyword "OVERFLOW"
+            >>. (pKeyword "ERROR" >>% ListaggError <|> pTruncation)
+
         let pArgs =
             between
                 (token (pstring "("))
                 (token (pstring ")"))
                 (opt (pKeyword "DISTINCT" >>% true <|> (pKeyword "ALL" >>% false))
-                 .>>. (attempt pStarArg <|> pSqlArgumentListBody))
+                 .>>. (attempt pStarArg <|> pSqlArgumentListBody)
+                 .>>. opt (attempt pListaggOverflowBehavior))
 
         let pFilter =
             pKeyword "FILTER"
@@ -1742,6 +1780,17 @@ module ExpressionParser =
                      >>. pKeyword "BY"
                      >>. sepBy1 pSortSpecification (token (pstring ",")))
 
+        let pWindowFunctionModifiers =
+            let pNullTreatment =
+                pKeyword "RESPECT" >>. pKeyword "NULLS" >>% RespectNulls
+                <|> (pKeyword "IGNORE" >>. pKeyword "NULLS" >>% IgnoreNulls)
+
+            let pFromFirstOrLast =
+                pKeyword "FROM"
+                >>. (pKeyword "FIRST" >>% FromFirst <|> (pKeyword "LAST" >>% FromLast))
+
+            opt (attempt pFromFirstOrLast) .>>. opt (attempt pNullTreatment)
+
         let nameExpr =
             getPosition .>>. pRoutineName
             |>> fun (pos, name) ->
@@ -1750,13 +1799,17 @@ module ExpressionParser =
 
         nameExpr
         .>>. pArgs
+        .>>. pWindowFunctionModifiers
         // 10.9 clause order: <args> [ <within group specification> ] [ <filter clause> ]
         // then 6.10 OVER — WITHIN GROUP comes immediately after the argument list,
-        // FILTER after it, OVER last.
+        // FILTER after it, OVER last. The 6.10 window-function-type modifiers follow
+        // the function arguments and are validated against the specific function below.
         .>>. opt pWithinGroup
         .>>. opt pFilter
         .>>. opt pWindowNameOrSpecification
-        >>= fun ((((name, (dist, argumentList)), withinGroup), filter), window) ->
+        >>= fun
+                (((((name, ((dist, argumentList), overflow)), (fromFirstOrLast, nullTreatment)), withinGroup), filter),
+                 window) ->
             // 6.10 and 10.9 make the suffix mandatory for some reserved function keywords: those
             // names are whitelisted, so without this check `ROW_NUMBER()` or `LISTAGG(x, ',')` would
             // degrade to a plain <routine invocation>.
@@ -1765,8 +1818,20 @@ module ExpressionParser =
                 | Identifier n -> n
                 | _ -> ""
 
+            let supportsFromFirstOrLast = functionName = "NTH_VALUE"
+            let listaggOverflow = overflow
+
             if Set.contains functionName windowOnlyFunctionNames && Option.isNone window then
                 fail (sprintf "%s requires an OVER clause (6.10 <window function>)." functionName)
+            elif
+                Option.isSome nullTreatment
+                && not (Set.contains functionName nullTreatmentFunctionNames)
+            then
+                fail (sprintf "%s does not take a <null treatment> (6.10)." functionName)
+            elif Option.isSome fromFirstOrLast && not supportsFromFirstOrLast then
+                fail (sprintf "%s does not take a <from first or last> clause (6.10)." functionName)
+            elif Option.isSome overflow && functionName <> "LISTAGG" then
+                fail (sprintf "%s does not take a <listagg overflow clause> (10.9)." functionName)
             elif
                 Set.contains functionName withinGroupOnlyFunctionNames
                 && Option.isNone withinGroup
@@ -1930,8 +1995,8 @@ module ExpressionParser =
                                       Args = args
                                       IsDistinct = Option.defaultValue false dist
                                       Window = w
-                                      NullTreatment = None
-                                      FromFirstOrLast = None }
+                                      NullTreatment = nullTreatment
+                                      FromFirstOrLast = fromFirstOrLast }
                             )
                         | None ->
                             preturn (
@@ -1941,7 +2006,8 @@ module ExpressionParser =
                                     argumentList,
                                     None,
                                     filter,
-                                    withinGroup
+                                    withinGroup,
+                                    listaggOverflow
                                 )
                             )
         |> withExprPosition
@@ -2018,7 +2084,7 @@ module ExpressionParser =
         getPosition .>>. (pRunningOrFinal .>>. pRoutineInvocation)
         >>= fun (pos, (scope, e)) ->
             match e.Kind with
-            | FunctionCall({ Kind = Identifier name }, _, _, _, _, _) when Set.contains name aggregateFunctionNames ->
+            | FunctionCall({ Kind = Identifier name }, _, _, _, _, _, _) when Set.contains name aggregateFunctionNames ->
                 preturn
                     { Expression.Kind = SetFunction(Some scope, e)
                       Pos = { Line = pos.Line; Column = pos.Column } }
@@ -2590,7 +2656,7 @@ module ExpressionParser =
             // guard below must see through it (docs/gotchas.md — a new Expression case
             // holding an Expression silently escapes the catch-all arm if unlisted).
             | Parenthesized inner -> [ inner ]
-            | FunctionCall(name, _, arguments, _, filter, withinGroup) ->
+            | FunctionCall(name, _, arguments, _, filter, withinGroup, _) ->
                 [ yield name
                   yield! sqlArgumentChildren arguments.Arguments
                   yield! Option.toList filter
@@ -2683,7 +2749,7 @@ module ExpressionParser =
             | Fold(_, x) -> [ x ]
             | Transcoding(x, name) -> [ x; name ]
             | CharacterTransliteration(x, name) -> [ x; name ]
-            | NormalizeFunction(x, _, length) -> [ yield x; yield! Option.toList length ]
+            | NormalizeFunction(x, _, _) -> [ x ]
             | SpecificTypeMethod(x, _) -> [ x ]
             | Classifier x -> Option.toList x
             | AtTimeZone(x, TimeZoneSpecifier.TimeZoneOffset zone) -> [ x; zone ]
