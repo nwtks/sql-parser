@@ -46,10 +46,12 @@ module TransactionParser =
 
     // 17.4 <set constraints mode statement> ::= SET CONSTRAINTS <constraint name list> { DEFERRED | IMMEDIATE }
     // <constraint name list> ::= ALL | <constraint name>  [ { <comma>  <constraint name>  }... ]
+    // <constraint name> ::= <schema qualified name> (5.4, one to three parts), so a qualified
+    // name such as `SET CONSTRAINTS s.c` is accepted.
     let pSetConstraintsStatement =
         pKeyword "SET" >>. pKeyword "CONSTRAINTS"
         .>>. (attempt (pKeyword "ALL" >>% None)
-              <|> (sepBy1 pIdentifierExpression (token (pstring ",")) |>> Some))
+              <|> (sepBy1 pSchemaQualifiedNameExpression (token (pstring ",")) |>> Some))
         .>>. (attempt (pKeyword "DEFERRED" >>% true) <|> (pKeyword "IMMEDIATE" >>% false))
         |>> fun ((_, names), deferred) -> SetConstraints(names, deferred)
 

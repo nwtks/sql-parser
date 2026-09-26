@@ -70,6 +70,73 @@ The parser rejects what the standard does not permit, even in common vendor dial
   (consumers would layer extensions on top), but an accepted string is much more likely
   to be valid SQL-2016.
 
+## Intentional deviations from SQL:2016
+
+A single source of truth for every place the parser knowingly departs from
+`sql-2016-grammar.txt`. Each entry states the clause, the direction (extension /
+omission / relaxation / strictness) and whether it is now documented. Most are
+cross-referenced from the conformance sections above; the items marked **(new)** were
+previously only a code comment or entirely undocumented and are recorded here per
+AGENTS.md.
+
+### Extensions (accept syntax the grammar does not)
+- `BEGIN ATOMIC` in routine bodies (11.60) and triggers (11.49) — a compound-statement
+  extension. Documented under the 2026-09-25 sweep.
+- `REVOKE … HIERARCHY OPTION FOR` (12.7) — extension. Documented under the 2026-09-25 sweep.
+- Trailing `--` comment without a final newline (5.2) — extension; `<newline>` is
+  implementation-defined, which makes it defensible. Documented under the 2026-09-25 sweep.
+- 20.15 dynamic `DECLARE CURSOR` is reachable through `parseStatement` although the
+  grammar places `<declare cursor>` only in §21. Documented under "Entry points".
+- Flat `StatementKind` DU vs the grammar's nested dispatch — structural relaxation.
+  Documented under "Module organisation".
+
+### Omissions (grammar productions not implemented)
+- `<direct implementation-defined statement>` (22.1) is not wired into `pDirectSqlStatement`
+  — there are no implementation-defined statements to accept. **(new)** No implementation
+  exists; recorded here so the gap is explicit rather than a silent code comment.
+- The five `<SQL dynamic data statement>` alternatives 20.19/20.20/20.22/20.23/20.24
+  (dynamic OPEN/FETCH/CLOSE/DELETE-positioned/UPDATE-positioned) are not wired into
+  `pSqlDynamicStatement` — only the allocate forms (20.17/20.18) are. **(new)** Out of
+  scope for the current dynamic-SQL surface; recorded here. The static 14.5 `FETCH` now
+  explicitly rejects the descriptor clause that belongs to 20.20 (see below).
+- `<embedded variable specification>` (6.4) is not parsed by `pGeneralValueSpecification` /
+  `pSimpleValueSpecification`. **(new)** Embedded SQL is out of scope; the host-language
+  name forms degrade to host parameters elsewhere (see "Entry points"). Recorded here.
+- 11.4 optional `<data type or domain name>` (typed-table columns) and the 20.x extended
+  `<SQL statement name>` / `<descriptor name>` forms — "Still open" per the 2026-09-25 sweep.
+- 14.1 `<declare cursor>` / 14.16 `<temporary table declaration>` are parsed but
+  unreachable — documented under "Entry points".
+
+### Relaxations (accept input the grammar rejects) — fixed or kept
+- **Static `FETCH` (14.5) no longer accepts the descriptor clause.** Before this change
+  `pFetchStatement` reused `pOutputUsingClause` (which admits `INTO [ SQL ] DESCRIPTOR`),
+  so `FETCH cur INTO DESCRIPTOR d` parsed as a 14.5 statement. The descriptor form belongs
+  to the dynamic 20.20 `<output using clause>`; the static form now uses a dedicated
+  `pFetchIntoClause` that accepts only `INTO <fetch target list>`. **(new, fixed 2026-09-26)**
+- `TRUNCATE` (14.10) is dispatched through `pSqlSchemaStatement` (an 11.x dispatcher) as a
+  routing convenience, although it is not an 11.x `<schema element>`. **(new)** Kept; the
+  comment in `SqlParser.fs` is the only other record.
+- Predicate atoms / interval / multiset-operand widening (6.3/6.37/6.43) and `<when
+  operand>` accepting predicate part-2 (6.12) — documented under "Interval / point-in-time
+  parsing" and the 2026-09-25 sweep.
+- `<embedded variable name>` degrades to a host parameter (6.4/14.17) — documented under
+  "Entry points".
+
+### Strictness (reject input the grammar permits) — fixed or kept
+- **`SET CONSTRAINTS` (17.4) now accepts a qualified `<constraint name>`** (`<schema
+  qualified name>`, 5.4, one to three parts). Before this change it used `pIdentifierExpression`
+  and rejected `SET CONSTRAINTS s.c`. **(new, fixed 2026-09-26)**
+- 5.4 name-arity caps, closed sets (grantor 12.3, default option 11.5), mandatory clauses,
+  boolean-operand rejection (8.2/8.9), `NORMALIZE` length (6.32), point-in-time boolean-free
+  (6.35) — documented under "Grammar-faithful strictness" and the 2026-09-25 sweep.
+- 10.4 `<table argument>` clause requirement, 11.3 as-subquery parentheses, 20.11 using
+  argument — documented under the 2026-09-25 sweep.
+
+### Conformance note
+`CAST(x AS <domain name>)` (6.13 `<cast target>`) is **not** a deviation: `<domain name>`
+is a `<schema qualified name>` and `pDataType` already accepts any identifier chain as a
+user-defined type, so `CAST(x AS my_domain)` parses (as a UDT). No change required.
+
 ## 2026-09 SQL:2016 conformance changes
 
 - **5.4 name arity is enforced per production.** `pSchemaQualifiedNameExpression` (three

@@ -1374,7 +1374,7 @@ module SchemaParser =
         let pParameterDeclaration =
             // <parameter default> is a 6.5 <default specification>, an 11.60 <descriptor value
             // constructor> (pDescriptorValueConstructor, shared with 10.4 <SQL argument>) or an
-            // expression. PTF copartition is not implemented — see docs/trade-off.md.
+            // expression.
             let pWithName =
                 opt pParameterMode .>>. pIdentifierExpression .>>. pParameterType
                 |>> fun ((mode, name), paramType) -> mode, Some name, paramType

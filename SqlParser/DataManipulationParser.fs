@@ -205,9 +205,17 @@ module DataManipulationParser =
         // The optional group is `[ [ <fetch orientation> ] FROM ]` as a unit:
         // an orientation without FROM is not valid (backtracks, then the bare
         // non-reserved word is tried as a <cursor name>).
+        // 14.5 <fetch target list> ::= <target specification> [ { <comma> <target specification> }... ]
+        // The static form accepts only INTO <fetch target list>; the descriptor form
+        // (INTO DESCRIPTOR / USING DESCRIPTOR) belongs to the dynamic 20.20 <output using
+        // clause> and is rejected here.
+        let pFetchIntoClause =
+            pKeyword "INTO" >>. sepBy1 pTargetSpecification (token (pstring ","))
+            |>> UsingClause.UsingArguments
+
         pKeyword "FETCH" >>. opt (attempt (opt pFetchOrientation .>> pKeyword "FROM"))
         .>>. pLocalQualifiedNameExpression
-        .>>. pOutputUsingClause
+        .>>. pFetchIntoClause
         |>> fun ((head, cursor), output) -> Fetch(Option.flatten head, cursor, output)
 
     // 14.6 <close statement> ::= CLOSE <cursor name>

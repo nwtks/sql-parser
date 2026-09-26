@@ -78,6 +78,17 @@ let ``DIAGNOSTICS SIZE rejects expression`` () =
     | res -> Assert.Fail(sprintf "Expected SetConstraints names, got %A" res)
 
 [<Fact>]
+let ``SET CONSTRAINTS accepts a qualified constraint name`` () =
+    // 17.4 <constraint name> ::= <schema qualified name> (5.4, one to three parts).
+    match parse "SET CONSTRAINTS s.c DEFERRED" with
+    | SetConstraints(Some([ { Kind = ColumnReference [ "S"; "C" ] } ]), true) -> ()
+    | res -> Assert.Fail(sprintf "Expected SetConstraints qualified name, got %A" res)
+
+    match parse "SET CONSTRAINTS cat.sch.c IMMEDIATE" with
+    | SetConstraints(Some([ { Kind = ColumnReference [ "CAT"; "SCH"; "C" ] } ]), false) -> ()
+    | res -> Assert.Fail(sprintf "Expected SetConstraints three-part name, got %A" res)
+
+[<Fact>]
 let ``SAVEPOINT verification`` () =
     match parse "SAVEPOINT sp1" with
     | Savepoint { Kind = Identifier "SP1" } -> ()

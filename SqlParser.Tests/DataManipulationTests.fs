@@ -98,17 +98,12 @@ let ``FETCH verification`` () =
     | res -> Assert.Fail(sprintf "Expected Fetch MODULE.c, got %A" res)
 
 [<Fact>]
-let ``FETCH INTO SQL DESCRIPTOR verification`` () =
-    // 20.20 <dynamic fetch statement> ::= FETCH [ [ <fetch orientation> ] FROM ] <dynamic cursor name> <output using clause>
-    match parseStatement "FETCH cur INTO SQL DESCRIPTOR d" with
-    | Fetch(None, { Kind = Identifier "CUR" }, UsingDescriptor { Kind = Identifier "D" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected FETCH INTO SQL DESCRIPTOR, got %A" res)
-
-[<Fact>]
-let ``FETCH INTO DESCRIPTOR without SQL keyword verification`` () =
-    match parseStatement "FETCH cur INTO DESCRIPTOR d" with
-    | Fetch(None, { Kind = Identifier "CUR" }, UsingDescriptor { Kind = Identifier "D" }) -> ()
-    | res -> Assert.Fail(sprintf "Expected FETCH INTO DESCRIPTOR, got %A" res)
+let ``FETCH INTO DESCRIPTOR is rejected by the static 14.5 form`` () =
+    // 14.5 <fetch statement> accepts only INTO <fetch target list>; the descriptor form
+    // (INTO [ SQL ] DESCRIPTOR) belongs to the dynamic 20.20 <dynamic fetch statement>, whose
+    // <output using clause> (20.12) is not wired into parseStatement (see docs/trade-off.md).
+    parseStatementFails "FETCH cur INTO DESCRIPTOR d"
+    parseStatementFails "FETCH cur INTO SQL DESCRIPTOR d"
 
 [<Fact>]
 let ``FETCH NEXT FROM verification`` () =
