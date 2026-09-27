@@ -11,8 +11,9 @@ The architecture is in [architecture.md](architecture.md); recurring pitfalls in
   than by "DDL/DML/other"; shared sub-parsers are hoisted to the earliest module all
   callers reach (`<scope clause>` → `ExpressionParser.fs`; `<language clause>`,
   `<method kind>`, `pDropBehavior` → `SchemaParser.fs`; `pGrantor` →
-  `AccessControlParser.fs`). **Compile order is leaf-first**; cross-module recursion is
-  wired via `createParserForwardedToRef` (statement-level and §8 refs in `SqlParser.fs`)
+  `AccessControlParser.fs`; `pExtendedName` → `DataManipulationParser.fs`).
+  **Compile order is leaf-first**; cross-module recursion is wired via
+  `createParserForwardedToRef` (statement-level and §8 refs in `SqlParser.fs`)
   — a dummy parser until assignment, in exchange for keeping rules in their natural
   module.
 - **Definition order follows the spec clause order**, best-effort (`define-before-use`
@@ -40,8 +41,14 @@ The architecture is in [architecture.md](architecture.md); recurring pitfalls in
   stays implemented for a future §21 surface; both entry points reject the
   syntax today. Dynamic `DECLARE ... FOR` (20.15) remains reachable through
   `parseStatement`.
+- **20.25/20.27 (omitted `<target table>`) are preparable-only.** Both entry points
+  reject them (13.4 lists the targeted 20.23/20.24); the dynamic dispatch reroutes
+  the DML parsers through `rejectOmittedTarget` (`SqlParser.fs`). The DML parsers
+  keep the form for a future preparable-statement surface.
 - **`CREATE SCHEMA`'s `<schema element>` list is an explicit `choice`** (CREATE-family +
   `GRANT`), so `DROP` / `ALTER` / `TRUNCATE` / `REVOKE` cannot appear there.
+- **`TRUNCATE` (14.10) is dispatched through `pSqlSchemaStatement`** (an 11.x
+  dispatcher) as a routing convenience, although it is not an 11.x `<schema element>`.
 
 ## Grammar-faithful strictness
 
@@ -58,6 +65,24 @@ The parser rejects what the standard does not permit, even in common vendor dial
   `CURRENT_USER | CURRENT_ROLE`; `<sample method>` is `BERNOULLI | SYSTEM`.
 - **No non-standard syntax:** no `CREATE`/`DROP INDEX`, `ALTER TABLE ... RENAME`,
   `FOR SHARE` or `NATURAL CROSS JOIN` (the grammar has no such alternative).
+- **5.4 name arity is enforced per production.** `pSchemaQualifiedNameExpression`
+  (three parts) is shared, but narrower slots use a dedicated parser in
+  `ExpressionParser.fs`: `pIdentifierNameExpression` (bare `<identifier>` — the 20.15
+  `<statement name>` and `<non-extended descriptor name>`, so `EXECUTE a.b` is
+  rejected); `pSchemaNameExpression` / `pCharacterSetNameExpression` (≤ 2 parts —
+  `DROP SCHEMA`, `CREATE SCHEMA … DEFAULT CHARACTER SET`, 11.41/11.42, the 11.43
+  `FOR` slot, the 6.1 `CHARACTER SET` modifier; `<collation name>` keeps three);
+  `pLocalQualifiedNameExpression` (`<local qualified name>`, every `<cursor name>`
+  slot — `MODULE.c` yes, `a.b.c` no). Checked *after* parsing (`pNameOfArity`) so the
+  failure can name the production. The other direction: `<constraint name>` (10.8) is
+  a `<schema qualified name>`, so 11.4/11.6/11.24–11.26 and 17.4 `SET CONSTRAINTS`
+  accept qualified names, and 11.8's referenced `<table name>` may be three parts.
+- **Comparison operands must be `<row value predicand>`s (8.2/7.2).**
+  `pValueExpressionChecked` rejects top-level booleans *and* terms/signed primaries on
+  either side (`isRowValuePredicand`): `WHERE 1 + 1 = 2`, `c = a + b`, `WHERE -x = 1`
+  are rejected while `(1 + 1) = 2` stays legal — the `Parenthesized` node counts as a
+  6.39 `<boolean predicand>`. A `<period predicate>`'s left operand is checked
+  post-parse (`findExpressionViolationIn`) since it parses before the suffix runs.
 - **`pRoutineInvocation` is gated by the reserved *function* keyword whitelist**
   (`functionKeywords` in `Lexer.fs`), so `EXISTS`/`UNIQUE`/`PERIOD`-style words cannot
   degrade to `FunctionCall`; `OVER`/`WITHIN GROUP` suffixes are enforced, and dedicated
@@ -66,253 +91,57 @@ The parser rejects what the standard does not permit, even in common vendor dial
   invariant-culture; nothing throws); datetime and interval values are range-checked
   (hours 0–23, time zone within ±14:00…). Calendar validity (February 30) is
   deliberately *not* checked — semantic.
+- **`CAST(x AS <domain name>)` (6.13) is *not* a deviation:** `<domain name>` is a
+  `<schema qualified name>` and `pDataType` accepts any identifier chain as a UDT, so
+  `CAST(x AS my_domain)` parses. No change required.
 - **Trade-off:** real-world SQL that omits standard-mandated clauses fails to parse
   (consumers would layer extensions on top), but an accepted string is much more likely
   to be valid SQL-2016.
 
 ## Intentional deviations from SQL:2016
 
-A single source of truth for every place the parser knowingly departs from
-`sql-2016-grammar.txt`. Each entry states the clause, the direction (extension /
-omission / relaxation / strictness) and whether it is now documented. Most are
-cross-referenced from the conformance sections above; the items marked **(new)** were
-previously only a code comment or entirely undocumented and are recorded here per
-AGENTS.md.
+Single source of truth for every knowing departure from `sql-2016-grammar.txt`, by
+direction.
 
 ### Extensions (accept syntax the grammar does not)
+
 - `BEGIN ATOMIC` in routine bodies (11.60) and triggers (11.49) — a compound-statement
-  extension. Documented under the 2026-09-25 sweep.
-- `REVOKE … HIERARCHY OPTION FOR` (12.7) — extension. Documented under the 2026-09-25 sweep.
-- Trailing `--` comment without a final newline (5.2) — extension; `<newline>` is
-  implementation-defined, which makes it defensible. Documented under the 2026-09-25 sweep.
+  extension; 13.4 has no `<compound statement>`.
+- `REVOKE … HIERARCHY OPTION FOR` (12.7).
+- Trailing `--` comment without a final newline (5.2) — `<newline>` is
+  implementation-defined, which makes it defensible.
 - 20.15 dynamic `DECLARE CURSOR` is reachable through `parseStatement` although the
-  grammar places `<declare cursor>` only in §21. Documented under "Entry points".
+  grammar places `<declare cursor>` only in §21.
 - Flat `StatementKind` DU vs the grammar's nested dispatch — structural relaxation.
-  Documented under "Module organisation".
 
 ### Omissions (grammar productions not implemented)
-- `<direct implementation-defined statement>` (22.1) is not wired into `pDirectSqlStatement`
-  — there are no implementation-defined statements to accept. **(new)** No implementation
-  exists; recorded here so the gap is explicit rather than a silent code comment.
-- **The five `<SQL dynamic data statement>` alternatives 20.19/20.20/20.22/20.23/20.24
-  (dynamic OPEN/FETCH/CLOSE/DELETE-positioned/UPDATE-positioned) are now wired into
-  `pSqlDynamicStatement`.** Parsers for 20.19 (`pDynamicOpenStatement`),
-  20.20 (`pDynamicFetchStatement`) and 20.22 (`pDynamicCloseStatement`) live in
-  `DynamicParser.fs` and accept the 20.17 `<extended cursor name>`
-  (`[ <scope option> ] <simple value specification>`); the existing
-  `pUpdateStatement` / `pDeleteStatement` from `DataManipulationParser.fs` already parse
-  the 20.23 / 20.24 positioned forms (routed via `pSqlDataChangeStatement` for 13.4) — the
-  dynamic dispatch reroutes them with `rejectOmittedTarget` so 20.25 / 20.27 (omitted
-  target, preparable-only) still fail. New AST variants
-  (`DynamicOpen`, `DynamicFetch`, `DynamicClose`) carry the 20.17 scope option. To stop
-  the static 14.4 / 14.5 / 14.6 `<cursor name>` from silently absorbing inputs that the
-  20.x dispatch should own (e.g. `FETCH cur INTO DESCRIPTOR d`), `DESCRIPTOR` is now a
-  reserved word per SQL-2016 5.2 — the existing 14.5 form rejects it and the 20.20 dynamic
-  path takes over.
-- `<embedded variable specification>` (6.4) is not parsed by `pGeneralValueSpecification` /
-  `pSimpleValueSpecification`. **(new)** Embedded SQL is out of scope; the host-language
-  name forms degrade to host parameters elsewhere (see "Entry points"). Recorded here.
-- 11.4 optional `<data type or domain name>` (typed-table columns) and the 20.x extended
-  `<SQL statement name>` / `<descriptor name>` forms — "Still open" per the 2026-09-25 sweep.
+
+- `<direct implementation-defined statement>` (22.1) is not wired into
+  `pDirectSqlStatement` — there are no implementation-defined statements to accept.
+- `<embedded variable specification>` (6.4) is not parsed by
+  `pGeneralValueSpecification` / `pSimpleValueSpecification` — embedded SQL is out of
+  scope; host-language names degrade to host parameters elsewhere.
+- 11.4's optional `<data type or domain name>` (typed-table columns) is unreachable in
+  our AST: typed-table columns route through `ColumnOptions` (no type slot), and
+  making the slot optional in `pColumnDefinition` would let the 11.3
+  `( <column name list> )` slot misread `CREATE TABLE t (id, name) AS SELECT …`.
 - 14.1 `<declare cursor>` / 14.16 `<temporary table declaration>` are parsed but
-  unreachable — documented under "Entry points".
+  unreachable — see "Entry points".
 
-### Relaxations (accept input the grammar rejects) — fixed or kept
-- **Static `FETCH` (14.5) no longer accepts the descriptor clause.** Before this change
-  `pFetchStatement` reused `pOutputUsingClause` (which admits `INTO [ SQL ] DESCRIPTOR`),
-  so `FETCH cur INTO DESCRIPTOR d` parsed as a 14.5 statement. The descriptor form belongs
-  to the dynamic 20.20 `<output using clause>`; the static form now uses a dedicated
-  `pFetchIntoClause` that accepts only `INTO <fetch target list>`. **(new, fixed 2026-09-26)**
-- `TRUNCATE` (14.10) is dispatched through `pSqlSchemaStatement` (an 11.x dispatcher) as a
-  routing convenience, although it is not an 11.x `<schema element>`. **(new)** Kept; the
-  comment in `SqlParser.fs` is the only other record.
+### Relaxations (accept input the grammar rejects)
+
 - Predicate atoms / interval / multiset-operand widening (6.3/6.37/6.43) and `<when
-  operand>` accepting predicate part-2 (6.12) — documented under "Interval / point-in-time
-  parsing" and the 2026-09-25 sweep.
-- `<embedded variable name>` degrades to a host parameter (6.4/14.17) — documented under
-  "Entry points".
+  operand>` accepting predicate part-2 (6.12) — see "Interval / point-in-time parsing"
+  and "Predicate, comparison and period operands".
+- `<embedded variable name>` degrades to a host parameter (6.4/14.17).
 
-### Strictness (reject input the grammar permits) — fixed or kept
-- **`SET CONSTRAINTS` (17.4) now accepts a qualified `<constraint name>`** (`<schema
-  qualified name>`, 5.4, one to three parts). Before this change it used `pIdentifierExpression`
-  and rejected `SET CONSTRAINTS s.c`. **(new, fixed 2026-09-26)**
-- 5.4 name-arity caps, closed sets (grantor 12.3, default option 11.5), mandatory clauses,
-  boolean-operand rejection (8.2/8.9), `NORMALIZE` length (6.32), point-in-time boolean-free
-  (6.35) — documented under "Grammar-faithful strictness" and the 2026-09-25 sweep.
-- 10.4 `<table argument>` clause requirement, 11.3 as-subquery parentheses, 20.11 using
-  argument — documented under the 2026-09-25 sweep.
+---
 
-### Conformance note
-`CAST(x AS <domain name>)` (6.13 `<cast target>`) is **not** a deviation: `<domain name>`
-is a `<schema qualified name>` and `pDataType` already accepts any identifier chain as a
-user-defined type, so `CAST(x AS my_domain)` parses (as a UDT). No change required.
+The remaining known departures are kept deliberately and documented where they arise:
+the `TRUNCATE` routing above, the §6.37-in-a-value-expression blind spot ("Deliberate
+deviations" below), and the syntactic ambiguities listed there.
 
-## 2026-09 SQL:2016 conformance changes
-
-- **5.4 name arity is enforced per production.** `pSchemaQualifiedNameExpression` (three
-  parts) is shared, but the slots whose production is narrower now use a dedicated parser
-  in `ExpressionParser.fs`:
-  - `pIdentifierNameExpression` — a bare `<identifier>`. `<statement name>` (20.15) and
-    `<non-extended descriptor name>` (hence `<conventional descriptor name>`) are this
-    production, so `EXECUTE a.b`, `DEALLOCATE PREPARE a.b` and
-    `ALLOCATE SQL DESCRIPTOR a.b` are rejected.
-  - `pSchemaNameExpression` / `pCharacterSetNameExpression` — at most two parts. Applies
-    to `DROP SCHEMA` (11.2), `CREATE SCHEMA … DEFAULT CHARACTER SET` (11.1), the
-    `CREATE`/`DROP CHARACTER SET` slots (11.41/11.42), the `CREATE COLLATION … FOR` slot
-    (11.43) and the 6.1 `<character string type>` `CHARACTER SET` modifier. The
-    `<collate clause>` slots keep three parts — `<collation name>` *is* a
-    `<schema qualified name>`.
-  - `pLocalQualifiedNameExpression` — `<local qualified name>`, hoisted out of
-    `DataManipulationParser.fs` and reused by every `<cursor name>` slot (14.1/14.4/14.5/
-    14.6, 14.8/14.13, 20.10, 20.15, 20.18). `MODULE.c` is a cursor name, `a.b.c` is not.
-  Arity is checked *after* parsing (`pNameOfArity`) because the AST node is shared with
-  the three-part form, so the failure message can name the production.
-  The other direction was widened in the same pass: `<constraint name>` (10.8) is a
-  `<schema qualified name>`, so 11.4/11.6/11.24/11.25/11.26 accept qualified names, and
-  11.8's `<referenced table and columns>` is a `<table name>` — a `<local or schema
-  qualified name>` whose qualifier may itself be a `<schema name>`, i.e. three parts.
-- **20.15 uses `<statement name>`, not `<extended statement name>`.** The grammar has
-  both (`<statement name> ::= <identifier>`, `<extended statement name> ::=
-  [ <scope option> ] <simple value specification>`); 20.15 takes the plain one, so
-  `DECLARE c CURSOR FOR LOCAL :s` is rejected while 20.17's `ALLOCATE … FOR LOCAL :s`
-  still works. The AST keeps the `ExtendedName` record with `Scope = None`.
-- **12.3 `<object name>` now accepts both `<specific routine designator>` alternatives.**
-  `SPECIFIC <routine type> <specific name>` and the `FOR <schema-resolved user-defined
-  type name>` tail were missing, so `GRANT EXECUTE ON SPECIFIC FUNCTION f TO u` and
-  `GRANT EXECUTE ON ROUTINE add FOR t TO u` were rejected. `StatementKind.GrantRoutine` /
-  `RevokeRoutine` now carry the whole `SpecificRoutineDesignator` (instead of a bare
-  `RoutineType`), so the `SPECIFIC` keyword and the `FOR` type survive. A literal variant
-  `pTypedSpecificRoutineDesignator` (mandatory `<routine type>`, no `<data type list>`) was
-  added because the permissive one accepts a bare name and would swallow the kind-keyword
-  and `[ TABLE ] <table name>` alternatives of the same `<object name>`.
-- **11.3 `<as subquery clause>` requires the `<subquery>` parentheses.** The production is
-  `AS <table subquery>` and `<table subquery> ::= <subquery> ::= ( <query expression> )`,
-  so `CREATE TABLE t AS (SELECT 1 FROM u) WITH DATA` is the conforming form and
-  `CREATE TABLE t AS SELECT 1 FROM u WITH DATA` is rejected. This is a real-world
-  regression risk (most dialects write the bare form), accepted for conformance; the
-  view form (11.32) is unaffected because it takes a `<query expression>` directly.
-
-- 6.4 `<SQL parameter reference>` is represented by the existing `Identifier` /
-  `ColumnReference` AST; parameter-vs-column resolution remains semantic. 6.5 shares
-  `<implicitly typed value specification>` and `<contextually typed value specification>`
-  across CAST, SQL arguments, INSERT/MERGE values, UPDATE/merge assignment, and
-  parameter defaults. `ARRAY[]` / `MULTISET[]` therefore use the existing constructor
-  nodes rather than adding an information-losing marker.
-- Boolean-free parser layers are separate from the full expression operator parser.
-  This keeps non-boolean slots (character/numeric/JSON/point-in-time) from consuming
-  comparisons or predicate suffixes while preserving the full parser for search conditions.
-  ORDER BY sort keys are NOT in that set: 10.10 `<sort key>` is a `<value expression>`, so
-  the full parser serves them and boolean sort keys are accepted.
-- 6.10 is represented by the existing `WindowFunction` record. `RESPECT NULLS` /
-  `IGNORE NULLS` are parsed for LEAD/LAG, FIRST_VALUE/LAST_VALUE and NTH_VALUE;
-  `FROM FIRST` / `FROM LAST` are parsed for NTH_VALUE only. Both modifier choices are
-  retained in the AST, and unsupported functions or invalid modifier ordering are rejected.
-  The grammar-specific aggregate families are validated in the shared routine validation
-  block.
-- `JSON_ARRAY` now has an additive query-constructor AST case; query bodies remain
-  opaque to expression traversal, like the other query-bearing constructor nodes.
-- 6.32 `<normalize function result length>` gets a typed `NormalizeResultLength`
-  (`<character length> | <character large object length>`) instead of a free expression,
-  so `NORMALIZE(x, NFC, 10 + 1)` is rejected. A bare integer is ambiguous between the
-  two alternatives, so `<character length>` wins and the large-object case is reached
-  only by a `<multiplier>` (`2K OCTETS`).
-- 10.9 `<listagg overflow clause>` is a seventh `FunctionCall` field
-  (`ListaggError | ListaggTruncate of Expression option * bool`). It is parsed inside
-  the argument parentheses, per the production, and rejected for any routine other than
-  `LISTAGG`.
-
-## 2026-09-25 SQL:2016 conformance sweep
-
-- **5.2 `<separator>` now includes comments.** `ws` — the separator consumer that follows
-  every token — consumes `<simple comment>` and `<bracketed comment>` as well as white
-  space, so `SELECT/*c*/1` is `SELECT 1`. A `<simple comment>` is terminated by LF, CR or
-  CRLF and, as a documented extension, by the end of the input, so a trailing `-- …`
-  comment needs no final newline: `<newline>` is implementation-defined (5.2), which is
-  what makes that extension defensible. Bracketed comments are NOT nested — the checked-in
-  grammar file defers the nesting rule to the Syntax Rules, which are not part of this
-  repository, so the conservative reading is kept; the old 10000-character search limit is
-  gone, and each comment alternative is atomic so an unterminated `/*` backtracks cleanly.
-- **10.10 `<sort key>` is a `<value expression>`** — boolean sort keys are accepted.
-- **6.30/6.32 numeric slots** (`<start position>`, `<regex occurrence>`,
-  `<regex capture group>`) use the numeric value expression parser.
-- **10.9**: `COUNT ( <asterisk> )` rejects a `<set quantifier>`; `<listagg set function>`
-  accepts one (the binary set functions still do not). 6.10 `<lead or lag function>`'s
-  `<offset>` is an `<exact numeric literal>`, so exponent notation is rejected —
-  approximate literals are a distinct `Literal.ApproximateNumber` case.
-- **6.10 `<window row pattern measure>`** — a bare `<measure name>` followed by OVER is a
-  `<window function>`; it reuses `WindowFunction` with an empty argument list.
-- **11.8**: `<references specification>` is shared by 11.4 and 11.8 and now carries
-  `[ MATCH <match type> ]`, the referencing/referenced `<period specification>`s, and a
-  `<table name>` (5.4, at most two parts) for the referenced table.
-- **11.51** `<partial method specification>` requires a `<returns clause>` and stores the
-  full 11.60 `<returns type>`; 11.61 `NAME <external routine name>` accepts the 5.4
-  `<character string literal>` form (`Choice<string, Expression>`).
-- **5.4 `<schema name>`** is at most two parts, so `CREATE SCHEMA cat.sch.name` is rejected.
-- **14.3 `<cursor specification>`** — `parse` (22.2) accepts `[ <updatability clause> ]`
-  after a query expression and stores it on the innermost `SelectStatement.Locking`
-  (SQL-2016 has no `<lock clause>` in a `<query expression>`, so the slot was free). A
-  subquery or `INSERT ... SELECT` is a bare `<query expression>` and does not accept it.
-- **20.25/20.27 are preparable-only.** The omitted `<target table>` forms are the text
-  handed to PREPARE, so both entry points reject them (13.4 lists 20.23/20.24, which carry
-  a target). The DML parsers keep the form for a future preparable-statement surface.
-- **20.4** GET DESCRIPTOR targets are `<simple target specification>`s (host parameters
-  allowed); **23.1** GET DIAGNOSTICS targets are the same production, so `?` is rejected.
-- **20.11 `<using argument>` is a `<general value specification>`** (6.4) — no `<literal>`,
-  so `OPEN c USING 1` is rejected; host parameters (with an indicator), `?`, identifiers
-  and the CURRENT_*/USER/VALUE keywords are accepted.
-- **14.15 `<update target>`** admits the array-element form in all three set-clause shapes.
-- **Still open:** 11.4's optional `<data type or domain name>` (typed-table columns) and
-  the 20.x extended `<SQL statement name>` / `<descriptor name>` forms
-  (`[ GLOBAL | LOCAL ] :c`, `PTF :c`), which need scope information the
-  `Expression`-shaped name fields cannot hold. 20.2/20.3 now parse the plain
-  `<identifier>` form only, which is the non-extended half of that gap.
-
-## 2026-09-27 SQL:2016 conformance changes (continued)
-
-- **20.2 / 20.3 / 20.4 / 20.5 / 20.6 / 20.7 / 20.9 / 20.10 / 20.11 / 20.12 / 20.13
-  extended statement/descriptor/cursor names.** Before this change the
-  `<SQL statement name>`, `<conventional descriptor name>`, and `<cursor name>` slots
-  of §20 took a bare `Expression`, so the 20.17 `<extended statement name>` /
-  `<extended descriptor name>` / `<extended cursor name>` form
-  (`[ GLOBAL | LOCAL ] <simple value specification>`) was not representable. The
-  AST now carries `ExtendedName = { Scope: ScopeOption option; SimpleValue: Expression }`
-  on `Prepare`, `DeallocatePrepare`, `Execute`, `DescribeStatement` (both the
-  `<described object>` name and the `<using descriptor>`), `AllocateDescriptor`,
-  `DeallocateDescriptor`, `GetDescriptor`, `SetDescriptor`,
-  `CopyDescriptorStatement.Source`, and `UsingClause.UsingDescriptor`. The parsers in
-  `DynamicParser.fs` and `DataManipulationParser.fs` consume `pExtendedName`
-  (`[ <scope option> ] <simple value specification>`, hoisted to
-  `DataManipulationParser.fs` because the 20.10/20.11 `<using descriptor>` tail
-  compiles first). The CURSOR branch of 20.10 keeps the strict 5.4
-  `<local qualified name>` parser (`MODULE.cur` stays legal; the 20.17 extended
-  form is reserved for 20.17 ALLOCATE / 20.15 DECLARE). `PTF :c` keeps its
-  separate `pTargetDescriptorName` parser (used by 20.6 `<copy descriptor statement>`
-  and 20.28 `<pipe row statement>`). The 20.15 `<dynamic declare cursor>` strictness
-  (plain `<statement name>` only — see [trade-off.md](trade-off.md)) is preserved
-  per spec.
-
-## 2026-09-27 SQL:2016 conformance changes
-
-- **8.2 `<comparison predicate>` rejects term operands on EITHER side.** Before this change
-  `pValueExpressionChecked` checked only `isBooleanTopLevel` on the LHS and RHS, so
-  `WHERE 1 + 1 = 2` (and `WHERE x = a + 1`, `WHERE -x = 1`) parsed as a comparison even
-  though per 7.2 `<row value predicand>` is a `<value expression primary>`, which a term
-  (6.29 `<term>`) or signed factor (6.29 `<factor>`) is not. The check now uses
-  `isRowValuePredicand` to flag `BinaryOp(Add | Subtract | Multiply | Divide | Concatenate, _, _)`
-  and `UnaryOp(Plus | Minus, _)` operands, so `a + b = c`, `c = a + b`, and
-  `1 = ALL (SELECT 1 + 1 FROM u)` are rejected while `(1 + 1) = 2` and `1 = (2 - 1)`
-  stay legal (the `Parenthesized` node keeps the parens and counts as a 6.39
-  `<boolean predicand>`). The historical lenient form was documented in
-  [gotchas.md](gotchas.md) as "out of scope for the 2026-09 conformance sweep" and is
-  removed; existing tests had no positive coverage that relied on term-as-comparison-operand.
-- **11.4 typed-table `<data type or domain name>` is unreachable in our AST.** The
-  optional slot exists in 11.4 for all `<column definition>`s, but typed-table columns
-  route through `ColumnOptions` (no type slot — see `Ast.fs`), so the optional case
-  is not reachable. The required-type variant in `pColumnDefinition` is also load-bearing
-  for the 11.3 `<as subquery clause>` dispatch: making the slot optional here would
-  let `CREATE TABLE t (id, name) AS SELECT …` be misread by the
-  `( <column name list> )` slot, so the lenient AST change is rejected.
-
+## Expression and type parsing
 
 - **Types avoid left recursion by construction** — `pDataTypeElement` + a folded
   `pCollectionType` chain, so typo'd names fail cleanly and `INT ARRAY ARRAY` works.
@@ -320,13 +149,19 @@ user-defined type, so `CAST(x AS my_domain)` parses (as a UDT). No change requir
   grammar's model, `CharacterTypeWithModifiers` carries `[ CHARACTER SET ] [ COLLATE ]`,
   and a `<collate clause>`'s position decides between that 6.1 type-level slot and the
   enclosing rule's `Collation` field.
+- **Boolean-free parser layers are separate from the full expression operator parser**,
+  keeping non-boolean slots (character/numeric/JSON/point-in-time) from consuming
+  comparisons or predicate suffixes. ORDER BY sort keys are NOT in that set: 10.10
+  `<sort key>` is a `<value expression>`, so boolean sort keys are accepted.
+  6.30/6.32 numeric slots (`<start position>`, `<regex occurrence>`,
+  `<regex capture group>`) use the numeric value expression parser.
 - **Quantified comparison uses an intermediate node** — `ANY/SOME/ALL (subquery)` parses
   as a term and the comparison-operator mapping rewrites it; `findExpressionViolationIn`
   rejects any survivor. One AST case instead of 18 operator×quantifier infixes.
 - **Reserved built-ins get dedicated AST cases** (datetime functions, `SUBSTRING FROM/FOR`,
   navigation, `RUNNING`/`FINAL`, …); the four regex functions (6.30/6.32) share one
   argument record, but each production's parser only accepts its own optional clauses
-  (`WITH` / `OCCURRENCE` / `GROUP` — grammar `sql-2016-grammar.txt` 1819–2088).
+  (`WITH` / `OCCURRENCE` / `GROUP`).
 - **Postfix constructs reuse existing layers** (`COLLATE` as predicate suffix, multiset
   set-ops as a postfix fold, `<time zone specifier>` over `<interval primary>`) — slightly
   more permissive parents, no new precedence levels.
@@ -341,69 +176,17 @@ user-defined type, so `CAST(x AS my_domain)` parses (as a UDT). No change requir
 - **JSON.** Paths are opaque strings; JSON argument slots use the boolean-free
   `pNonBooleanValueExpression`; `FORMAT <representation>` is preserved on context and
   passing arguments; behaviour DUs are split (`JsonValueBehavior` / `JsonQueryBehavior`)
-  and `JsonType*` prefixed against `ExpressionKind` clashes.
+  and `JsonType*` prefixed against `ExpressionKind` clashes. `JSON_ARRAY` has an
+  additive query-constructor AST case; query bodies remain opaque to expression
+  traversal, like the other query-bearing constructor nodes.
 - **Host-language names are not modelled:** `<embedded variable name>` degrades to the
   host-parameter form (`:name` / `?`) the slot already accepts (6.4, 14.17, 20.4).
-
-## Query AST shape
-
-- **`FROM` is a `TableSource list`** (7.5) — the comma stays distinct from `CROSS JOIN`;
-  7.4 `<table expression>` requires its `<from clause>`, so bare `SELECT 1` is rejected.
-- **Set-operation tails live in a `QueryExpression` case** carrying
-  `ORDER BY`/`OFFSET`/`FETCH`/`LOCKING`; plain `SELECT ... ORDER BY` folds into
-  `SelectStatement`; `INTERSECT` binds tighter than `UNION`/`EXCEPT`.
-- **`GROUP BY` is `GroupingElement list`** so `(a, b)` is one grouping set.
-- **Correlation handling per source**: `Only`/`DataChangeDelta` optional aliases,
-  `Lateral`/`Unnest` mandatory, `TableSample` wraps a `TableSource`; parenthesized table
-  refs are only `<joined table>`s.
-- **`TABLE (expr)` is disambiguated by shape** (`PtfTable` iff `FunctionCall`) — no
-  parse-only classifier can do better.
-
-## DDL and DML AST shape
-
-- **Constraints**: `ColumnDefinition.Constraints` plus derived convenience accessors
-  (redundant by design); `ColumnConstraintKind` has no bare `NULL`; 11.4's slot is one
-  `opt` over a `Choice` (`GENERATED ALWAYS AS IDENTITY DEFAULT 5` rejected);
-  `ConstraintCharacteristics` is three `bool option`s in grammar order.
-- **`CREATE TABLE`** carries optional clauses as dedicated fields (`Under`/`Like`/
-  `Periods`/`AsQuery`/`TypedElements`…) rather than exploding DU cases; `<table element>`
-  is a four-way `Choice`.
-- **Sequence options** are one shared `SequenceOption` DU with per-slot subsets (no
-  option kind leaks into the wrong clause).
-- **`ALTER TABLE`** models every 11.10 action; `<drop behavior>` is a `bool`;
-  `AddTablePeriod`'s column list holds exactly 0 or 2 entries (11.27 requires both).
-- **DML**: `SetClause` tried MultipleSet → MutatedSet → SingleSet; `DEFAULT` is only an
-  insert/update value, never a general expression; `DmlTarget = TableTarget |
-  OmittedTarget` guards positioned forms; `ONLY ( t )` applies to UPDATE/DELETE/MERGE,
-  not `INSERT` (14.11 has no ONLY form).
-- **Flat `StatementKind` cases** for every `DROP` variant and every 12.3 `<object name>`
-  kind of `GRANT`/`REVOKE` (`GrantTable`, …, `GrantRoutine`), wrapping
-  shared payload records; `GrantRoles`/`RevokeRoles` stay separate. `PrivilegeSelectTarget`
-  separates method lists from column lists.
-
-## Routines, triggers and types
-
-- **One `CreateRoutine` record** for procedures/functions (`Returns = None` ⇔ procedure);
-  `CREATE METHOD` stays separate (no `<routine characteristics>` slot there).
-- **11.60/11.61 share one duplicate check but have different characteristic sets**
-  (`NAME` is 11.61-only; `ALTER ROUTINE` rejects `SPECIFIC`/deterministic/savepoint-level).
-- **`RoutineBody`** = `SqlRoutine` | `ExternalRoutine` | `PolymorphicTableFunction` |
-  `BeginAtomic` (an extension — 13.4 has no `<compound statement>`); the PTF branch is
-  tried first so a body starting with `DESCRIBE` is not read as a §20 statement.
-- **`<specific routine designator>` is one record** shared by every designator slot
-  (ALTER ROUTINE, CREATE CAST, ORDERING, TRANSFORM, PTF components, privilege method
-  lists); `IsSpecific`/`RoutineType` are optional because a bare name is legal — hence
-  `pPrivilegeMethodItem`'s re-check (see gotchas.md).
-- **Parameter/return types**: generic-table and descriptor types are tried before
-  `<data type>` because `DESCRIPTOR` is non-reserved; the parameter name backtracks, so
-  `IN mytype` is an unnamed parameter of type `mytype`, `IN p1 mytype` the named form.
-
-## Lexical modelling
-
-- **SQL terminals are modelled as they are used (5.1)** — only `{ } ^ | $` and the
-  `{-`/`-}` compound tokens (row patterns) get parsers; `<percent>` / `<reverse solidus>`
-  occur only inside opaque embedded languages (8.6 regex, 9.38/9.39 JSON path) or
-  nowhere, so parsers for them would only suggest the parser understands that text.
+- **6.4 `<SQL parameter reference>` is represented by the existing `Identifier` /
+  `ColumnReference` AST**; parameter-vs-column resolution remains semantic. 6.5 shares
+  `<implicitly typed value specification>` and `<contextually typed value specification>`
+  across CAST, SQL arguments, INSERT/MERGE values, UPDATE/merge assignment, and
+  parameter defaults. `ARRAY[]` / `MULTISET[]` therefore use the existing constructor
+  nodes rather than adding an information-losing marker.
 
 ## NULL is a null specification, not a literal
 
@@ -438,20 +221,135 @@ of flattening, so `(1 = 1)` is a `<boolean predicand>` and `x BETWEEN (1 = 1) AN
   parenthesized items are NOT accepted there), `pValueOperand` = value-shaped
   (LIKE/SIMILAR/regex pattern, escape, FLAG, multiset operands reject explicit rows).
   Type-level distinctions stay unchecked — semantic.
-- **Comparison / period**: `pValueExpressionChecked` rejects top-level boolean operands of
-  comparisons; a `<period predicate>`'s left operand is checked post-parse
-  (`findExpressionViolationIn`) since it parses before the suffix runs.
 - **Desugars narrow the checks deliberately**: `COALESCE` → searched case with `IsNull`
   conditions, `NULLIF` → `BinaryOp(Equal, …)` — hence parse-time gating for the null
   predicate and a top-node-only comparison check (`COALESCE(1 = 2, TRUE)` and
   `NULLIF(1 = 2, 3)` stay legal).
+- **6.12 `<when operand>` part-2 forms**: `CASE x WHEN = 1 / IS NULL / BETWEEN 1 AND 2 /
+  IN (…) …` parses — the `<case operand>` supplies part 1, so such a case is represented
+  as a **searched case** (each simple when clause becomes the OR of its predicates);
+  not round-trippable, no AST case added. `pPredicateImpl`'s `forWhenOperand` flag
+  carries 6.12's narrower alternative list.
 
-## 6.12 `<when operand>` part-2 forms
+## Query AST shape
 
-`CASE x WHEN = 1 / IS NULL / BETWEEN 1 AND 2 / IN (…) …` parses: the `<case operand>`
-supplies part 1, so such a case is represented as a **searched case** (each simple when
-clause becomes the OR of its predicates) — not round-trippable, no AST case added.
-`pPredicateImpl`'s `forWhenOperand` flag carries 6.12's narrower alternative list.
+- **`FROM` is a `TableSource list`** (7.5) — the comma stays distinct from `CROSS JOIN`;
+  7.4 `<table expression>` requires its `<from clause>`, so bare `SELECT 1` is rejected.
+- **Set-operation tails live in a `QueryExpression` case** carrying
+  `ORDER BY`/`OFFSET`/`FETCH`/`LOCKING`; plain `SELECT ... ORDER BY` folds into
+  `SelectStatement`; `INTERSECT` binds tighter than `UNION`/`EXCEPT`.
+- **`GROUP BY` is `GroupingElement list`** so `(a, b)` is one grouping set.
+- **Correlation handling per source**: `Only`/`DataChangeDelta` optional aliases,
+  `Lateral`/`Unnest` mandatory, `TableSample` wraps a `TableSource`; parenthesized table
+  refs are only `<joined table>`s.
+- **`TABLE (expr)` is disambiguated by shape** (`PtfTable` iff `FunctionCall`) — no
+  parse-only classifier can do better.
+- **14.3 `<cursor specification>`** — `parse` (22.2) accepts `[ <updatability clause> ]`
+  after a query expression and stores it on the innermost `SelectStatement.Locking`
+  (SQL-2016 has no `<lock clause>` in a `<query expression>`, so the slot was free). A
+  subquery or `INSERT ... SELECT` is a bare `<query expression>` and does not accept it.
+
+## DDL and DML AST shape
+
+- **Constraints**: `ColumnDefinition.Constraints` plus derived convenience accessors
+  (redundant by design); `ColumnConstraintKind` has no bare `NULL`; 11.4's slot is one
+  `opt` over a `Choice` (`GENERATED ALWAYS AS IDENTITY DEFAULT 5` rejected);
+  `ConstraintCharacteristics` is three `bool option`s in grammar order.
+  `<references specification>` is shared by 11.4 and 11.8 and carries
+  `[ MATCH <match type> ]`, the referencing/referenced `<period specification>`s, and a
+  `<table name>` (5.4, at most two parts) for the referenced table.
+- **`CREATE TABLE`** carries optional clauses as dedicated fields (`Under`/`Like`/
+  `Periods`/`AsQuery`/`TypedElements`…) rather than exploding DU cases; `<table element>`
+  is a four-way `Choice`. The 11.3 `<as subquery clause>` requires the `<subquery>`
+  parentheses (`AS (SELECT …)`, never bare `AS SELECT …`) — a real-world regression
+  risk accepted for conformance; the view form (11.32) is unaffected.
+- **Sequence options** are one shared `SequenceOption` DU with per-slot subsets (no
+  option kind leaks into the wrong clause).
+- **`ALTER TABLE`** models every 11.10 action; `<drop behavior>` is a `bool`;
+  `AddTablePeriod`'s column list holds exactly 0 or 2 entries (11.27 requires both).
+- **DML**: `SetClause` tried MultipleSet → MutatedSet → SingleSet; `DEFAULT` is only an
+  insert/update value, never a general expression; `DmlTarget = TableTarget |
+  OmittedTarget` guards positioned forms; `ONLY ( t )` applies to UPDATE/DELETE/MERGE,
+  not `INSERT` (14.11 has no ONLY form); 14.15 `<update target>` admits the
+  array-element form in all three set-clause shapes.
+- **Flat `StatementKind` cases** for every `DROP` variant and every 12.3 `<object name>`
+  kind of `GRANT`/`REVOKE` (`GrantTable`, …, `GrantRoutine`), wrapping
+  shared payload records; `GrantRoles`/`RevokeRoles` stay separate. `PrivilegeSelectTarget`
+  separates method lists from column lists. 12.3's routine alternative carries the whole
+  `SpecificRoutineDesignator` (`SPECIFIC <routine type> …`, `… FOR <type>`), with a
+  literal variant `pTypedSpecificRoutineDesignator` (mandatory `<routine type>`, no
+  `<data type list>`) so the permissive parser cannot swallow the kind-keyword and
+  `TABLE` alternatives of the same `<object name>`.
+
+## Routines, triggers and types
+
+- **One `CreateRoutine` record** for procedures/functions (`Returns = None` ⇔ procedure);
+  `CREATE METHOD` stays separate (no `<routine characteristics>` slot there).
+- **11.60/11.61 share one duplicate check but have different characteristic sets**
+  (`NAME` is 11.61-only; `ALTER ROUTINE` rejects `SPECIFIC`/deterministic/savepoint-level).
+  11.51 `<partial method specification>` requires a `<returns clause>` and stores the
+  full 11.60 `<returns type>`; 11.61 `NAME <external routine name>` accepts the 5.4
+  `<character string literal>` form (`Choice<string, Expression>`).
+- **`RoutineBody`** = `SqlRoutine` | `ExternalRoutine` | `PolymorphicTableFunction` |
+  `BeginAtomic` (an extension — 13.4 has no `<compound statement>`); the PTF branch is
+  tried first so a body starting with `DESCRIBE` is not read as a §20 statement.
+- **`<specific routine designator>` is one record** shared by every designator slot
+  (ALTER ROUTINE, CREATE CAST, ORDERING, TRANSFORM, PTF components, privilege method
+  lists); `IsSpecific`/`RoutineType` are optional because a bare name is legal — hence
+  `pPrivilegeMethodItem`'s re-check (see gotchas.md).
+- **Parameter/return types**: generic-table and descriptor types are tried before
+  `<data type>` because `DESCRIPTOR` is non-reserved; the parameter name backtracks, so
+  `IN mytype` is an unnamed parameter of type `mytype`, `IN p1 mytype` the named form.
+
+## §20 dynamic SQL names and dispatch
+
+- **§20 name slots carry `ExtendedName`** (`{ Scope: ScopeOption option; SimpleValue:
+  Expression }`, parsed by `pExtendedName` = `[ <scope option> ] <simple value
+  specification>`, 20.17) on `Prepare`, `DeallocatePrepare`, `Execute`,
+  `DescribeStatement`, `AllocateDescriptor`, `DeallocateDescriptor`, `GetDescriptor`,
+  `SetDescriptor`, `CopyDescriptorStatement.Source`, and `UsingClause.UsingDescriptor`.
+  Exceptions kept strict: the CURSOR branch of 20.10 uses the 5.4
+  `<local qualified name>`; 20.15 uses the plain `<statement name>` (`Scope = None`) —
+  `DECLARE c CURSOR FOR LOCAL :s` is rejected while 20.17 `ALLOCATE … FOR LOCAL :s`
+  works; `PTF :c` keeps its separate `pTargetDescriptorName` (20.6, 20.28).
+- **The five `<SQL dynamic data statement>` alternatives (20.19/20.20/20.22/20.23/20.24)
+  are wired into `pSqlDynamicStatement`.** `pDynamicOpenStatement`,
+  `pDynamicFetchStatement` and `pDynamicCloseStatement` (`DynamicParser.fs`) accept the
+  20.17 `<extended cursor name>`; the positioned 20.23/20.24 forms reuse the DML parsers
+  through `rejectOmittedTarget`. New AST variants `DynamicOpen`/`DynamicFetch`/
+  `DynamicClose` carry the scope option. To stop the static 14.4/14.5/14.6 `<cursor
+  name>` from absorbing dynamic-only inputs (e.g. `FETCH cur INTO DESCRIPTOR d`),
+  `DESCRIPTOR` is reserved per SQL-2016 5.2.
+- **Static `FETCH` (14.5) takes only `INTO <fetch target list>`** — the descriptor form
+  belongs to the dynamic 20.20 `<output using clause>`, so `pFetchIntoClause` is
+  dedicated (`DataManipulationParser.fs`).
+- **20.11 `<using argument>` is a `<general value specification>`** (6.4) — no
+  `<literal>`, so `OPEN c USING 1` is rejected; host parameters (with an indicator),
+  `?`, identifiers and the CURRENT_*/USER/VALUE keywords are accepted.
+- **20.4** GET DESCRIPTOR targets are `<simple target specification>`s (host parameters
+  allowed); **23.1** GET DIAGNOSTICS targets are the same production, so `?` is rejected.
+
+## Set functions and window functions
+
+- **6.10 is represented by the existing `WindowFunction` record.** `RESPECT NULLS` /
+  `IGNORE NULLS` are parsed for LEAD/LAG, FIRST_VALUE/LAST_VALUE and NTH_VALUE;
+  `FROM FIRST` / `FROM LAST` for NTH_VALUE only. Both modifier choices are retained,
+  unsupported functions or invalid ordering are rejected; grammar-specific aggregate
+  families are validated in the shared routine validation block. A bare `<measure
+  name>` followed by OVER (6.10 `<window row pattern measure>`) reuses `WindowFunction`
+  with an empty argument list.
+- **10.9**: `COUNT ( <asterisk> )` rejects a `<set quantifier>`; `<listagg set function>`
+  accepts one (binary set functions still do not). 6.10 `<lead or lag function>`'s
+  `<offset>` is an `<exact numeric literal>` (exponent notation rejected — approximate
+  literals are a distinct `Literal.ApproximateNumber` case).
+- **10.9 `<listagg overflow clause>`** is a seventh `FunctionCall` field
+  (`ListaggError | ListaggTruncate of Expression option * bool`), parsed inside the
+  argument parentheses and rejected for any routine other than `LISTAGG`.
+- **6.32 `<normalize function result length>`** gets a typed `NormalizeResultLength`
+  (`<character length> | <character large object length>`), so
+  `NORMALIZE(x, NFC, 10 + 1)` is rejected. A bare integer is ambiguous, so
+  `<character length>` wins and the large-object case needs a `<multiplier>`
+  (`2K OCTETS`).
 
 ## CAST FORMAT and the 10.4 descriptor argument
 
@@ -471,6 +369,19 @@ with a following clause; `expr AS name` is generalized unless a column list/clau
 follows; `COPARTITION` (non-reserved) is excluded from correlation/routine-name
 positions; reserved built-ins take value arguments only (`SUM(a, TABLE(t))` rejected).
 
+## Lexical modelling
+
+- **SQL terminals are modelled as they are used (5.1)** — only `{ } ^ | $` and the
+  `{-`/`-}` compound tokens (row patterns) get parsers; `<percent>` / `<reverse solidus>`
+  occur only inside opaque embedded languages (8.6 regex, 9.38/9.39 JSON path) or
+  nowhere, so parsers for them would only suggest the parser understands that text.
+- **5.2 `<separator>` includes comments.** `ws` consumes `<simple comment>` and
+  `<bracketed comment>` as well as white space, so `SELECT/*c*/1` is `SELECT 1`. A
+  `<simple comment>` is terminated by LF, CR or CRLF and, as a documented extension, by
+  end of input. Bracketed comments are NOT nested — the checked-in grammar file defers
+  nesting to the Syntax Rules, so the conservative reading is kept; each comment
+  alternative is atomic so an unterminated `/*` backtracks cleanly.
+
 ## Deliberate deviations (documented, not fixed)
 
 - **6.37 in a general `<value expression>`**: `INTERVAL '1' DAY * ? DAY` parses under
@@ -483,4 +394,3 @@ positions; reserved built-ins take value arguments only (`SUM(a, TABLE(t))` reje
   reported as `<single group specification>`.
 - **Opaque embedded languages**: the SQL/JSON path grammar (9.38/9.39) and XQuery-regex
   patterns (8.6) are kept as strings by design.
-- **`BEGIN ATOMIC`** bodies go beyond 13.4 (no `<compound statement>` in the grammar).
