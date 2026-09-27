@@ -18,41 +18,52 @@ let parseStatementFails (sql: string) =
 [<Fact>]
 let ``ALLOCATE DESCRIPTOR verification`` () =
     match parseStatement "ALLOCATE DESCRIPTOR d1 WITH MAX 10" with
-    | AllocateDescriptor({ Kind = Identifier "D1" }, Some { Kind = Literal(Number 10m) }) -> ()
+    | AllocateDescriptor({ Scope = None
+                           SimpleValue = { Kind = Identifier "D1" } },
+                         Some { Kind = Literal(Number 10m) }) -> ()
     | res -> Assert.Fail(sprintf "Expected AllocateDescriptor, got %A" res)
 
 [<Fact>]
 let ``ALLOCATE SQL DESCRIPTOR verification`` () =
     match parseStatement "ALLOCATE SQL DESCRIPTOR d1" with
-    | AllocateDescriptor({ Kind = Identifier "D1" }, None) -> ()
+    | AllocateDescriptor({ Scope = None
+                           SimpleValue = { Kind = Identifier "D1" } },
+                         None) -> ()
     | res -> Assert.Fail(sprintf "Expected AllocateDescriptor SQL, got %A" res)
 
 [<Fact>]
 let ``DEALLOCATE DESCRIPTOR verification`` () =
     match parseStatement "DEALLOCATE SQL DESCRIPTOR d1" with
-    | DeallocateDescriptor { Kind = Identifier "D1" } -> ()
+    | DeallocateDescriptor { Scope = None
+                             SimpleValue = { Kind = Identifier "D1" } } -> ()
     | res -> Assert.Fail(sprintf "Expected DeallocateDescriptor, got %A" res)
 
 [<Fact>]
 let ``descriptor statement names are single identifiers`` () =
-    // 20.2 / 20.3 <conventional descriptor name> ::= <non-extended descriptor name> | <extended
-    // descriptor name>, and <non-extended descriptor name> ::= <identifier> (5.4) — no qualifier.
-    parseStatementFails "ALLOCATE SQL DESCRIPTOR app.d1"
-    parseStatementFails "ALLOCATE SQL DESCRIPTOR cat.app.d1"
-    parseStatementFails "DEALLOCATE SQL DESCRIPTOR app.d1"
-    // The <descriptor name> of 20.4 / 20.5 / 20.6 also admits a <PTF descriptor name>.
+    // 5.4 <non-extended descriptor name> still rejects PTF — only the 20.28 form admits it.
     parseStatementFails "DEALLOCATE SQL DESCRIPTOR PTF d1"
+
+    // 5.4 <extended descriptor name> ::= [ <scope option> ] <simple value specification>
+    // The extended form (with or without scope, plain simple-value-spec) accepts a
+    // qualified identifier, a host parameter, etc.
+    parseStatement "ALLOCATE SQL DESCRIPTOR app.d1" |> ignore
+    parseStatement "ALLOCATE SQL DESCRIPTOR LOCAL :d" |> ignore
+    parseStatement "ALLOCATE SQL DESCRIPTOR GLOBAL app.d1" |> ignore
+    parseStatement "DEALLOCATE SQL DESCRIPTOR LOCAL :d" |> ignore
 
 [<Fact>]
 let ``GET DESCRIPTOR header verification`` () =
     match parseStatement "GET DESCRIPTOR d1 x = COUNT" with
-    | GetDescriptor({ Kind = Identifier "D1" }, GetHeader [ ({ Kind = Identifier "X" }, "COUNT") ]) -> ()
+    | GetDescriptor({ Scope = None
+                      SimpleValue = { Kind = Identifier "D1" } },
+                    GetHeader [ ({ Kind = Identifier "X" }, "COUNT") ]) -> ()
     | res -> Assert.Fail(sprintf "Expected GetDescriptor header, got %A" res)
 
 [<Fact>]
 let ``GET DESCRIPTOR VALUE verification`` () =
     match parseStatement "GET DESCRIPTOR d1 VALUE 1 x = DATA" with
-    | GetDescriptor({ Kind = Identifier "D1" },
+    | GetDescriptor({ Scope = None
+                      SimpleValue = { Kind = Identifier "D1" } },
                     GetItem({ Kind = Literal(Number 1m) }, [ ({ Kind = Identifier "X" }, "DATA") ])) -> ()
     | res -> Assert.Fail(sprintf "Expected GetDescriptor VALUE, got %A" res)
 
@@ -75,13 +86,16 @@ let ``GET DESCRIPTOR targets are simple target specifications (20.4)`` () =
 [<Fact>]
 let ``SET DESCRIPTOR header verification`` () =
     match parseStatement "SET DESCRIPTOR d1 COUNT = 2" with
-    | SetDescriptor({ Kind = Identifier "D1" }, SetHeader [ ("COUNT", { Kind = Literal(Number 2m) }) ]) -> ()
+    | SetDescriptor({ Scope = None
+                      SimpleValue = { Kind = Identifier "D1" } },
+                    SetHeader [ ("COUNT", { Kind = Literal(Number 2m) }) ]) -> ()
     | res -> Assert.Fail(sprintf "Expected SetDescriptor header, got %A" res)
 
 [<Fact>]
 let ``SET DESCRIPTOR VALUE verification`` () =
     match parseStatement "SET DESCRIPTOR d1 VALUE 1 DATA = 'x'" with
-    | SetDescriptor({ Kind = Identifier "D1" },
+    | SetDescriptor({ Scope = None
+                      SimpleValue = { Kind = Identifier "D1" } },
                     SetItem({ Kind = Literal(Number 1m) }, [ ("DATA", { Kind = Literal(String "x") }) ])) -> ()
     | res -> Assert.Fail(sprintf "Expected SetDescriptor VALUE, got %A" res)
 
@@ -91,7 +105,8 @@ let ``COPY DESCRIPTOR verification`` () =
     parseStatementFails "COPY d1 TO d2"
 
     match parseStatement "COPY d1 TO PTF ?" with
-    | CopyDescriptor { Source = { Kind = Identifier "D1" }
+    | CopyDescriptor { Source = { Scope = None
+                                  SimpleValue = { Kind = Identifier "D1" } }
                        SourceItem = None
                        Options = None
                        Target = { Kind = Parameter "?" }
@@ -101,7 +116,8 @@ let ``COPY DESCRIPTOR verification`` () =
 [<Fact>]
 let ``COPY DESCRIPTOR VALUE verification`` () =
     match parseStatement "COPY d1 VALUE 1 (NAME, TYPE) TO PTF ? VALUE 2" with
-    | CopyDescriptor { Source = { Kind = Identifier "D1" }
+    | CopyDescriptor { Source = { Scope = None
+                                  SimpleValue = { Kind = Identifier "D1" } }
                        SourceItem = Some { Kind = Literal(Number 1m) }
                        Options = Some [ "NAME"; "TYPE" ]
                        Target = { Kind = Parameter "?" }
@@ -111,20 +127,26 @@ let ``COPY DESCRIPTOR VALUE verification`` () =
 [<Fact>]
 let ``PREPARE verification`` () =
     match parseStatement "PREPARE stmt FROM 'SELECT 1'" with
-    | Prepare({ Kind = Identifier "STMT" }, None, { Kind = Literal(String "SELECT 1") }) -> ()
+    | Prepare({ Scope = None
+                SimpleValue = { Kind = Identifier "STMT" } },
+              None,
+              { Kind = Literal(String "SELECT 1") }) -> ()
     | res -> Assert.Fail(sprintf "Expected Prepare, got %A" res)
 
 [<Fact>]
 let ``PREPARE with ATTRIBUTES verification`` () =
     match parseStatement "PREPARE stmt ATTRIBUTES 'a' FROM 'SELECT 1'" with
-    | Prepare({ Kind = Identifier "STMT" }, Some { Kind = Literal(String "a") }, { Kind = Literal(String "SELECT 1") }) ->
-        ()
+    | Prepare({ Scope = None
+                SimpleValue = { Kind = Identifier "STMT" } },
+              Some { Kind = Literal(String "a") },
+              { Kind = Literal(String "SELECT 1") }) -> ()
     | res -> Assert.Fail(sprintf "Expected Prepare with attributes, got %A" res)
 
 [<Fact>]
 let ``DEALLOCATE PREPARE verification`` () =
     match parseStatement "DEALLOCATE PREPARE stmt" with
-    | DeallocatePrepare { Kind = Identifier "STMT" } -> ()
+    | DeallocatePrepare { Scope = None
+                          SimpleValue = { Kind = Identifier "STMT" } } -> ()
     | res -> Assert.Fail(sprintf "Expected DeallocatePrepare, got %A" res)
 
 [<Fact>]
@@ -132,8 +154,10 @@ let ``DESCRIBE INPUT verification`` () =
     match parseStatement "DESCRIBE INPUT stmt USING SQL DESCRIPTOR d1" with
     | Describe { IsInput = true
                  IsCursor = false
-                 Name = { Kind = Identifier "STMT" }
-                 Descriptor = { Kind = Identifier "D1" }
+                 Name = { Scope = None
+                          SimpleValue = { Kind = Identifier "STMT" } }
+                 Descriptor = { Scope = None
+                                SimpleValue = { Kind = Identifier "D1" } }
                  Nesting = None } -> ()
     | res -> Assert.Fail(sprintf "Expected Describe INPUT, got %A" res)
 
@@ -142,15 +166,18 @@ let ``DESCRIBE OUTPUT CURSOR verification`` () =
     match parseStatement "DESCRIBE OUTPUT CURSOR cur STRUCTURE USING DESCRIPTOR d1 WITH NESTING" with
     | Describe { IsInput = false
                  IsCursor = true
-                 Name = { Kind = Identifier "CUR" }
-                 Descriptor = { Kind = Identifier "D1" }
+                 Name = { Scope = None
+                          SimpleValue = { Kind = Identifier "CUR" } }
+                 Descriptor = { Scope = None
+                                SimpleValue = { Kind = Identifier "D1" } }
                  Nesting = Some true } -> ()
     | res -> Assert.Fail(sprintf "Expected Describe OUTPUT CURSOR, got %A" res)
 
     // 5.4 <cursor name> — at most two parts, MODULE being the only <local qualifier>.
     match parseStatement "DESCRIBE CURSOR MODULE.cur STRUCTURE USING DESCRIPTOR d1" with
     | Describe { IsCursor = true
-                 Name = { Kind = ColumnReference [ "MODULE"; "CUR" ] } } -> ()
+                 Name = { Scope = None
+                          SimpleValue = { Kind = ColumnReference [ "MODULE"; "CUR" ] } } } -> ()
     | res -> Assert.Fail(sprintf "Expected a MODULE-qualified cursor name, got %A" res)
 
     parseStatementFails "DESCRIBE CURSOR a.b.c STRUCTURE USING DESCRIPTOR d1"
@@ -160,8 +187,10 @@ let ``DESCRIBE statement name verification`` () =
     match parseStatement "DESCRIBE stmt USING DESCRIPTOR d1 WITHOUT NESTING" with
     | Describe { IsInput = false
                  IsCursor = false
-                 Name = { Kind = Identifier "STMT" }
-                 Descriptor = { Kind = Identifier "D1" }
+                 Name = { Scope = None
+                          SimpleValue = { Kind = Identifier "STMT" } }
+                 Descriptor = { Scope = None
+                                SimpleValue = { Kind = Identifier "D1" } }
                  Nesting = Some false } -> ()
     | res -> Assert.Fail(sprintf "Expected Describe statement name, got %A" res)
 
@@ -175,7 +204,8 @@ let ``DESCRIBE INPUT rejects CURSOR`` () =
 let ``EXECUTE verification`` () =
     // 20.11 <using argument> ::= <general value specification> — no <literal>.
     match parseStatement "EXECUTE stmt INTO a USING :x, ?" with
-    | Execute({ Kind = Identifier "STMT" },
+    | Execute({ Scope = None
+                SimpleValue = { Kind = Identifier "STMT" } },
               Some(UsingArguments [ { Kind = Identifier "A" } ]),
               Some(UsingArguments [ { Kind = Parameter ":X" }; { Kind = Parameter "?" } ])) -> ()
     | res -> Assert.Fail(sprintf "Expected Execute, got %A" res)
@@ -185,24 +215,33 @@ let ``EXECUTE verification`` () =
 [<Fact>]
 let ``EXECUTE with descriptors verification`` () =
     match parseStatement "EXECUTE stmt INTO SQL DESCRIPTOR d1 USING SQL DESCRIPTOR d2" with
-    | Execute({ Kind = Identifier "STMT" },
-              Some(UsingDescriptor { Kind = Identifier "D1" }),
-              Some(UsingDescriptor { Kind = Identifier "D2" })) -> ()
+    | Execute({ Scope = None
+                SimpleValue = { Kind = Identifier "STMT" } },
+              Some(UsingDescriptor { Scope = None
+                                     SimpleValue = { Kind = Identifier "D1" } }),
+              Some(UsingDescriptor { Scope = None
+                                     SimpleValue = { Kind = Identifier "D2" } })) -> ()
     | res -> Assert.Fail(sprintf "Expected Execute with descriptors, got %A" res)
 
 [<Fact>]
 let ``EXECUTE with descriptors without SQL keyword verification`` () =
     // 20.11/20.12 allow the SQL keyword to be omitted.
     match parseStatement "EXECUTE stmt INTO DESCRIPTOR d1 USING DESCRIPTOR d2" with
-    | Execute({ Kind = Identifier "STMT" },
-              Some(UsingDescriptor { Kind = Identifier "D1" }),
-              Some(UsingDescriptor { Kind = Identifier "D2" })) -> ()
+    | Execute({ Scope = None
+                SimpleValue = { Kind = Identifier "STMT" } },
+              Some(UsingDescriptor { Scope = None
+                                     SimpleValue = { Kind = Identifier "D1" } }),
+              Some(UsingDescriptor { Scope = None
+                                     SimpleValue = { Kind = Identifier "D2" } })) -> ()
     | res -> Assert.Fail(sprintf "Expected Execute with descriptors without SQL, got %A" res)
 
 [<Fact>]
 let ``EXECUTE without clauses verification`` () =
     match parseStatement "EXECUTE stmt" with
-    | Execute({ Kind = Identifier "STMT" }, None, None) -> ()
+    | Execute({ Scope = None
+                SimpleValue = { Kind = Identifier "STMT" } },
+              None,
+              None) -> ()
     | res -> Assert.Fail(sprintf "Expected Execute without clauses, got %A" res)
 
 [<Fact>]
@@ -210,13 +249,19 @@ let ``EXECUTE without statement name is rejected`` () = parseStatementFails "EXE
 
 [<Fact>]
 let ``SQL statement names are single identifiers`` () =
-    // <SQL statement name> ::= <statement name> | <extended statement name>, and
-    // <statement name> ::= <identifier> (5.4) — 20.9, 20.10 and 20.13.
-    parseStatementFails "DEALLOCATE PREPARE app.stmt"
-    parseStatementFails "DEALLOCATE PREPARE cat.app.stmt"
-    parseStatementFails "DESCRIBE INPUT app.stmt USING DESCRIPTOR d1"
-    parseStatementFails "DESCRIBE app.stmt USING DESCRIPTOR d1"
-    parseStatementFails "EXECUTE app.stmt"
+    // 5.4 <statement name> admits a bare identifier; the 20.17 extended form (below)
+    // accepts any <simple value specification> including qualified identifiers and
+    // host parameters, with or without a GLOBAL/LOCAL scope option. Arithmetic is
+    // still rejected because <simple value specification> does not include a term.
+    parseStatementFails "EXECUTE 1 + 1"
+
+    parseStatement "DEALLOCATE PREPARE app.stmt" |> ignore
+    parseStatement "DEALLOCATE PREPARE LOCAL :s" |> ignore
+    parseStatement "PREPARE app.stmt FROM 'SELECT 1'" |> ignore
+    parseStatement "PREPARE GLOBAL app.stmt FROM 'SELECT 1'" |> ignore
+    parseStatement "EXECUTE LOCAL app.stmt" |> ignore
+    parseStatement "DESCRIBE INPUT app.stmt USING DESCRIPTOR d1" |> ignore
+    parseStatement "DESCRIBE app.stmt USING DESCRIPTOR d1" |> ignore
 
 [<Fact>]
 let ``EXECUTE IMMEDIATE verification`` () =
@@ -248,6 +293,79 @@ let ``DYNAMIC DECLARE CURSOR verification`` () =
         Assert.Equal(None, dc.Properties.Holdability)
         Assert.Equal(None, dc.Properties.Returnability)
     | res -> Assert.Fail(sprintf "Expected DynamicDeclareCursor, got %A" res)
+
+[<Fact>]
+let ``DYNAMIC OPEN verification (20.19)`` () =
+    // 20.19 <dynamic open statement> ::= OPEN <extended cursor name> [ <input using clause> ]
+    // The plain 5.4 cursor name still routes via 14.4 (the static `Open` AST); only the
+    // 20.17 <extended cursor name> (`[ <scope option> ] <simple value specification>`)
+    // reaches `DynamicOpen`. The simple value spec is literal / host parameter / SQL
+    // parameter reference — not a column reference (per spec).
+    match parseStatement "OPEN GLOBAL :c" with
+    | DynamicOpen({ Scope = Some ScopeGlobal
+                    SimpleValue = { Kind = Parameter ":C" } },
+                  None) -> ()
+    | res -> Assert.Fail(sprintf "Expected DynamicOpen with GLOBAL scope, got %A" res)
+
+    match parseStatement "OPEN LOCAL :c" with
+    | DynamicOpen({ Scope = Some ScopeLocal
+                    SimpleValue = { Kind = Parameter ":C" } },
+                  None) -> ()
+    | res -> Assert.Fail(sprintf "Expected DynamicOpen with LOCAL scope, got %A" res)
+
+[<Fact>]
+let ``DYNAMIC FETCH verification (20.20)`` () =
+    // 20.20 <dynamic fetch statement> ::=
+    //     FETCH [ [ <fetch orientation> ] FROM ] <extended cursor name> <output using clause>
+    // The descriptor form (INTO [ SQL ] DESCRIPTOR) belongs to 20.20 — the static 14.5 path
+    // rejects DESCRIPTOR (now a reserved word) and the dynamic path takes over.
+    match parseStatement "FETCH cur INTO DESCRIPTOR d" with
+    | DynamicFetch(None,
+                   { Scope = None
+                     SimpleValue = { Kind = Identifier "CUR" } },
+                   UsingDescriptor { Scope = None
+                                     SimpleValue = { Kind = Identifier "D" } }) -> ()
+    | res -> Assert.Fail(sprintf "Expected DynamicFetch with DESCRIPTOR, got %A" res)
+
+    match parseStatement "FETCH cur INTO SQL DESCRIPTOR d" with
+    | DynamicFetch(None, _, UsingDescriptor _) -> ()
+    | res -> Assert.Fail(sprintf "Expected DynamicFetch with SQL DESCRIPTOR, got %A" res)
+
+    match parseStatement "FETCH GLOBAL :cur INTO a" with
+    | DynamicFetch(None,
+                   { Scope = Some ScopeGlobal
+                     SimpleValue = { Kind = Parameter ":CUR" } },
+                   _) -> ()
+    | res -> Assert.Fail(sprintf "Expected DynamicFetch with GLOBAL cursor, got %A" res)
+
+[<Fact>]
+let ``DYNAMIC CLOSE verification (20.22)`` () =
+    // 20.22 <dynamic close statement> ::= CLOSE <extended cursor name>
+    // Only the 20.17 <extended cursor name> reaches `DynamicClose`; the plain 5.4 cursor
+    // name routes via 14.6 (the static `Close` AST).
+    match parseStatement "CLOSE LOCAL :c" with
+    | DynamicClose { Scope = Some ScopeLocal
+                     SimpleValue = { Kind = Parameter ":C" } } -> ()
+    | res -> Assert.Fail(sprintf "Expected DynamicClose with LOCAL scope, got %A" res)
+
+[<Fact>]
+let ``DYNAMIC POSITIONED DELETE / UPDATE verification (20.23 / 20.24)`` () =
+    // 20.23 / 20.24 are syntactically identical to 14.8 / 14.13; the dynamic dispatch
+    // accepts the positioned forms (the preparable 20.25 / 20.27 forms are still rejected
+    // by `rejectOmittedTarget`).
+
+    match parseStatement "DELETE FROM t WHERE CURRENT OF c" with
+    | Delete { Cursor = Some { Kind = Identifier "C" } } -> ()
+    | res -> Assert.Fail(sprintf "Expected positioned Delete, got %A" res)
+
+    match parseStatement "UPDATE t SET x = 1 WHERE CURRENT OF c" with
+    | Update { Cursor = Some { Kind = Identifier "C" } } -> ()
+    | res -> Assert.Fail(sprintf "Expected positioned Update, got %A" res)
+
+    // 20.25 <preparable dynamic delete statement: positioned> — omitted target rejected.
+    parseStatementFails "DELETE WHERE CURRENT OF c"
+    // 20.27 <preparable dynamic update statement: positioned> — omitted target rejected.
+    parseStatementFails "UPDATE SET x = 1 WHERE CURRENT OF c"
 
     // 5.4 <cursor name> ::= <local qualified name> — at most two parts, MODULE being the
     // only <local qualifier> (MODULE is reserved, so the qualified form is the only one).

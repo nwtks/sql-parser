@@ -193,7 +193,7 @@ parser until it is assigned. Reference the forwarding *parser* instead.
 | §17 Transaction management | 8 | 0 | 0 | 0 | 8 |
 | §18 Connection management | 3 | 0 | 0 | 0 | 3 |
 | §19 Session management | 10 | 0 | 0 | 0 | 10 |
-| §20 Dynamic SQL | 26 | 0 | 0 | 1 | 27 |
+| §20 Dynamic SQL | 27 | 0 | 0 | 0 | 27 |
 | §21 Embedded SQL | 0 | 0 | 0 | 9 | 9 |
 | §22 Direct invocation of SQL | 2 | 0 | 0 | 0 | 2 |
 | §23 Diagnostics management | 1 | 0 | 0 | 0 | 1 |

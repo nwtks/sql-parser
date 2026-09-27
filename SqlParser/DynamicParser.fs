@@ -5,14 +5,18 @@ open SqlParser.Lexer
 open SqlParser.ExpressionParser
 
 module DynamicParser =
+    // `pExtendedName` (5.4 <extended descriptor name>, 20.17 <extended statement name>,
+    // 20.17 <extended cursor name>) lives in DataManipulationParser.fs because the
+    // 20.10/20.11 <using descriptor> tail in this module compiles later than that
+    // module; the shared parser is consumed by both.
+
     // 20.2 <allocate descriptor statement> ::= ALLOCATE [ SQL ] DESCRIPTOR <conventional descriptor name> [ WITH MAX <occurrences> ]
-    // <conventional descriptor name> ::= <non-extended descriptor name> | <extended descriptor name>, and
+    // <conventional descriptor name> ::= <non-extended descriptor name> | <extended descriptor name>
     // <non-extended descriptor name> ::= <identifier> — a single part, with no catalog or
-    // schema qualifier (the extended form, `[ <scope option> ] <simple value specification>`,
-    // is the separately documented open item).
+    // schema qualifier. The extended form (20.17) is `[ <scope option> ] <simple value specification>`.
     let pAllocateDescriptorStatement =
         pKeyword "ALLOCATE" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. pIdentifierNameExpression
+        >>. DataManipulationParser.pExtendedName
         // <occurrences> ::= <simple value specification> (strict)
         .>>. opt (attempt (pKeyword "WITH" >>. pKeyword "MAX" >>. pSimpleValueSpecification))
         |>> fun (name, max) -> AllocateDescriptor(name, max)
@@ -20,7 +24,7 @@ module DynamicParser =
     // 20.3 <deallocate descriptor statement> ::= DEALLOCATE [ SQL ] DESCRIPTOR <conventional descriptor name>
     let pDeallocateDescriptorStatement =
         pKeyword "DEALLOCATE" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. pIdentifierNameExpression
+        >>. DataManipulationParser.pExtendedName
         |>> DeallocateDescriptor
 
     // 20.4 <header item name> — closed enumeration.
@@ -92,7 +96,7 @@ module DynamicParser =
             |>> fun (target, name) -> target, name
 
         pKeyword "GET" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. pIdentifierNameExpression
+        >>. DataManipulationParser.pExtendedName
         .>>. (attempt (
                   pKeyword "VALUE" >>. pSimpleValueSpecification
                   .>>. sepBy1 pGetItemInformation (token (pstring ","))
@@ -114,7 +118,7 @@ module DynamicParser =
             |>> fun (name, value) -> name, value
 
         pKeyword "SET" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. pIdentifierExpression
+        >>. DataManipulationParser.pExtendedName
         .>>. (attempt (
                   pKeyword "VALUE" >>. pSimpleValueSpecification
                   .>>. sepBy1 pSetItemInformation (token (pstring ","))
@@ -137,11 +141,11 @@ module DynamicParser =
 
         // 20.6 <copy descriptor statement> ::= COPY <source descriptor name> TO <target descriptor name>
         //     | COPY <source descriptor name> VALUE <item number 1> ( <options> ) TO <target descriptor name> VALUE <item number 2>
-        // <source descriptor name> ::= <descriptor name> (a plain name);
-        // <target descriptor name> ::= <PTF descriptor name> ::= PTF <simple value specification>.
+        // 20.6 <source descriptor name> ::= <descriptor name> — admits the 5.4 extended form via `pExtendedName`.
+        // 20.6 <target descriptor name> ::= <PTF descriptor name> ::= PTF <simple value specification>.
         let pTargetDescriptorName = pKeyword "PTF" >>. pSimpleValueSpecification
 
-        pKeyword "COPY" >>. pIdentifierExpression
+        pKeyword "COPY" >>. DataManipulationParser.pExtendedName
         >>= fun source ->
             attempt (
                 pKeyword "VALUE" >>. pSimpleValueSpecification
@@ -169,24 +173,29 @@ module DynamicParser =
                            TargetItem = None })
 
     // 20.7 <prepare statement> ::= PREPARE <SQL statement name> [ <attributes specification> ] FROM <SQL statement variable>
+    // <SQL statement name> ::= <statement name> | <extended statement name> (20.17) — the extended
+    // form is `[ <scope option> ] <simple value specification>`.
     let pPrepareStatement =
-        pKeyword "PREPARE" >>. pIdentifierExpression
+        pKeyword "PREPARE" >>. DataManipulationParser.pExtendedName
         .>>. opt (attempt (pKeyword "ATTRIBUTES" >>. pSimpleValueSpecification))
         .>> pKeyword "FROM"
         .>>. pSimpleValueSpecification
         |>> fun ((name, attrs), stmt) -> Prepare(name, attrs, stmt)
 
     // 20.9 <deallocate prepared statement> ::= DEALLOCATE PREPARE <SQL statement name>
-    // <SQL statement name> ::= <statement name> | <extended statement name>; <statement name> ::= <identifier>.
     let pDeallocatePreparedStatement =
-        pKeyword "DEALLOCATE" >>. pKeyword "PREPARE" >>. pIdentifierNameExpression
+        pKeyword "DEALLOCATE"
+        >>. pKeyword "PREPARE"
+        >>. DataManipulationParser.pExtendedName
         |>> DeallocatePrepare
 
     // 20.10 <describe statement> ::= <describe input statement> | <describe output statement>
     // <describe input statement>  ::= DESCRIBE INPUT <SQL statement name> <using descriptor> [ <nesting option> ]
     // <describe output statement> ::= DESCRIBE [ OUTPUT ] <described object> <using descriptor> [ <nesting option> ]
     // <described object>           ::= <SQL statement name> | CURSOR <cursor name> STRUCTURE
-    // INPUT commits to <describe input statement> (no backtracking) so DESCRIBE INPUT CURSOR ... is rejected.
+    // Both <SQL statement name> and <cursor name> admit the 20.17 extended form
+    // `[ <scope option> ] <simple value specification>`. INPUT commits to <describe input
+    // statement> (no backtracking) so DESCRIBE INPUT CURSOR ... is rejected.
     let pDescribeStatement =
         // 20.10 <nesting option> ::= WITH NESTING | WITHOUT NESTING
         let pNestingOption =
@@ -196,11 +205,18 @@ module DynamicParser =
         // 20.10 <using descriptor> ::= USING [ SQL ] DESCRIPTOR <descriptor name>
         let pUsingDescriptor =
             pKeyword "USING" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-            >>. pIdentifierNameExpression
+            >>. DataManipulationParser.pExtendedName
+
+        // 20.10 <cursor name> in the CURSOR branch is the strict 5.4 <local qualified name>
+        // (at most two parts, MODULE the only <local qualifier>); the 20.17 extended form
+        // is reserved for 20.17 ALLOCATE / 20.15 DECLARE.
+        let pDescribeCursorName =
+            // Wrapped as an ExtendedName so the AST shape is uniform.
+            pLocalQualifiedNameExpression |>> fun n -> { Scope = None; SimpleValue = n }
 
         pKeyword "DESCRIBE"
         >>= fun _ ->
-            (pKeyword "INPUT" >>. pIdentifierNameExpression
+            (pKeyword "INPUT" >>. DataManipulationParser.pExtendedName
              >>= fun name ->
                  pUsingDescriptor
                  >>= fun desc ->
@@ -214,10 +230,10 @@ module DynamicParser =
             <|> (opt (pKeyword "OUTPUT" >>% ())
                  >>= fun _ ->
                      attempt (
-                         pKeyword "CURSOR" >>. pLocalQualifiedNameExpression .>> pKeyword "STRUCTURE"
+                         pKeyword "CURSOR" >>. pDescribeCursorName .>> pKeyword "STRUCTURE"
                          |>> fun c -> true, c
                      )
-                     <|> (pIdentifierNameExpression |>> fun n -> false, n)
+                     <|> (DataManipulationParser.pExtendedName |>> fun n -> false, n)
                      >>= fun (isCursor, name) ->
                          pUsingDescriptor
                          >>= fun desc ->
@@ -231,8 +247,9 @@ module DynamicParser =
             |>> Describe
 
     // 20.13 <execute statement> ::= EXECUTE <SQL statement name> [ <output using clause> ] [ <input using clause> ]
+    // <SQL statement name> admits the 20.17 extended form.
     let pExecuteStatement =
-        pKeyword "EXECUTE" >>. pIdentifierNameExpression
+        pKeyword "EXECUTE" >>. DataManipulationParser.pExtendedName
         .>>. opt (attempt DataManipulationParser.pOutputUsingClause)
         .>>. opt (attempt DataManipulationParser.pInputUsingClause)
         |>> fun ((name, result), param) -> Execute(name, result, param)
@@ -244,14 +261,9 @@ module DynamicParser =
         pKeyword "EXECUTE" >>. pKeyword "IMMEDIATE" >>. pSimpleValueSpecification
         |>> ExecuteImmediate
 
-    // 20.17 <extended statement name>
-    // 20.17 <extended cursor name>
-    //     ::= [ <scope option> ] <simple value specification>
-    let private pExtendedName =
-        opt (attempt pScopeOption) .>>. pSimpleValueSpecification
-        |>> fun (scope, simpleValue) ->
-            { Scope = scope
-              SimpleValue = simpleValue }
+    // 5.4 <extended descriptor name> / 20.17 <extended statement name> /
+    // 20.17 <extended cursor name> are now defined in DataManipulationParser.fs
+    // (`pExtendedName`).
 
     // 20.15 <dynamic declare cursor> ::= DECLARE <cursor name> <cursor properties> FOR <statement name>
     // <statement name> ::= <identifier> — the plain form, NOT the 20.17
@@ -277,10 +289,10 @@ module DynamicParser =
     // 20.17 <allocate extended dynamic cursor statement> ::= ALLOCATE <extended cursor name>
     //     <cursor properties> FOR <extended statement name>
     let pAllocateExtendedDynamicCursorStatement =
-        pKeyword "ALLOCATE" >>. pExtendedName
+        pKeyword "ALLOCATE" >>. DataManipulationParser.pExtendedName
         .>>. DataManipulationParser.pCursorProperties
         .>> pKeyword "FOR"
-        .>>. pExtendedName
+        .>>. DataManipulationParser.pExtendedName
         |>> fun ((cursor, properties), statement) ->
             { Cursor = cursor
               Properties = properties
@@ -296,6 +308,36 @@ module DynamicParser =
         .>> pKeyword "PROCEDURE"
         .>>. SchemaParser.pSpecificRoutineDesignator
         |>> fun ((name, _), routine) -> { Name = name; Routine = routine } |> AllocateReceivedCursor
+
+    // 20.19 <dynamic open statement> ::= OPEN <extended cursor name> [ <input using clause> ]
+    // The 20.19 form uses the 20.17 <extended cursor name> `[ <scope option> ] <simple value
+    // specification>` rather than the 5.4 <cursor name> of 14.4 <open statement>.
+    let pDynamicOpenStatement =
+        pKeyword "OPEN" >>. DataManipulationParser.pExtendedName
+        .>>. opt (attempt DataManipulationParser.pInputUsingClause)
+        |>> DynamicOpen
+
+    // 20.20 <dynamic fetch statement> ::=
+    //     FETCH [ [ <fetch orientation> ] FROM ] <extended cursor name> <output using clause>
+    // The <output using clause> accepts both <into arguments> and <into descriptor>; the
+    // <fetch orientation> is shared with 14.5 <fetch statement>.
+    let pDynamicFetchStatement =
+        let pFetchOrientation =
+            pKeyword "NEXT" >>% Next
+            <|> (pKeyword "PRIOR" >>% Prior)
+            <|> (pKeyword "FIRST" >>% First)
+            <|> (pKeyword "LAST" >>% Last)
+            <|> (pKeyword "ABSOLUTE" >>. pSimpleValueSpecification |>> Absolute)
+            <|> (pKeyword "RELATIVE" >>. pSimpleValueSpecification |>> Relative)
+
+        pKeyword "FETCH" >>. opt (attempt (opt pFetchOrientation .>> pKeyword "FROM"))
+        .>>. DataManipulationParser.pExtendedName
+        .>>. DataManipulationParser.pOutputUsingClause
+        |>> fun ((head, cursor), output) -> DynamicFetch(Option.flatten head, cursor, output)
+
+    // 20.22 <dynamic close statement> ::= CLOSE <extended cursor name>
+    let pDynamicCloseStatement =
+        pKeyword "CLOSE" >>. DataManipulationParser.pExtendedName |>> DynamicClose
 
     // 20.28 <pipe row statement> ::= PIPE ROW <PTF descriptor name>
     // 20.28 <PTF descriptor name> ::= PTF <simple value specification>

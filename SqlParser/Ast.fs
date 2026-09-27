@@ -1339,6 +1339,13 @@ and ColumnGeneration =
 //       [ <column constraint definition>... ] [ <collate clause> ]
 // IsNullable / IsPrimaryKey / IsUnique / References / Check are convenience accessors
 // derived from Constraints (the <column constraint definition> list).
+// NOTE: 11.4 <column definition> ::= <column name> [ <data type or domain name> ]
+// makes the type slot OPTIONAL per spec, but typed-table columns (11.3 <typed table
+// element>) route through `ColumnOptions` (which has no type slot — see above) so the
+// optional slot is unreachable in our AST. The required-type variant here is also
+// load-bearing for the <as subquery clause> dispatch: `CREATE TABLE t (id, name)
+// AS SELECT …` requires `pColumnDefinition` to reject `(id, name)` so the
+// `( <column name list> )` slot of 11.3 <as subquery clause> gets a chance.
 and ColumnDefinition =
     { Name: Expression
       DataType: DataType
@@ -2158,8 +2165,10 @@ and SetDescriptorInfo =
 
 // 20.6 <copy descriptor statement>
 // COPY <source> TO <target> | COPY <source> VALUE <n> ( <options> ) TO <target> VALUE <m>
+// `Source` is a 5.4 <conventional descriptor name> (the 20.17 extended form is admitted);
+// `Target` is a <PTF descriptor name> (20.28) which keeps its PTF prefix in the AST.
 and CopyDescriptorStatement =
-    { Source: Expression
+    { Source: ExtendedName
       SourceItem: Expression option
       Options: string list option
       Target: Expression
@@ -2176,21 +2185,25 @@ and CursorAttribute =
 // 20.10 <describe statement>
 // DESCRIBE INPUT <name> <using descriptor> [ <nesting option> ]
 // | DESCRIBE [ OUTPUT ] <described object> <using descriptor> [ <nesting option> ]
+// `Name` carries the 20.17 <extended statement name> / 20.17 <extended cursor name>
+// scope option; `Descriptor` carries the 5.4 <conventional descriptor name>'s scope
+// (20.10 <using descriptor>).
 and DescribeStatement =
     { IsInput: bool
       IsCursor: bool
-      Name: Expression
-      Descriptor: Expression
+      Name: ExtendedName
+      Descriptor: ExtendedName
       Nesting: bool option }
 
 // 20.11 <input using clause> / 20.12 <output using clause>
 // <input using clause>  ::= USING <args> | USING [ SQL ] DESCRIPTOR <name>
 // <output using clause> ::= INTO <args> | INTO [ SQL ] DESCRIPTOR <name>
-// Shared by 20.13 <execute statement>, 20.19 <dynamic open statement> and
-// 20.20 <dynamic fetch statement>.
+// `UsingDescriptor` carries the 20.17 extended-form scope option ([ <scope option> ]
+// <simple value specification>); shared by 20.13 <execute statement>,
+// 20.19 <dynamic open statement> and 20.20 <dynamic fetch statement>.
 and UsingClause =
     | UsingArguments of Expression list
-    | UsingDescriptor of Expression
+    | UsingDescriptor of ExtendedName
 
 // 20.15 <statement name>
 // 20.17 <extended statement name>
@@ -2416,23 +2429,23 @@ and StatementKind =
     // 19.10 <set session collation statement> — the FOR list is <character set specification>s (strings)
     | SetSessionCollation of Expression option * string list option
     // 20.2 <allocate descriptor statement>
-    | AllocateDescriptor of Expression * Expression option
+    | AllocateDescriptor of ExtendedName * Expression option
     // 20.3 <deallocate descriptor statement>
-    | DeallocateDescriptor of Expression
+    | DeallocateDescriptor of ExtendedName
     // 20.4 <get descriptor statement>
-    | GetDescriptor of Expression * GetDescriptorInfo
+    | GetDescriptor of ExtendedName * GetDescriptorInfo
     // 20.5 <set descriptor statement>
-    | SetDescriptor of Expression * SetDescriptorInfo
+    | SetDescriptor of ExtendedName * SetDescriptorInfo
     // 20.6 <copy descriptor statement>
     | CopyDescriptor of CopyDescriptorStatement
     // 20.7 <prepare statement>
-    | Prepare of Expression * Expression option * Expression
+    | Prepare of ExtendedName * Expression option * Expression
     // 20.9 <deallocate prepared statement>
-    | DeallocatePrepare of Expression
+    | DeallocatePrepare of ExtendedName
     // 20.10 <describe statement>
     | Describe of DescribeStatement
     // 20.13 <execute statement>
-    | Execute of Expression * UsingClause option * UsingClause option
+    | Execute of ExtendedName * UsingClause option * UsingClause option
     // 20.14 <execute immediate statement>
     | ExecuteImmediate of Expression
     // 20.15 <dynamic declare cursor>
@@ -2441,6 +2454,12 @@ and StatementKind =
     | AllocateExtendedDynamicCursor of AllocateExtendedDynamicCursorStatement
     // 20.18 <allocate received cursor statement>
     | AllocateReceivedCursor of AllocateReceivedCursorStatement
+    // 20.19 <dynamic open statement> ::= OPEN <extended cursor name> [ <input using clause> ]
+    | DynamicOpen of ExtendedName * UsingClause option
+    // 20.20 <dynamic fetch statement>
+    | DynamicFetch of FetchOrientation option * ExtendedName * UsingClause
+    // 20.22 <dynamic close statement>
+    | DynamicClose of ExtendedName
     // 20.28 <pipe row statement> ::= PIPE ROW <PTF descriptor name>
     | PipeRow of Expression
     // 23.1 <get diagnostics statement>

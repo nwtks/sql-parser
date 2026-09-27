@@ -211,6 +211,18 @@ module SqlParser =
               attempt pGetDescriptorStatement
               attempt pSetDescriptorStatement
               attempt pCopyDescriptorStatement
+              // 20.19 / 20.20 / 20.22 — dynamic OPEN/FETCH/CLOSE with the 20.17 <extended cursor name>;
+              // routed here so the dynamic dispatch accepts the `[ <scope option> ] <simple value
+              // specification>` shape in addition to the strict 5.4 cursor name.
+              attempt pDynamicOpenStatement
+              attempt pDynamicFetchStatement
+              attempt pDynamicCloseStatement
+              // 20.23 / 20.24 — dynamic positioned DELETE/UPDATE; syntactically identical to the
+              // 14.8 / 14.13 static forms, which the existing `pUpdateStatement` / `pDeleteStatement`
+              // already parse. The same `rejectOmittedTarget` keeps preparable forms (20.25 / 20.27)
+              // out of this dispatch, so only the positioned forms reach the AST.
+              attempt (DataManipulationParser.pDeleteStatement >>= rejectOmittedTarget)
+              attempt (DataManipulationParser.pUpdateStatement >>= rejectOmittedTarget)
               attempt pPipeRowStatement ]
 
     // 22.1 <directly executable statement> — only the *searched* forms of <update statement>

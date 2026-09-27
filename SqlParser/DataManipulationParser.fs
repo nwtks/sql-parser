@@ -147,10 +147,23 @@ module DataManipulationParser =
                     Pos = { Line = pos.Line; Column = pos.Column } }
               pColumnReferenceExpression ]
 
+    // 5.4 <extended descriptor name> / 20.17 <extended statement name> /
+    // 20.17 <extended cursor name> ::= [ <scope option> ] <simple value specification>
+    // Defined here (rather than in DynamicParser.fs) because it is consumed earlier —
+    // the 20.10/20.11 <using descriptor> tail is parsed in this module, and so is the
+    // 20.10 <using descriptor> tail that 20.10 <describe statement> needs.
+    let pExtendedName =
+        opt (attempt pScopeOption) .>>. pSimpleValueSpecification
+        |>> fun (scope, simpleValue) ->
+            { Scope = scope
+              SimpleValue = simpleValue }
+
     // 20.10 <using descriptor> / 20.12 <into descriptor>
     // The `[ SQL ] DESCRIPTOR <descriptor name>` tail shared by both.
+    // 5.4 <descriptor name> ::= <conventional descriptor name> — the 20.17 extended form is
+    // also admitted via `pExtendedName`.
     let private pDescriptorName =
-        opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR" >>. pIdentifierExpression
+        opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR" >>. pExtendedName
 
     // 20.11 <input using clause> / 20.12 <output using clause> — shared by
     // 20.19 <dynamic open statement>, 20.20 <dynamic fetch statement> and

@@ -94,11 +94,21 @@ AGENTS.md.
 - `<direct implementation-defined statement>` (22.1) is not wired into `pDirectSqlStatement`
   — there are no implementation-defined statements to accept. **(new)** No implementation
   exists; recorded here so the gap is explicit rather than a silent code comment.
-- The five `<SQL dynamic data statement>` alternatives 20.19/20.20/20.22/20.23/20.24
-  (dynamic OPEN/FETCH/CLOSE/DELETE-positioned/UPDATE-positioned) are not wired into
-  `pSqlDynamicStatement` — only the allocate forms (20.17/20.18) are. **(new)** Out of
-  scope for the current dynamic-SQL surface; recorded here. The static 14.5 `FETCH` now
-  explicitly rejects the descriptor clause that belongs to 20.20 (see below).
+- **The five `<SQL dynamic data statement>` alternatives 20.19/20.20/20.22/20.23/20.24
+  (dynamic OPEN/FETCH/CLOSE/DELETE-positioned/UPDATE-positioned) are now wired into
+  `pSqlDynamicStatement`.** Parsers for 20.19 (`pDynamicOpenStatement`),
+  20.20 (`pDynamicFetchStatement`) and 20.22 (`pDynamicCloseStatement`) live in
+  `DynamicParser.fs` and accept the 20.17 `<extended cursor name>`
+  (`[ <scope option> ] <simple value specification>`); the existing
+  `pUpdateStatement` / `pDeleteStatement` from `DataManipulationParser.fs` already parse
+  the 20.23 / 20.24 positioned forms (routed via `pSqlDataChangeStatement` for 13.4) — the
+  dynamic dispatch reroutes them with `rejectOmittedTarget` so 20.25 / 20.27 (omitted
+  target, preparable-only) still fail. New AST variants
+  (`DynamicOpen`, `DynamicFetch`, `DynamicClose`) carry the 20.17 scope option. To stop
+  the static 14.4 / 14.5 / 14.6 `<cursor name>` from silently absorbing inputs that the
+  20.x dispatch should own (e.g. `FETCH cur INTO DESCRIPTOR d`), `DESCRIPTOR` is now a
+  reserved word per SQL-2016 5.2 — the existing 14.5 form rejects it and the 20.20 dynamic
+  path takes over.
 - `<embedded variable specification>` (6.4) is not parsed by `pGeneralValueSpecification` /
   `pSimpleValueSpecification`. **(new)** Embedded SQL is out of scope; the host-language
   name forms degrade to host parameters elsewhere (see "Entry points"). Recorded here.
@@ -256,6 +266,52 @@ user-defined type, so `CAST(x AS my_domain)` parses (as a UDT). No change requir
   (`[ GLOBAL | LOCAL ] :c`, `PTF :c`), which need scope information the
   `Expression`-shaped name fields cannot hold. 20.2/20.3 now parse the plain
   `<identifier>` form only, which is the non-extended half of that gap.
+
+## 2026-09-27 SQL:2016 conformance changes (continued)
+
+- **20.2 / 20.3 / 20.4 / 20.5 / 20.6 / 20.7 / 20.9 / 20.10 / 20.11 / 20.12 / 20.13
+  extended statement/descriptor/cursor names.** Before this change the
+  `<SQL statement name>`, `<conventional descriptor name>`, and `<cursor name>` slots
+  of §20 took a bare `Expression`, so the 20.17 `<extended statement name>` /
+  `<extended descriptor name>` / `<extended cursor name>` form
+  (`[ GLOBAL | LOCAL ] <simple value specification>`) was not representable. The
+  AST now carries `ExtendedName = { Scope: ScopeOption option; SimpleValue: Expression }`
+  on `Prepare`, `DeallocatePrepare`, `Execute`, `DescribeStatement` (both the
+  `<described object>` name and the `<using descriptor>`), `AllocateDescriptor`,
+  `DeallocateDescriptor`, `GetDescriptor`, `SetDescriptor`,
+  `CopyDescriptorStatement.Source`, and `UsingClause.UsingDescriptor`. The parsers in
+  `DynamicParser.fs` and `DataManipulationParser.fs` consume `pExtendedName`
+  (`[ <scope option> ] <simple value specification>`, hoisted to
+  `DataManipulationParser.fs` because the 20.10/20.11 `<using descriptor>` tail
+  compiles first). The CURSOR branch of 20.10 keeps the strict 5.4
+  `<local qualified name>` parser (`MODULE.cur` stays legal; the 20.17 extended
+  form is reserved for 20.17 ALLOCATE / 20.15 DECLARE). `PTF :c` keeps its
+  separate `pTargetDescriptorName` parser (used by 20.6 `<copy descriptor statement>`
+  and 20.28 `<pipe row statement>`). The 20.15 `<dynamic declare cursor>` strictness
+  (plain `<statement name>` only — see [trade-off.md](trade-off.md)) is preserved
+  per spec.
+
+## 2026-09-27 SQL:2016 conformance changes
+
+- **8.2 `<comparison predicate>` rejects term operands on EITHER side.** Before this change
+  `pValueExpressionChecked` checked only `isBooleanTopLevel` on the LHS and RHS, so
+  `WHERE 1 + 1 = 2` (and `WHERE x = a + 1`, `WHERE -x = 1`) parsed as a comparison even
+  though per 7.2 `<row value predicand>` is a `<value expression primary>`, which a term
+  (6.29 `<term>`) or signed factor (6.29 `<factor>`) is not. The check now uses
+  `isRowValuePredicand` to flag `BinaryOp(Add | Subtract | Multiply | Divide | Concatenate, _, _)`
+  and `UnaryOp(Plus | Minus, _)` operands, so `a + b = c`, `c = a + b`, and
+  `1 = ALL (SELECT 1 + 1 FROM u)` are rejected while `(1 + 1) = 2` and `1 = (2 - 1)`
+  stay legal (the `Parenthesized` node keeps the parens and counts as a 6.39
+  `<boolean predicand>`). The historical lenient form was documented in
+  [gotchas.md](gotchas.md) as "out of scope for the 2026-09 conformance sweep" and is
+  removed; existing tests had no positive coverage that relied on term-as-comparison-operand.
+- **11.4 typed-table `<data type or domain name>` is unreachable in our AST.** The
+  optional slot exists in 11.4 for all `<column definition>`s, but typed-table columns
+  route through `ColumnOptions` (no type slot — see `Ast.fs`), so the optional case
+  is not reachable. The required-type variant in `pColumnDefinition` is also load-bearing
+  for the 11.3 `<as subquery clause>` dispatch: making the slot optional here would
+  let `CREATE TABLE t (id, name) AS SELECT …` be misread by the
+  `( <column name list> )` slot, so the lenient AST change is rejected.
 
 
 - **Types avoid left recursion by construction** — `pDataTypeElement` + a folded

@@ -520,6 +520,11 @@ module SchemaParser =
     //       [ <default clause> | <identity column specification> | <generation clause>
     //       | <system time period start column specification> | <system time period end column specification> ]
     //       [ <column constraint definition>... ] [ <collate clause> ]
+    // The type slot is OPTIONAL per 11.4, but in practice it is required: typed-table
+    // columns (11.3 <typed table element>) route through `pColumnOptions` (no type slot)
+    // and the required type here is load-bearing for the <as subquery clause> dispatch —
+    // `CREATE TABLE t (id, name) AS SELECT …` would otherwise be misread by the
+    // `( <column name list> )` slot.
     let pColumnDefinition =
         // 10.7 <collate clause> ::= COLLATE <collation name>
         let pCollateClause = pKeyword "COLLATE" >>. pSchemaQualifiedNameExpression

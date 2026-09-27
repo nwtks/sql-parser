@@ -2494,9 +2494,13 @@ module ExpressionParser =
         // 8.2/8.9 — both operands of a comparison are <row value predicand>s, so a TOP-LEVEL
         // boolean operand is rejected: left-associative `opp` would otherwise chain
         // (`a = b = c` ≡ `(a = b) = c`) and a predicate could stand on either side
-        // (`x = EXISTS (...)`). The check reads the parser result's top node — a chain always
-        // surfaces there, while a parenthesized boolean (`(a = b) = c`) stays legal; the `=`
-        // DESUGARED by 6.12 NULLIF is nested inside its Case and must not be flagged.
+        // (`x = EXISTS (...)`). A term (6.29 <term>) or signed factor (6.29 <factor>) is
+        // ALSO rejected: per 7.2 <row value predicand> is a <value expression primary>, which
+        // a term is not (`a + b = c` and `c = a + b` are both rejected; the historical lenient
+        // form is recorded in [docs/gotchas.md](docs/gotchas.md)). The check reads the parser
+        // result's top node — a chain always surfaces there, while a parenthesized boolean
+        // (`(a = b) = c`) stays legal; the `=` DESUGARED by 6.12 NULLIF is nested inside its
+        // Case and must not be flagged.
         let isComparisonOperator =
             function
             | BinaryOperator.Equal
@@ -2507,10 +2511,23 @@ module ExpressionParser =
             | BinaryOperator.GreaterThanOrEqual -> true
             | _ -> false
 
+        // 7.2 <row value predicand> for 8.2/8.9 — anything that is not a term (6.27) or a
+        // signed factor (6.25). The default `true` arm covers <value expression primary>s,
+        // <explicit row value constructor>s, predicate nodes, parenthesized expressions, etc.
+        let isRowValuePredicand (e: Expression) =
+            match e.Kind with
+            | BinaryOp((Add | Subtract | Multiply | Divide | Concatenate), _, _) -> false
+            | UnaryOp((UnaryOperator.Plus | UnaryOperator.Minus), _) -> false
+            | _ -> true
+
         let invalidComparisonOperands (e: Expression) =
             match e.Kind with
-            | BinaryOp(op, l, r) when isComparisonOperator op -> isBooleanTopLevel l || isBooleanTopLevel r
-            | QuantifiedComparison(_, _, x, _) -> isBooleanTopLevel x
+            | BinaryOp(op, l, r) when isComparisonOperator op ->
+                isBooleanTopLevel l
+                || isBooleanTopLevel r
+                || not (isRowValuePredicand l)
+                || not (isRowValuePredicand r)
+            | QuantifiedComparison(_, _, x, _) -> isBooleanTopLevel x || not (isRowValuePredicand x)
             | _ -> false
 
         opp.ExpressionParser

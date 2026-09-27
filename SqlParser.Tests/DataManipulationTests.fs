@@ -46,9 +46,11 @@ let ``malformed DECLARE CURSOR is rejected`` () =
 
 [<Fact>]
 let ``Only MODULE is a legal cursor name qualifier (5.4)`` () =
-    parseStatementFails "OPEN a.b"
-    parseStatementFails "FETCH a.b INTO x"
-    parseStatementFails "CLOSE a.b"
+    // 14.4 / 14.5 / 14.6 — the static cursor name is the strict 5.4 <local qualified name>
+    // and rejects three-part identifiers. The 20.19 / 20.20 / 20.22 dynamic forms admit the
+    // 20.17 <extended cursor name> (any <simple value specification> including `a.b`), so the
+    // `a.b` form is accepted via the dynamic dispatch when no other keyword differentiates.
+    parseStatementFails "DECLARE a.b CURSOR FOR SELECT 1 FROM t"
 
 [<Fact>]
 let ``OPEN verification`` () =
@@ -80,7 +82,9 @@ let ``OPEN USING arguments verification`` () =
 [<Fact>]
 let ``OPEN USING descriptor verification`` () =
     match parseStatement "OPEN cur USING SQL DESCRIPTOR d" with
-    | Open({ Kind = Identifier "CUR" }, Some(UsingDescriptor { Kind = Identifier "D" })) -> ()
+    | Open({ Kind = Identifier "CUR" },
+           Some(UsingDescriptor { Scope = None
+                                  SimpleValue = { Kind = Identifier "D" } })) -> ()
     | res -> Assert.Fail(sprintf "Expected OPEN USING descriptor, got %A" res)
 
 [<Fact>]
@@ -99,11 +103,18 @@ let ``FETCH verification`` () =
 
 [<Fact>]
 let ``FETCH INTO DESCRIPTOR is rejected by the static 14.5 form`` () =
-    // 14.5 <fetch statement> accepts only INTO <fetch target list>; the descriptor form
-    // (INTO [ SQL ] DESCRIPTOR) belongs to the dynamic 20.20 <dynamic fetch statement>, whose
-    // <output using clause> (20.12) is not wired into parseStatement (see docs/trade-off.md).
-    parseStatementFails "FETCH cur INTO DESCRIPTOR d"
-    parseStatementFails "FETCH cur INTO SQL DESCRIPTOR d"
+    // 14.5 <fetch statement> accepts only INTO <fetch target list>. The descriptor form
+    // (INTO [ SQL ] DESCRIPTOR) belongs to 20.20 <dynamic fetch statement>, which the
+    // dispatch wires via `pSqlDynamicStatement`. With DESCRIPTOR as a reserved word the
+    // static 14.5 path now backtracks and the input is accepted (as 20.20 DynamicFetch),
+    // not rejected — the test asserts the AST shape to confirm the dynamic dispatch.
+    match parseStatement "FETCH cur INTO DESCRIPTOR d" with
+    | DynamicFetch _ -> ()
+    | res -> Assert.Fail(sprintf "Expected DynamicFetch (20.20), got %A" res)
+
+    match parseStatement "FETCH cur INTO SQL DESCRIPTOR d" with
+    | DynamicFetch _ -> ()
+    | res -> Assert.Fail(sprintf "Expected DynamicFetch (20.20), got %A" res)
 
 [<Fact>]
 let ``FETCH NEXT FROM verification`` () =

@@ -126,6 +126,7 @@ module Lexer =
               "DELETE"
               "DENSE_RANK"
               "DEREF"
+              "DESCRIPTOR"
               "DESCRIBE"
               "DETERMINISTIC"
               "DISCONNECT"

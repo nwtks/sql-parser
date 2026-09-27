@@ -137,6 +137,16 @@ let ``Comparison operands are row value predicands (8.2)`` () =
     parseFails "SELECT 1 FROM t WHERE 1 = 2 < 3"
     parseFails "SELECT 1 FROM t WHERE x = EXISTS (SELECT 1 FROM u)"
 
+    // 7.2 <row value predicand> is a <value expression primary>; a term (6.29 <term>) or a
+    // signed factor (6.29 <factor>) is not one, on EITHER side.
+    parseFails "SELECT 1 FROM t WHERE 1 + 1 = 2"
+    parseFails "SELECT 1 FROM t WHERE 2 = 1 + 1"
+    parseFails "SELECT 1 FROM t WHERE a + b = c"
+    parseFails "SELECT 1 FROM t WHERE c = a + b"
+    parseFails "SELECT 1 FROM t WHERE x = a + 1"
+    parseFails "SELECT 1 FROM t WHERE -x = 1"
+    parseFails "SELECT 1 FROM t WHERE 1 + 1 = 2 OR 1 = 1"
+
     // PARENTHESIZED booleans are 6.39 <boolean predicand>s and stay legal.
     match parse "(a = b) = c" with
     | BinaryOp(Equal, { Kind = Parenthesized _ }, { Kind = Identifier "C" }) -> ()
@@ -145,6 +155,16 @@ let ``Comparison operands are row value predicands (8.2)`` () =
     match parse "a = (b = c)" with
     | BinaryOp(Equal, { Kind = Identifier "A" }, { Kind = Parenthesized _ }) -> ()
     | res -> Assert.Fail(sprintf "Expected a parenthesized right operand, got %A" res)
+
+    // Parenthesized terms are legal too — the Parenthesized node keeps the parens and
+    // counts as a 6.39 <boolean predicand> for the comparison slot.
+    match parse "(1 + 1) = 2" with
+    | BinaryOp(Equal, { Kind = Parenthesized _ }, { Kind = Literal(Number 2m) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected a parenthesized LHS, got %A" res)
+
+    match parse "1 = (2 - 1)" with
+    | BinaryOp(Equal, { Kind = Literal(Number 1m) }, { Kind = Parenthesized _ }) -> ()
+    | res -> Assert.Fail(sprintf "Expected a parenthesized RHS, got %A" res)
 
     // The DESUGARED `=` of 6.12 NULLIF and the IsNull of COALESCE must not be caught by
     // the comparison-operand / predicate-left-operand checks.

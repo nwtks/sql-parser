@@ -821,10 +821,13 @@ let ``Descriptor arguments in SQL argument lists (10.4)`` () =
     // The CAST form is a <descriptor argument> only — it is not a <cast specification>.
     parseFails "SELECT CAST(NULL AS DESCRIPTOR) FROM t"
 
-    // A routine named DESCRIPTOR still parses as a plain identifier argument.
-    match parse "SELECT my_func(DESCRIPTOR) FROM t" with
+    // DESCRIPTOR is a reserved word (SQL-2016); a routine named DESCRIPTOR must be quoted
+    // (delimited identifier) to parse as a plain identifier argument.
+    parseFails "SELECT my_func(DESCRIPTOR) FROM t"
+
+    match parse "SELECT my_func(\"DESCRIPTOR\") FROM t" with
     | FunctionCall(_, _, SqlValueArguments([ { Kind = Identifier "DESCRIPTOR" } ], None), _, _, _, _) -> ()
-    | res -> Assert.Fail(sprintf "Expected a plain DESCRIPTOR argument, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected a plain \"DESCRIPTOR\" argument, got %A" res)
 
 [<Fact>]
 let ``SQL argument forms (10.4)`` () =
