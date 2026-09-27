@@ -209,6 +209,22 @@ module QueryParser =
 
     // — the OVER (...) clause attached to a window function (also parsed at the query level for the WINDOW clause).
     // 6.10 <window name or specification> ::= <window name> | <window specification>
+    // 7.15 — an <existing window name> cannot be MEASURES when MEASURES starts a
+    // <row pattern measures> clause (the optional leading clause of the
+    // <window frame clause>). Reject MEASURES followed by <expr> AS <name> so the
+    // frame's MEASURES clause is not swallowed as a window name. The whole parser
+    // is wrapped in attempt because notFollowedBy marks its failure as fatal, which
+    // would otherwise escape the surrounding opt.
+    // Shared by the 7.15 OVER form and by the 7.15 <window definition> list.
+    let private pExistingWindowName =
+        attempt (
+            pIdentifierExpression
+            >>= fun name ->
+                match name.Kind with
+                | Identifier "MEASURES" -> notFollowedBy (pExpression .>> pKeyword "AS") >>% name
+                | _ -> preturn name
+        )
+
     let private pWindowNameOrSpecification =
         let pPartitionBy =
             // 7.15 <window partition column reference> ::= <column reference> [ <collate clause> ]
@@ -220,21 +236,6 @@ module QueryParser =
             pKeyword "ORDER"
             >>. pKeyword "BY"
             >>. sepBy1 pSortSpecification (token (pstring ","))
-
-        // 7.15 — an <existing window name> cannot be MEASURES when MEASURES starts a
-        // <row pattern measures> clause (the optional leading clause of the
-        // <window frame clause>). Reject MEASURES followed by <expr> AS <name> so the
-        // frame's MEASURES clause is not swallowed as a window name. The whole parser
-        // is wrapped in attempt because notFollowedBy marks its failure as fatal, which
-        // would otherwise escape the surrounding opt.
-        let pExistingWindowName =
-            attempt (
-                pIdentifierExpression
-                >>= fun name ->
-                    match name.Kind with
-                    | Identifier "MEASURES" -> notFollowedBy (pExpression .>> pKeyword "AS") >>% name
-                    | _ -> preturn name
-            )
 
         pKeyword "OVER"
         >>. (between
@@ -262,6 +263,12 @@ module QueryParser =
     //     [ { <comma> <row value expression> }... ]
     //   Used both as a <simple table> (7.17) and as a <derived table> inside
     //   <table primary> (7.6).
+    // 7.3 <table value constructor> ::= VALUES <row value expression list>
+    // <table row value expression> ::= <row value special case> | <row value constructor>
+    // 7.1 <explicit row value constructor> needs AT LEAST TWO elements in the paren form, so a
+    // one-element `(1)` is not a <row value special case> (which is a
+    // <nonparenthesized value expression primary>). ROW ( … ) is the 7.1 <row value constructor>
+    // form and takes one or more.
     let private pTableValueConstructor =
         let pRow =
             choice
@@ -269,7 +276,11 @@ module QueryParser =
                       pKeyword "ROW"
                       >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ",")))
                   )
-                  between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ","))) ]
+                  between
+                      (token (pstring "("))
+                      (token (pstring ")"))
+                      (pExpression
+                       >>= fun first -> many1 (token (pstring ",") >>. pExpression) |>> fun rest -> first :: rest) ]
 
         pKeyword "VALUES" >>. sepBy1 pRow (token (pstring ","))
 
@@ -705,12 +716,16 @@ module QueryParser =
                       |>> fun (q, (name, cols)) -> Lateral(q, name, cols)
                   )
                   |> withTablePosition
+                  // 7.6 <collection derived table> ::= UNNEST ( <collection value expression>
+                  //     [ { <comma> <collection value expression> }... ] ) [ WITH ORDINALITY ]
+                  //     <correlation or recognition> — the correlation is MANDATORY and the
+                  //     array expression may be a comma-separated list.
                   attempt (
                       pKeyword "UNNEST"
-                      >>. between (token (pstring "(")) (token (pstring ")")) pExpression
+                      >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ",")))
                       .>>. opt (pKeyword "WITH" >>. pKeyword "ORDINALITY" >>% true)
                       .>>. pCorrelationOrRecognition
-                      |>> fun ((expr, ord), (name, cols)) -> Unnest(expr, Option.defaultValue false ord, name, cols)
+                      |>> fun ((exprs, ord), (name, cols)) -> Unnest(exprs, Option.defaultValue false ord, name, cols)
                   )
                   |> withTablePosition
                   // 7.6 <parenthesized joined table> ::= ( <parenthesized joined table> )
@@ -756,15 +771,23 @@ module QueryParser =
                           | _ -> preturn (TableFunction(expr, alias, cols))
                   )
                   |> withTablePosition
-                  // <data change delta table> ::= <result option> TABLE ( <data change statement> )
+                  // 7.6 <data change delta table> ::= <result option> TABLE ( <data change statement> )
+                  //     [ <correlation or recognition> ] — the correlation is OPTIONAL here,
+                  //     unlike the other <table primary> alternatives.
                   attempt (
                       pKeyword "FINAL" >>% ResultOption.Final
                       <|> (pKeyword "NEW" >>% ResultOption.New)
                       <|> (pKeyword "OLD" >>% ResultOption.Old)
                       .>> pKeyword "TABLE"
                       .>>. between (token (pstring "(")) (token (pstring ")")) pDataChangeStatement
-                      .>>. pCorrelationOrRecognition
-                      |>> fun ((result, stmt), (name, cols)) -> DataChangeDelta(result, stmt, Some name, cols)
+                      .>>. opt (attempt pCorrelationOrRecognition)
+                      |>> fun ((result, stmt), corr) ->
+                          let alias, cols =
+                              match corr with
+                              | Some(name, cols) -> Some name, cols
+                              | None -> None, None
+
+                          DataChangeDelta(result, stmt, alias, cols)
                   )
                   |> withTablePosition
                   // <JSON table> <correlation or recognition> — the correlation is MANDATORY.
@@ -818,18 +841,26 @@ module QueryParser =
                       |>> fun ((input, recog), output) -> MatchRecognize(input, recog, output)
                   )
                   |> withTablePosition
-                  // <table or query name> [ <query system time period specification> ]
+                  // 7.6 <table or query name> [ <query system time period specification> ]
                   //     [ <correlation or recognition> ]
+                  // The correlation here may carry a <parenthesized derived column list>
+                  // (`t AS x (a, b)`), so pCorrelationOrRecognition is used rather than the
+                  // bare pCorrelationName.
                   attempt (
                       getPosition
                       .>>. (pSchemaQualifiedNameExpression
                             .>>. opt (attempt pQuerySystemTimePeriodSpecification)
-                            .>>. opt (attempt pCorrelationName))
-                      |>> fun (pos, ((name, sysTime), alias)) ->
+                            .>>. opt (attempt pCorrelationOrRecognition))
+                      |>> fun (pos, ((name, sysTime), corr)) ->
                           let pos' = { Line = pos.Line; Column = pos.Column }
 
+                          let alias, cols =
+                              match corr with
+                              | Some(name, cols) -> Some name, cols
+                              | None -> None, None
+
                           let baseTable =
-                              { TableSource.Kind = TableSourceKind.Table(name, alias)
+                              { TableSource.Kind = TableSourceKind.Table(name, alias, cols)
                                 Pos = pos' }
 
                           match sysTime with
@@ -907,18 +938,36 @@ module QueryParser =
                     pJoinType
 
             opt (attempt pPartitionedJoinColumnReferenceList)
-            >>= fun partitionBy ->
-                joinType .>>. pTablePrimary
-                >>= fun (jt, right) ->
-                    // 7.10 <qualified join> ::= { <table reference> | <partitioned join table> }
-                    //     [ <join type> ] JOIN <table reference> <join specification>
-                    // <cross join> and <natural join> have NO <join specification> slot.
-                    if jt = CrossJoin || Option.isSome nat then
-                        preturn (Option.defaultValue false nat, jt, right, None, None, partitionBy)
-                    else
-                        pJoinSpecification
-                        |>> fun (cond, usingAlias) ->
-                            (Option.defaultValue false nat, jt, right, Some cond, usingAlias, partitionBy)
+            >>= fun leftPartitionBy ->
+                // 7.10 <partitioned join table> ::= <table factor> PARTITION BY
+                //     <partitioned join column reference list>
+                // 7.10 <qualified join> ::= { <table reference> | <partitioned join table> }
+                //     [ <join type> ] JOIN { <table reference> | <partitioned join table> }
+                //     <join specification>
+                // So the right operand's clause follows the right table, exactly as the left
+                // one (consumed before this suffix) does. `>>=` binds tighter than `.>>.`, so
+                // explicit binds keep the grouping unambiguous.
+                joinType
+                >>= fun jt ->
+                    pTablePrimary
+                    >>= fun right ->
+                        opt (attempt pPartitionedJoinColumnReferenceList)
+                        >>= fun rightPartitionBy ->
+                            // JoinSource has a single PartitionBy slot, so the left clause wins
+                            // when both are present; the combination is a semantic case.
+                            let partitionBy =
+                                if Option.isSome leftPartitionBy then
+                                    leftPartitionBy
+                                else
+                                    rightPartitionBy
+
+                            // <cross join> and <natural join> have NO <join specification> slot.
+                            if jt = CrossJoin || Option.isSome nat then
+                                preturn (Option.defaultValue false nat, jt, right, None, None, partitionBy)
+                            else
+                                pJoinSpecification
+                                |>> fun (cond, usingAlias) ->
+                                    (Option.defaultValue false nat, jt, right, Some cond, usingAlias, partitionBy)
 
     // 7.6 <table reference> ::= <table factor> | <joined table>
     pTableReferenceRef.Value <-
@@ -945,10 +994,18 @@ module QueryParser =
     // 7.12 <where clause> ::= WHERE <search condition>
     let pWhereClause = pKeyword "WHERE" >>. pExpression
 
-    // 7.16 <set quantifier> ::= DISTINCT | ALL
-    // Forced inversion: consumed by the 7.13 <group by clause> below.
+    // 7.16 <set quantifier> ::= DISTINCT | ALL — the SELECT form collapses to the IsDistinct
+    // flag (ALL is the default), so a bool option is enough there.
     let pSetQuantifier =
         opt (pKeyword "DISTINCT" >>% true <|> (pKeyword "ALL" >>% false))
+
+    // 7.13 <group by clause> ::= GROUP BY [ <set quantifier> ] <grouping element list>
+    // Here ALL is a real flag — stating it is not the same as omitting it — so the DU is kept.
+    let private pGroupBySetQuantifier =
+        opt (
+            pKeyword "DISTINCT" >>% SetQuantifier.QuantifierDistinct
+            <|> (pKeyword "ALL" >>% SetQuantifier.QuantifierAll)
+        )
 
     // 7.13 <grouping element> — forward ref
     let private pGroupingElement, private pGroupingElementRef =
@@ -1001,7 +1058,7 @@ module QueryParser =
 
     // 7.13 <group by clause> ::= GROUP BY [ <set quantifier> ] <grouping element list>
     let pGroupByClause =
-        pKeyword "GROUP" >>. pKeyword "BY" >>. pSetQuantifier
+        pKeyword "GROUP" >>. pKeyword "BY" >>. pGroupBySetQuantifier
         .>>. sepBy1 pGroupingElement (token (pstring ","))
 
     // 7.14 <having clause> ::= HAVING <search condition>
@@ -1010,12 +1067,15 @@ module QueryParser =
     // 7.15 <window clause> ::= WINDOW <window definition list>
     let pWindowClause =
         // 7.15 <window definition> ::= <new window name> AS <window specification>
+        // The `[ <existing window name> ]` slot has the same MEASURES ambiguity as the 7.15
+        // OVER form (7.15 <window frame clause> starts with [ <row pattern measures> ]), so the
+        // shared `pExistingWindowName` guard is reused rather than a bare identifier.
         let pWindowDefinition =
             pIdentifierExpression .>> pKeyword "AS"
             .>>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (opt pIdentifierExpression
+                (opt pExistingWindowName
                  .>>. opt (
                      // <window partition clause> ::= PARTITION BY <window partition column reference list>
                      // <window partition column reference> ::= <column reference> [ <collate clause> ]
@@ -1139,15 +1199,15 @@ module QueryParser =
                 (opt (attempt pGroupByClause))
                 (opt (attempt pHavingClause))
                 (fun (dist, cols) from whr grp hav ->
-                    let grpDistinct, grpList =
+                    let grpQuantifier, grpList =
                         match grp with
-                        | Some(d, l) -> Option.defaultValue false d, l
-                        | None -> false, []
+                        | Some(d, l) -> Option.defaultValue SetQuantifier.QuantifierAll d, l
+                        | None -> SetQuantifier.QuantifierAll, []
 
-                    (Option.defaultValue false dist, cols), from, whr, grpDistinct, grpList, hav)
+                    (Option.defaultValue false dist, cols), from, whr, grpQuantifier, grpList, hav)
 
         pipe2 pSelectBase (opt (attempt pWindowClause)) (fun baseResult window ->
-            let distInfo, from, whr, grpDistinct, grpList, hav = baseResult
+            let distInfo, from, whr, grpQuantifier, grpList, hav = baseResult
             let dist, colsList = distInfo
 
             { IsDistinct = dist
@@ -1155,7 +1215,7 @@ module QueryParser =
               From = from
               Where = whr
               GroupBy = grpList
-              GroupByDistinct = grpDistinct
+              GroupByQuantifier = grpQuantifier
               Having = hav
               Window = Option.defaultValue [] window
               OrderBy = []

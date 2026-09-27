@@ -86,6 +86,12 @@ let ``CONNECT TO rejects expressions for server/name/user`` () =
     parseFails "CONNECT TO server AS a + b"
     parseFails "CONNECT TO server USER a = b"
 
+    // 5.4 <SQL-server name> / <connection name> / <connection user name> are all
+    // <simple value specification>s, which has no <dynamic parameter specification> (6.4).
+    parseFails "CONNECT TO ?"
+    parseFails "CONNECT TO server AS ?"
+    parseFails "CONNECT TO server USER ?"
+
 [<Fact>]
 let ``SET CONNECTION rejects expression`` () =
     parseFails "SET CONNECTION a + b"

@@ -62,6 +62,10 @@ let ``GET DIAGNOSTICS targets are simple target specifications (23.1)`` () =
     parseStatementFails "GET DIAGNOSTICS ? = NUMBER"
     parseStatementFails "GET DIAGNOSTICS ? = ALL"
 
+    // 23.1 <condition number> is a <simple value specification> — also no `?`.
+    parseStatementFails "GET DIAGNOSTICS CONDITION ? :n = RETURNED_SQLSTATE"
+    parseStatementFails "GET DIAGNOSTICS ALL CONDITION ? :n = RETURNED_SQLSTATE"
+
     // a host parameter is a legal target
     match parseStatement "GET DIAGNOSTICS :n = NUMBER" with
     | GetDiagnostics(StatementInfo [ ({ Kind = Parameter ":N" }, "NUMBER") ]) -> ()

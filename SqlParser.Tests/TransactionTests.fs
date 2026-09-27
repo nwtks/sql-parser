@@ -73,6 +73,11 @@ let ``DIAGNOSTICS SIZE rejects expression`` () =
     parseFails "SET TRANSACTION DIAGNOSTICS SIZE a || b"
     parseFails "START TRANSACTION DIAGNOSTICS SIZE x = y"
 
+    // 17.3 <number of conditions> is a <simple value specification>, so no `?` (6.4).
+    parseFails "START TRANSACTION DIAGNOSTICS SIZE ?"
+    parseFails "SET TRANSACTION DIAGNOSTICS SIZE ?"
+    parseFails "SET SESSION CHARACTERISTICS AS TRANSACTION DIAGNOSTICS SIZE ?"
+
     match parse "SET CONSTRAINTS fk1, fk2 IMMEDIATE" with
     | SetConstraints(Some([ { Kind = Identifier "FK1" }; { Kind = Identifier "FK2" } ]), false) -> ()
     | res -> Assert.Fail(sprintf "Expected SetConstraints names, got %A" res)

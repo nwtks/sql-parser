@@ -77,12 +77,19 @@ The parser rejects what the standard does not permit, even in common vendor dial
   failure can name the production. The other direction: `<constraint name>` (10.8) is
   a `<schema qualified name>`, so 11.4/11.6/11.24–11.26 and 17.4 `SET CONSTRAINTS`
   accept qualified names, and 11.8's referenced `<table name>` may be three parts.
-- **Comparison operands must be `<row value predicand>`s (8.2/7.2).**
-  `pValueExpressionChecked` rejects top-level booleans *and* terms/signed primaries on
-  either side (`isRowValuePredicand`): `WHERE 1 + 1 = 2`, `c = a + b`, `WHERE -x = 1`
-  are rejected while `(1 + 1) = 2` stays legal — the `Parenthesized` node counts as a
-  6.39 `<boolean predicand>`. A `<period predicate>`'s left operand is checked
-  post-parse (`findExpressionViolationIn`) since it parses before the suffix runs.
+- **6.4 value-specification widths:** `?` is a `<dynamic parameter specification>` and
+  belongs to `<general value specification>` / `<target specification>` only — a slot
+  whose BNF says `<simple value specification>` rejects it (`OFFSET ? ROWS`,
+  `CONNECT TO ?`, …); 6.11 `<row marker offset>` re-adds it explicitly.
+- **Comparison operands must be `<row value predicand>`s (8.2/7.2).** 7.2 reaches
+  `<common value expression>` through 7.1 `<row value constructor predicand>`, so terms
+  and signed primaries are valid (`a + b = c`, `-x = 1`); the only rejection is a
+  **top-level** boolean (`isBooleanTopLevel`), and `(1 = 1)` survives parenthesized. The
+  6.39 `<boolean test>` has a separate, narrower gate (`isBooleanPredicand`): `1 + 1 IS
+  TRUE` is rejected while `1 + 1 IS NULL` (8.8, a wider operand) parses. 8.4 `IN`-list
+  items are `<row value expression>` and stay strict (`x IN (1 + 1)` rejected,
+  `isRowValueExpression`); a `<period predicate>`'s left operand is checked post-parse
+  (`findExpressionViolationIn`).
 - **`pRoutineInvocation` is gated by the reserved *function* keyword whitelist**
   (`functionKeywords` in `Lexer.fs`), so `EXISTS`/`UNIQUE`/`PERIOD`-style words cannot
   degrade to `FunctionCall`; `OVER`/`WITHIN GROUP` suffixes are enforced, and dedicated
@@ -91,9 +98,9 @@ The parser rejects what the standard does not permit, even in common vendor dial
   invariant-culture; nothing throws); datetime and interval values are range-checked
   (hours 0–23, time zone within ±14:00…). Calendar validity (February 30) is
   deliberately *not* checked — semantic.
-- **`CAST(x AS <domain name>)` (6.13) is *not* a deviation:** `<domain name>` is a
-  `<schema qualified name>` and `pDataType` accepts any identifier chain as a UDT, so
-  `CAST(x AS my_domain)` parses. No change required.
+- **6.5 `<implicitly typed value specification>` reaches CAST** (6.13 `<cast operand>`),
+  so `CAST(NULL AS t)` and `CAST(ARRAY[] AS INTEGER)` parse — 6.42/6.45 require at least
+  one element, so only `<empty specification>` reaches them.
 - **Trade-off:** real-world SQL that omits standard-mandated clauses fails to parse
   (consumers would layer extensions on top), but an accepted string is much more likely
   to be valid SQL-2016.
@@ -127,6 +134,8 @@ direction.
   `( <column name list> )` slot misread `CREATE TABLE t (id, name) AS SELECT …`.
 - 14.1 `<declare cursor>` / 14.16 `<temporary table declaration>` are parsed but
   unreachable — see "Entry points".
+- §13.1–13.3 (SQL-client module definition) and all of §21 (embedded SQL) are out of
+  scope — no public surface.
 
 ### Relaxations (accept input the grammar rejects)
 
@@ -213,14 +222,14 @@ of flattening, so `(1 = 1)` is a `<boolean predicand>` and `x BETWEEN (1 = 1) AN
   hence one suffix at a time (`pBooleanTestSuffixes`) and a separate
   `pPredicateNoBooleanTest`.
 - **Operand categories**: `pOperand` (BETWEEN / IS DISTINCT / OVERLAPS part-2) and the
-  `<when operand>` / `<case operand>` slots accept a `<row value predicand>` **or a
-  parenthesized expression** — the project keeps the `Parenthesized` node, so `(1 = 1)`
-  and `(1 + 2)` stay legal — but never a TOP-LEVEL boolean (`1 = 1`) or a term (`1 + 1`);
-  `isPredicateOperand` (ExpressionParser.fs) encodes the rule. `pInValueItem` =
-  `<row value expression>` (`x IN (1 + 1)` / `x IN ((1), 2)` / `x IN (-1)` rejected —
-  parenthesized items are NOT accepted there), `pValueOperand` = value-shaped
-  (LIKE/SIMILAR/regex pattern, escape, FLAG, multiset operands reject explicit rows).
-  Type-level distinctions stay unchecked — semantic.
+  `<when operand>` / `<case operand>` slots accept a `<row value predicand>` — terms
+  included (`x BETWEEN a + b AND c`), and `(1 = 1)` / `(1 + 2)` stay legal because the
+  `Parenthesized` node survives — but never a TOP-LEVEL boolean (`1 = 1`);
+  `isPredicateOperand` (ExpressionParser.fs) is exactly "not top-level boolean".
+  `pInValueItem` = `<row value expression>` (`x IN (1 + 1)` / `x IN ((1), 2)` /
+  `x IN (-1)` rejected — parenthesized items are NOT accepted there), `pValueOperand` =
+  value-shaped (LIKE/SIMILAR/regex pattern, escape, FLAG, multiset operands reject
+  explicit rows). Type-level distinctions stay unchecked — semantic.
 - **Desugars narrow the checks deliberately**: `COALESCE` → searched case with `IsNull`
   conditions, `NULLIF` → `BinaryOp(Equal, …)` — hence parse-time gating for the null
   predicate and a top-node-only comparison check (`COALESCE(1 = 2, TRUE)` and
@@ -238,9 +247,11 @@ of flattening, so `(1 = 1)` is a `<boolean predicand>` and `x BETWEEN (1 = 1) AN
 - **Set-operation tails live in a `QueryExpression` case** carrying
   `ORDER BY`/`OFFSET`/`FETCH`/`LOCKING`; plain `SELECT ... ORDER BY` folds into
   `SelectStatement`; `INTERSECT` binds tighter than `UNION`/`EXCEPT`.
-- **`GROUP BY` is `GroupingElement list`** so `(a, b)` is one grouping set.
+- **`GROUP BY` is `GroupingElement list`** so `(a, b)` is one grouping set; the
+  quantifier is `GroupByQuantifier: SetQuantifier`.
 - **Correlation handling per source**: `Only`/`DataChangeDelta` optional aliases,
-  `Lateral`/`Unnest` mandatory, `TableSample` wraps a `TableSource`; parenthesized table
+  `Lateral`/`Unnest` mandatory, `TableSample` wraps a `TableSource`; `Table` takes a
+  derived column list, `Unnest` an operand `Expression list` (7.6); parenthesized table
   refs are only `<joined table>`s.
 - **`TABLE (expr)` is disambiguated by shape** (`PtfTable` iff `FunctionCall`) — no
   parse-only classifier can do better.
@@ -271,7 +282,8 @@ of flattening, so `(1 = 1)` is a `<boolean predicand>` and `x BETWEEN (1 = 1) AN
   insert/update value, never a general expression; `DmlTarget = TableTarget |
   OmittedTarget` guards positioned forms; `ONLY ( t )` applies to UPDATE/DELETE/MERGE,
   not `INSERT` (14.11 has no ONLY form); 14.15 `<update target>` admits the
-  array-element form in all three set-clause shapes.
+  array-element form in all three set-clause shapes, and `MergeAction.MergeUpdate`
+  holds a `SetClause list`.
 - **Flat `StatementKind` cases** for every `DROP` variant and every 12.3 `<object name>`
   kind of `GRANT`/`REVOKE` (`GrantTable`, …, `GrantRoutine`), wrapping
   shared payload records; `GrantRoles`/`RevokeRoles` stay separate. `PrivilegeSelectTarget`
@@ -279,7 +291,8 @@ of flattening, so `(1 = 1)` is a `<boolean predicand>` and `x BETWEEN (1 = 1) AN
   `SpecificRoutineDesignator` (`SPECIFIC <routine type> …`, `… FOR <type>`), with a
   literal variant `pTypedSpecificRoutineDesignator` (mandatory `<routine type>`, no
   `<data type list>`) so the permissive parser cannot swallow the kind-keyword and
-  `TABLE` alternatives of the same `<object name>`.
+  `TABLE` alternatives of the same `<object name>`; 10.6's `<data type list>` is parsed
+  (`GRANT EXECUTE ON ROUTINE add (INTEGER)`).
 
 ## Routines, triggers and types
 
@@ -316,7 +329,7 @@ of flattening, so `(1 = 1)` is a `<boolean predicand>` and `x BETWEEN (1 = 1) AN
   are wired into `pSqlDynamicStatement`.** `pDynamicOpenStatement`,
   `pDynamicFetchStatement` and `pDynamicCloseStatement` (`DynamicParser.fs`) accept the
   20.17 `<extended cursor name>`; the positioned 20.23/20.24 forms reuse the DML parsers
-  through `rejectOmittedTarget`. New AST variants `DynamicOpen`/`DynamicFetch`/
+  through `rejectOmittedTarget`. `DynamicOpen`/`DynamicFetch`/
   `DynamicClose` carry the scope option. To stop the static 14.4/14.5/14.6 `<cursor
   name>` from absorbing dynamic-only inputs (e.g. `FETCH cur INTO DESCRIPTOR d`),
   `DESCRIPTOR` is reserved per SQL-2016 5.2.
@@ -362,7 +375,8 @@ descriptor forms live in 10.4's `<descriptor argument>`: `DESCRIPTOR ( a INT, b 
 
 ## §10.4 SQL arguments are structured
 
-Invocation nodes carry a `SqlArgumentList`; each argument is `SqlArgumentValue |
+Invocation nodes carry a `SqlArgumentList` (`StaticMethodInvocation`'s is optional —
+`my_type::prune` parses without parentheses, 6.18); each argument is `SqlArgumentValue |
 Generalized | Named | Table | Descriptor`. Heuristics, since a parse-only library cannot
 resolve names: a table-function/`TABLE (query)` proper counts as a `<table argument>` only
 with a following clause; `expr AS name` is generalized unless a column list/clause
@@ -388,9 +402,16 @@ positions; reserved built-ins take value arguments only (`SUM(a, TABLE(t))` reje
   6.35 `<point in time>` / 19.4 `SET TIME ZONE` but not in a select list, where `*` is
   numeric multiplication. The same type-level blind spot covers interval-vs-datetime
   operands, calendar validity, binary `POSITION ... USING` (only the character form has
-  the slot) and character-vs-numeric predicate operands.
+  the slot), character-vs-numeric predicate operands and collection-vs-numeric
+  arguments (`CARDINALITY`).
 - **Syntactic ambiguities**: kind-less `GRANT ... ON <name>` reads as a table grant;
   `TABLE (expr)` PTF classification is shape-based; a lone `TRANSFORM GROUP g` is
-  reported as `<single group specification>`.
+  reported as `<single group specification>`, and a `<multiple group specification>`
+  types only its final group (11.60).
 - **Opaque embedded languages**: the SQL/JSON path grammar (9.38/9.39) and XQuery-regex
   patterns (8.6) are kept as strings by design.
+- **20.26 `<preparable dynamic cursor name>` scope option.** 20.23–20.27 share their
+  `WHERE CURRENT OF` parser with the static 14.8/14.13 (a bare `<cursor name>`), so the
+  scope option is accepted there too — `WHERE CURRENT OF LOCAL c` parses in static
+  statements as well. Chosen over rejecting the grammar-valid dynamic forms; the scope
+  is validated but not stored (the AST slot is an `Expression`).

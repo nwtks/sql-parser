@@ -67,13 +67,14 @@ let ``OPEN USING arguments verification`` () =
     // 20.19 <dynamic open statement> ::= OPEN <conventional dynamic cursor name> [ <input using clause> ]
     // 20.11 <using argument> ::= <general value specification> (6.4) — host parameters, dynamic
     // parameters and the CURRENT_* / USER / VALUE keywords, but no <literal>.
+    // The USING form is 20.19, so it lands on DynamicOpen; 14.4 is the bare OPEN <cursor name>.
     match parseStatement "OPEN cur USING :a, ?" with
-    | Open({ Kind = Identifier "CUR" }, Some(UsingArguments [ { Kind = Parameter ":A" }; { Kind = Parameter "?" } ])) ->
-        ()
+    | DynamicOpen({ SimpleValue = { Kind = Identifier "CUR" } },
+                  Some(UsingArguments [ { Kind = Parameter ":A" }; { Kind = Parameter "?" } ])) -> ()
     | res -> Assert.Fail(sprintf "Expected OPEN USING arguments, got %A" res)
 
     match parseStatement "OPEN cur USING :a INDICATOR :b" with
-    | Open(_, Some(UsingArguments [ { Kind = IndicatorParameter(":A", { Kind = Parameter ":B" }) } ])) -> ()
+    | DynamicOpen(_, Some(UsingArguments [ { Kind = IndicatorParameter(":A", { Kind = Parameter ":B" }) } ])) -> ()
     | res -> Assert.Fail(sprintf "Expected an indicator parameter, got %A" res)
 
     parseStatementFails "OPEN cur USING 1, 2"
@@ -81,11 +82,17 @@ let ``OPEN USING arguments verification`` () =
 
 [<Fact>]
 let ``OPEN USING descriptor verification`` () =
+    // 20.19 <dynamic open statement> — the USING form is the dynamic one, not 14.4.
     match parseStatement "OPEN cur USING SQL DESCRIPTOR d" with
-    | Open({ Kind = Identifier "CUR" },
-           Some(UsingDescriptor { Scope = None
-                                  SimpleValue = { Kind = Identifier "D" } })) -> ()
+    | DynamicOpen({ SimpleValue = { Kind = Identifier "CUR" } },
+                  Some(UsingDescriptor { Scope = None
+                                         SimpleValue = { Kind = Identifier "D" } })) -> ()
     | res -> Assert.Fail(sprintf "Expected OPEN USING descriptor, got %A" res)
+
+    // 14.4 <open statement> ::= OPEN <cursor name> — the bare form.
+    match parseStatement "OPEN cur" with
+    | Open({ Kind = Identifier "CUR" }, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected a bare OPEN, got %A" res)
 
 [<Fact>]
 let ``OPEN without cursor name is rejected`` () = parseStatementFails "OPEN"
@@ -174,7 +181,7 @@ let ``SELECT INTO verification`` () =
     | SelectInto { IsDistinct = false
                    Columns = [ Column({ Kind = Identifier "A" }, None); Column({ Kind = Identifier "B" }, None) ]
                    Into = [ { Kind = Identifier "X" }; { Kind = Identifier "Y" } ]
-                   From = [ { Kind = TableSourceKind.Table({ Kind = Identifier "T" }, None) } ]
+                   From = [ { Kind = TableSourceKind.Table({ Kind = Identifier "T" }, None, None) } ]
                    Where = Some _ } -> ()
     | res -> Assert.Fail(sprintf "Expected SelectInto, got %A" res)
 
@@ -184,7 +191,7 @@ let ``SELECT DISTINCT INTO verification`` () =
     | SelectInto { IsDistinct = true
                    Columns = [ Column({ Kind = Identifier "A" }, None) ]
                    Into = [ { Kind = Identifier "X" } ]
-                   From = [ { Kind = TableSourceKind.Table({ Kind = Identifier "T" }, None) } ] } -> ()
+                   From = [ { Kind = TableSourceKind.Table({ Kind = Identifier "T" }, None, None) } ] } -> ()
     | res -> Assert.Fail(sprintf "Expected SelectInto DISTINCT, got %A" res)
 
 [<Fact>]
@@ -192,14 +199,14 @@ let ``SELECT INTO GROUP BY verification`` () =
     match parseStatement "SELECT a INTO x FROM t GROUP BY a" with
     | SelectInto { Columns = [ _ ]
                    GroupBy = [ GroupingSet [ { Kind = Identifier "A" } ] ]
-                   GroupByDistinct = false } -> ()
+                   GroupByQuantifier = SetQuantifier.QuantifierAll } -> ()
     | res -> Assert.Fail(sprintf "Expected SelectInto GROUP BY, got %A" res)
 
 [<Fact>]
 let ``SELECT INTO GROUP BY DISTINCT verification`` () =
     match parseStatement "SELECT a INTO x FROM t GROUP BY DISTINCT a" with
     | SelectInto { GroupBy = [ GroupingSet [ _ ] ]
-                   GroupByDistinct = true } -> ()
+                   GroupByQuantifier = SetQuantifier.QuantifierDistinct } -> ()
     | res -> Assert.Fail(sprintf "Expected SelectInto GROUP BY DISTINCT, got %A" res)
 
 [<Fact>]
@@ -376,7 +383,7 @@ let ``INSERT OVERRIDING SYSTEM VALUE verification`` () =
 [<Fact>]
 let ``INSERT VALUES DEFAULT verification`` () =
     match parse "INSERT INTO users (name, age) VALUES (DEFAULT, 30)" with
-    | Insert { Source = Values [ [ { Kind = Default }; { Kind = Literal(Number 30m) } ] ] } -> ()
+    | Insert { Source = Values [ [ { Kind = ExpressionKind.Default }; { Kind = Literal(Number 30m) } ] ] } -> ()
     | res -> Assert.Fail(sprintf "Expected Insert VALUES DEFAULT, got %A" res)
 
 [<Fact>]
@@ -414,12 +421,40 @@ let ``MERGE SET NULL and INSERT VALUES NULL verification`` () =
     with
     | Merge { WhenClauses = [ matched; notMatched ] } ->
         match matched.Action with
-        | MergeUpdate [ ({ Kind = Identifier "NAME" }, { Kind = Literal Null }) ] -> ()
+        | MergeUpdate [ SingleSet({ Kind = Identifier "NAME" }, { Kind = Literal Null }) ] -> ()
         | res -> Assert.Fail(sprintf "Expected MergeUpdate SET NULL, got %A" res)
 
         match notMatched.Action with
         | MergeInsert(_, None, [ { Kind = Literal Null } ]) -> ()
         | res -> Assert.Fail(sprintf "Expected MergeInsert VALUES (NULL), got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)
+
+[<Fact>]
+let ``MERGE update specification shares the 14.15 set clause list`` () =
+    // 14.12 <merge update specification> ::= UPDATE SET <set clause list>, so all three
+    // 14.15 <set clause> forms are available — not just the single-assignment one.
+    match parse "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET (a, b) = (1, 2)" with
+    | Merge { WhenClauses = [ clause ] } ->
+        match clause.Action with
+        | MergeUpdate [ MultipleSet([ { Kind = Identifier "A" }; { Kind = Identifier "B" } ],
+                                    [ { Kind = Literal(Number 1m) }; { Kind = Literal(Number 2m) } ]) ] -> ()
+        | res -> Assert.Fail(sprintf "Expected a multiple column assignment, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)
+
+    // 14.15 <update target> with the array subscript form.
+    match parse "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET a[1] = 5" with
+    | Merge { WhenClauses = [ clause ] } ->
+        match clause.Action with
+        | MergeUpdate [ SingleSet({ Kind = ArrayElement(_, { Kind = Literal(Number 1m) }) }, _) ] -> ()
+        | res -> Assert.Fail(sprintf "Expected an array update target, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)
+
+    // 14.15 <mutated set clause>.
+    match parse "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET a.append = 5" with
+    | Merge { WhenClauses = [ clause ] } ->
+        match clause.Action with
+        | MergeUpdate [ MutatedSet({ Kind = Identifier "A" }, { Kind = Identifier "APPEND" }, _) ] -> ()
+        | res -> Assert.Fail(sprintf "Expected a mutated set clause, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)
 
 [<Fact>]
@@ -430,7 +465,7 @@ let ``MERGE INSERT OVERRIDING SYSTEM VALUE verification`` () =
     with
     | Merge { WhenClauses = [ clause ] } ->
         match clause.Action with
-        | MergeInsert(cols, Some false, [ { Kind = Default } ]) ->
+        | MergeInsert(cols, Some false, [ { Kind = ExpressionKind.Default } ]) ->
             match cols with
             | Some [ col ] ->
                 match col.Kind with
@@ -499,7 +534,7 @@ let ``UPDATE multiple assignment verification`` () =
 [<Fact>]
 let ``UPDATE SET DEFAULT verification`` () =
     match parse "UPDATE users SET name = DEFAULT" with
-    | Update { Set = [ SingleSet({ Kind = Identifier "NAME" }, { Kind = Default }) ] } -> ()
+    | Update { Set = [ SingleSet({ Kind = Identifier "NAME" }, { Kind = ExpressionKind.Default }) ] } -> ()
     | res -> Assert.Fail(sprintf "Expected Update SET DEFAULT, got %A" res)
 
 [<Fact>]

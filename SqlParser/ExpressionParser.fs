@@ -93,6 +93,11 @@ module ExpressionParser =
     // so 11.1 / 11.41 / 11.42 / 11.43 and the 6.1 type-level clause share the check.
     let pCharacterSetNameExpression = pNameOfArity 2 "<character set name>"
 
+    // 5.4 <method name> ::= <identifier> — a single part. 10.6
+    // <member name alternatives> ::= <schema qualified routine name> | <method name>, so the
+    // METHOD alternative is the narrowest of the three name arities.
+    let pMethodNameExpression = pNameOfArity 1 "<method name>"
+
     // 5.4 <local qualified name> ::= [ <local qualifier> <period> ] <qualified identifier>
     // 5.4 <cursor name> ::= <local qualified name>; MODULE is the only <local qualifier>,
     // so `a.b.c` is not a cursor name and `MODULE.c` is.
@@ -395,6 +400,32 @@ module ExpressionParser =
     // compiled before SchemaParser.fs.
     let pScopeClause = pKeyword "SCOPE" >>. pSchemaQualifiedNameExpression
 
+    // 6.1 <reference type> ::= REF ( <referenced type> ) [ SCOPE <table name> ]
+    // Named (rather than inline) so 6.16 <target subtype> can reuse it.
+    let private pReferenceType =
+        pKeyword "REF" >>. between (token (pstring "(")) (token (pstring ")")) pDataType
+        .>>. opt pScopeClause
+        |>> fun (t, scope) -> ReferenceType(t, scope)
+
+    // 6.1 <path-resolved user-defined type name> ::= [ <schema name> <period> ] <qualified identifier>
+    // A UDT name is an identifier (optionally schema-qualified), but it must not be followed by
+    // another identifier — that would indicate a misparse (e.g. the NESTED PATH column form of
+    // JSON_TABLE, where NESTED would be read as a column name and PATH as a UDT).
+    // Named so 6.16 <target subtype> can reuse it.
+    let private pUserDefinedType =
+        pSchemaQualifiedName .>>? notFollowedBy pIdentifier
+        >>= fun parts ->
+            getPosition
+            |>> fun pos ->
+                let expr =
+                    match parts with
+                    | [ s ] -> Identifier s
+                    | ps -> ColumnReference ps
+
+                UserDefinedType
+                    { Kind = expr
+                      Pos = { Line = pos.Line; Column = pos.Column } }
+
     // 6.1 <data type> — element type parser: all types EXCEPT collection types (to avoid
     // left recursion). The recursive REF / row-field positions use the `pDataType`
     // forward ref, so this parser can be defined before `pCollectionType`.
@@ -409,33 +440,13 @@ module ExpressionParser =
               attempt pDateTimeType
               attempt pIntervalType
               attempt pRowType
-              // 6.1 <reference type> ::= REF ( <referenced type> ) [ SCOPE <table name> ]
-              // (REF is a reserved word, so it must be tried before the
-              // <path-resolved user-defined type name> fallback below)
-              attempt (
-                  pKeyword "REF" >>. between (token (pstring "(")) (token (pstring ")")) pDataType
-                  .>>. opt pScopeClause
-                  |>> fun (t, scope) -> ReferenceType(t, scope)
-              )
-              // 6.1 <path-resolved user-defined type name> ::= [ <schema name> <period> ] <qualified identifier>
-              // A UDT name is an identifier (optionally schema-qualified), but it must not be
-              // followed by another identifier — that would indicate a misparse (e.g. the
-              // NESTED PATH column form of JSON_TABLE, where NESTED would be read as a
-              // column name and PATH as a UDT).
-              attempt (
-                  pSchemaQualifiedName .>>? notFollowedBy pIdentifier
-                  >>= fun parts ->
-                      getPosition
-                      |>> fun pos ->
-                          let expr =
-                              match parts with
-                              | [ s ] -> Identifier s
-                              | ps -> ColumnReference ps
-
-                          UserDefinedType
-                              { Kind = expr
-                                Pos = { Line = pos.Line; Column = pos.Column } }
-              ) ]
+              // 6.1 <reference type> (defined just above) — REF is a reserved word, so it
+              // must be tried before the <path-resolved user-defined type name> fallback
+              attempt pReferenceType
+              // 6.1 <path-resolved user-defined type name> (defined just above as
+              // `pUserDefinedType`); the UDT branch ends with a notFollowedBy guard so the
+              // `NESTED PATH` JSON_TABLE form is not misread.
+              attempt pUserDefinedType ]
 
     // 6.1 <predefined type> — the built-in alternatives of <data type>: no
     // <reference type> and no <path-resolved user-defined type name>. Used by the
@@ -527,19 +538,25 @@ module ExpressionParser =
 
     // 6.4 <simple value specification> ::= <literal> | <host parameter name>
     //     | <SQL parameter reference> | <embedded variable name>
+    // <dynamic parameter specification> (`?`) is NOT one of the alternatives — it belongs to
+    // <general value specification> and <target specification>. Slots that want it use
+    // pGeneralValueSpecification / pValueSpecification, or (6.11 <row marker offset>, the one
+    // production naming both) an explicit alternative.
     let pSimpleValueSpecification =
         choice
             [ pLiteralExpression
               pSignedNumericLiteral |>> Number |>> Literal |> withExprPosition
-              pQuestionMark >>% "?" <|> pHostParameter |>> Parameter |> withExprPosition
+              pHostParameter |>> Parameter |> withExprPosition
               pSqlParameterReference ]
 
     // 6.4 <value specification> ::= <literal> | <general value specification>
     let pValueSpecification = choice [ pLiteralExpression; pGeneralValueSpecification ]
 
     // 6.5 <default specification> ::= DEFAULT
+    // Qualified: 8.3 <between predicate> also has a `Default` case (the absent
+    // ASYMMETRIC/SYMMETRIC keyword), and the unqualified name would resolve to it.
     let private pDefaultSpecification =
-        pKeyword "DEFAULT" >>% Default |> withExprPosition
+        pKeyword "DEFAULT" >>% ExpressionKind.Default |> withExprPosition
 
     // 6.5 <null specification> ::= NULL
     let pNullSpecification = pKeyword "NULL" >>% Literal Null |> withExprPosition
@@ -642,17 +659,24 @@ module ExpressionParser =
 
     // 6.11 <value_of expression at row> ::= VALUE_OF ( <value expression> AT <row marker expression>
     //     [ , <value_of default value> ] )
-    let pValueOfExpressionAtRow =
+    let private pValueOfExpressionAtRow =
         // 6.11 <row marker expression> ::= <row marker> [ <row marker delta> ]
+        // 6.11 <row marker delta> ::= <plus sign> <row marker offset>
+        //     | <minus sign> <row marker offset>
+        // 6.11 <row marker offset> ::= <simple value specification> | <dynamic parameter specification>
+        // This is the one production that names <dynamic parameter specification> beside a
+        // <simple value specification>, so the `?` alternative is added back here.
+        let pRowMarkerOffset =
+            pSimpleValueSpecification
+            <|> (pQuestionMark >>% "?" |>> Parameter |> withExprPosition)
+
         let pRowMarkerExpression =
             pRowMarker
             .>>. opt (
                 attempt (token (pstring "+") >>% true <|> (token (pstring "-") >>% false))
-                .>>. pUnsignedIntegerExpr
+                .>>. pRowMarkerOffset
             )
-            |>> fun (marker, delta) ->
-                { Marker = marker
-                  Delta = delta |> Option.map (fun (plus, n) -> plus, n) }
+            |>> fun (marker, delta) -> { Marker = marker; Delta = delta }
 
         pKeyword "VALUE_OF"
         >>. between
@@ -753,17 +777,28 @@ module ExpressionParser =
            | UnaryOp _ -> false // [ <sign> ] <numeric primary>, not a primary
            | _ -> true // a <nonparenthesized value expression primary>
 
-    // An operand slot (predicate part-1 / part-2, <when operand>, <case operand>): a <row value
-    // predicand> (7.2) or a parenthesized expression. The project keeps a Parenthesized node, so
-    // `(1 = 1)` and `(1 + 2)` stay legal, but a TOP-LEVEL boolean (`1 = 1`) or a term (`1 + 1`)
-    // is never a valid operand.
-    let isPredicateOperand e =
-        not (isBooleanTopLevel e)
-        && match e.Kind with
-           | Parenthesized _ -> true
-           | BinaryOp _ -> false
-           | UnaryOp _ -> false
-           | _ -> true
+    // An operand slot (predicate part-1 / part-2, <when operand>, <case operand>) holds a
+    // 7.2 <row value predicand>: a <common value expression> (6.28, so a 6.29 term or a signed
+    // numeric primary is fine), a 6.39 <boolean predicand> (a parenthesized boolean value
+    // expression — `(1 = 1)` stays legal because the AST keeps the parens — or a
+    // <nonparenthesized value expression primary>), or a 7.1 <explicit row value constructor>.
+    // A TOP-LEVEL <boolean value expression> (`1 = 1`, `x IS NULL`) is none of the three, so it
+    // is the only rejection here.
+    let isPredicateOperand e = not (isBooleanTopLevel e)
+
+    // 6.39 <boolean predicand> ::= <parenthesized boolean value expression>
+    //     | <nonparenthesized value expression primary>
+    // This is NOT the same as a 7.2 <row value predicand>: it excludes a 6.29 <term> and a
+    // signed <factor> even though those are <common value expression>s. It gates only the
+    // 6.39 <boolean test> suffix (`... IS [ NOT ] <truth value>`), which may follow a
+    // <boolean primary> — so `1 + 1 IS TRUE` is rejected while `1 + 1 IS NULL` (8.8, whose
+    // left operand is the wider <row value predicand>) parses.
+    let private isBooleanPredicand (e: Expression) =
+        match e.Kind with
+        | Parenthesized _ -> true
+        | BinaryOp _ -> false // a term is a <common value expression>, not a primary
+        | UnaryOp _ -> false // [ <sign> ] <numeric primary>, not a primary
+        | _ -> true // a <nonparenthesized value expression primary>
 
     // 6.12 <when operand> — the 8.2/8.3/8.4/8.5/8.6/8.7/8.8/8.9/8.12/8.13/8.14 predicate
     // part-2 forms as a function applied to the <case operand> (defined in
@@ -883,7 +918,7 @@ module ExpressionParser =
         >>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (pExpression <|> pNullSpecification .>> pKeyword "AS"
+                (pExpression <|> pImplicitlyTypedValueSpecification .>> pKeyword "AS"
                  .>>. pDataType
                  .>>. opt (attempt (pKeyword "FORMAT" >>. pCharacterStringLiteral))
                  >>= fun ((operand, target), template) ->
@@ -942,9 +977,13 @@ module ExpressionParser =
                            Pos = r.Pos })
 
     // 6.16 <subtype treatment> ::= TREAT ( <subtype operand> AS <target subtype> )
+    // 6.16 <target subtype> ::= <path-resolved user-defined type name> | <reference type>
+    // — a UDT name or a REF (…) [SCOPE …], NOT the whole 6.1 <data type>.
+    let private pTargetSubtype = choice [ attempt pReferenceType; pUserDefinedType ]
+
     let private pSubtypeTreatment =
         pKeyword "TREAT"
-        >>. between (token (pstring "(")) (token (pstring ")")) (pExpression .>> pKeyword "AS" .>>. pDataType)
+        >>. between (token (pstring "(")) (token (pstring ")")) (pExpression .>> pKeyword "AS" .>>. pTargetSubtype)
         |>> (fun (e, t) -> Treat(e, t))
         |> withExprPosition
 
@@ -957,10 +996,10 @@ module ExpressionParser =
         |> withExprPosition
 
     // 6.18 <static method invocation> ::= <path-resolved UDT name> :: <method name>
-    //     [ <SQL argument list> ]
+    //     [ <SQL argument list> ] — the list is OPTIONAL, so `T::m` is a reference.
     let private pStaticMethodInvocation =
         pSchemaQualifiedNameExpression
-        .>>. (token (pstring "::") >>. pIdentifierExpression .>>. pSqlArgumentList)
+        .>>. (token (pstring "::") >>. pIdentifierExpression .>>. opt pSqlArgumentList)
         |>> fun (typ, (name, args)) -> StaticMethodInvocation(typ, name, args)
         |> withExprPosition
 
@@ -1137,6 +1176,12 @@ module ExpressionParser =
     // 6.30 <extract expression> ::= EXTRACT <left paren> <extract field> FROM <extract source> <right paren>
     // <extract field> ::= <primary datetime field> | <time zone field>
     // <primary datetime field> ::= <non-second primary datetime field> | SECOND
+    // 6.30 <extract source> ::= <datetime value expression> | <interval value expression>
+    // Both are defined below (6.35 / 6.37), so the alternative list is a forward reference
+    // wired right after 6.37.
+    let private pExtractSource, private pExtractSourceRef =
+        createParserForwardedToRef<Expression, unit> ()
+
     // <time zone field> ::= TIMEZONE_HOUR | TIMEZONE_MINUTE
     let private pExtractExpression =
         pKeyword "EXTRACT"
@@ -1154,7 +1199,7 @@ module ExpressionParser =
                        attempt (pKeyword "TIMEZONE_HOUR" >>% "TIMEZONE_HOUR")
                        attempt (pKeyword "TIMEZONE_MINUTE" >>% "TIMEZONE_MINUTE") ])
                  .>> pKeyword "FROM"
-                 .>>. pExpression)
+                 .>>. pExtractSource)
         |>> fun ((pos, field), src) ->
             Extract(
                 { Kind = Identifier field
@@ -1196,6 +1241,8 @@ module ExpressionParser =
                 (token (pstring ")"))
                 (pNonBooleanValueExpression .>>. opt (pKeyword "USING" >>. pCharLengthUnits))
 
+        // A <string value expression> is narrower still: no boolean, and a term is a
+        // 6.31 <concatenation>, so pNonBooleanValueExpression is the right layer here.
         let pOctetBody =
             between (token (pstring "(")) (token (pstring ")")) pNonBooleanValueExpression
 
@@ -1210,6 +1257,17 @@ module ExpressionParser =
 
     // 6.30 <numeric value function> — the built-ins of the shape <name> ( <args> )
     let private pNumericValueFunction =
+        // 6.30 <cardinality expression> ::= CARDINALITY ( <collection value expression> )
+        // 6.30 <max cardinality expression> ::= ARRAY_MAX_CARDINALITY ( <array value expression> )
+        // These two take a COLLECTION, not a number, so they get their own argument parser
+        // instead of the numeric <unary> one below. The operand is kept boolean-free here;
+        // distinguishing a <collection value expression> from a numeric term is TYPE-level and
+        // stays semantic, exactly like <character value expression> (see docs/trade-off.md).
+        let pCollectionUnary name ctor =
+            pKeyword name
+            >>. between (token (pstring "(")) (token (pstring ")")) pNonBooleanValueExpression
+            |>> fun e -> NumericValueFunction(ctor, [ e ])
+
         let pUnary name ctor =
             pKeyword name
             >>. between (token (pstring "(")) (token (pstring ")")) pNumericValueExpression
@@ -1224,8 +1282,8 @@ module ExpressionParser =
             |>> fun (a, b) -> NumericValueFunction(ctor, [ a; b ])
 
         choice
-            [ pUnary "CARDINALITY" NumericFunction.Cardinality
-              pUnary "ARRAY_MAX_CARDINALITY" NumericFunction.ArrayMaxCardinality
+            [ pCollectionUnary "CARDINALITY" NumericFunction.Cardinality
+              pCollectionUnary "ARRAY_MAX_CARDINALITY" NumericFunction.ArrayMaxCardinality
               // 6.30 <absolute value expression> ::= ABS ( <numeric value expression> )
               // 6.38 <interval absolute value function> ::= ABS ( <interval value expression> )
               // (the two are syntactically indistinguishable — one parser, dual citation)
@@ -1429,7 +1487,7 @@ module ExpressionParser =
                 (pNonBooleanValueExpression .>> pKeyword "SIMILAR"
                  .>>. pNonBooleanValueExpression
                  .>> pKeyword "ESCAPE"
-                 .>>. pExpression)
+                 .>>. pNonBooleanValueExpression)
         |>> fun ((src, pattern), escape) -> SubstringSimilar(src, pattern, escape)
         |> withExprPosition
 
@@ -1438,7 +1496,7 @@ module ExpressionParser =
         choice
             [ pKeyword "UPPER" >>% FoldFunction.FoldUpper
               pKeyword "LOWER" >>% FoldFunction.FoldLower ]
-        .>>. between (token (pstring "(")) (token (pstring ")")) pExpression
+        .>>. between (token (pstring "(")) (token (pstring ")")) pNonBooleanValueExpression
         |>> fun (fn, e) -> Fold(fn, e)
         |> withExprPosition
 
@@ -1518,7 +1576,7 @@ module ExpressionParser =
             )
 
         pKeyword "NORMALIZE"
-        >>. between (token (pstring "(")) (token (pstring ")")) (pExpression .>>. pRest)
+        >>. between (token (pstring "(")) (token (pstring ")")) (pNonBooleanValueExpression .>>. pRest)
         |>> fun (e, rest) ->
             match rest with
             | Some(form, len) -> NormalizeFunction(e, Some form, len)
@@ -1563,20 +1621,30 @@ module ExpressionParser =
             [ pKeyword "WITH" >>. pKeyword "UNIQUE" >>. opt (pKeyword "KEYS") >>% true
               pKeyword "WITHOUT" >>. pKeyword "UNIQUE" >>. opt (pKeyword "KEYS") >>% false ]
 
-    // 6.33 <JSON object constructor> ::= JSON_OBJECT ( [ <JSON name and value list> ]
-    //     [ <JSON constructor null clause> ] [ <JSON key uniqueness constraint> ]
+    // 6.33 <JSON object constructor> ::= JSON_OBJECT ( [ <JSON name and value list>
+    //     [ <JSON constructor null clause> ] [ <JSON key uniqueness constraint> ] ]
     //     [ <JSON output clause> ] )
+    // The null / uniqueness clauses belong to the INNER optional group, so at least one
+    // <JSON name and value> must precede them. (The array constructor is the mirror image:
+    // there the clauses sit outside, and `JSON_ARRAY(NULL ON NULL)` is legal.)
     let private pJsonObjectFunction =
+        let pBody =
+            attempt (
+                sepBy1 pJsonNameAndValue (token (pstring ","))
+                >>= fun pairs ->
+                    opt pJsonConstructorNullClause
+                    >>= fun nullClause ->
+                        opt pJsonKeyUniqueness
+                        >>= fun unique -> opt pJsonOutputClause |>> fun output -> pairs, nullClause, unique, output
+            )
+            <|> preturn (
+                [], None, None, None
+                : (JsonNameValue list * JsonConstructorNull option * bool option * JsonOutput option)
+            )
+
         pKeyword "JSON_OBJECT"
-        >>. between
-                (token (pstring "("))
-                (token (pstring ")"))
-                (opt (sepBy1 pJsonNameAndValue (token (pstring ",")))
-                 .>>. opt pJsonConstructorNullClause
-                 .>>. opt pJsonKeyUniqueness
-                 .>>. opt pJsonOutputClause)
-        |>> fun ((((pairs, nullClause), unique), output)) ->
-            JsonObject(Option.defaultValue [] pairs, nullClause, unique, output)
+        >>. between (token (pstring "(")) (token (pstring ")")) pBody
+        |>> fun (pairs, nullClause, unique, output) -> JsonObject(pairs, nullClause, unique, output)
         |> withExprPosition
 
     // 6.33 <JSON array constructor> by enumeration/query. The query form is
@@ -1701,7 +1769,7 @@ module ExpressionParser =
         >>. between
                 (token (pstring "("))
                 (token (pstring ")"))
-                (pExpression .>> token (pstring ",") .>>. pNumericValueExpression)
+                (pNonBooleanValueExpression .>> token (pstring ",") .>>. pNumericValueExpression)
         |>> fun (arr, count) -> TrimArray(arr, count)
         |> withExprPosition
 
@@ -2364,6 +2432,10 @@ module ExpressionParser =
                             Pos = acc.Pos })
                       first ]
 
+    // Wire the 6.30 <extract source> alternative list, which is used by pExtractExpression
+    // above and can only be built once 6.35 and 6.37 exist.
+    pExtractSourceRef.Value <- pDatetimeValueExpression <|> pIntervalValueExpression
+
     // 6.35 <time zone> ::= AT <time zone specifier>
     //   <time zone specifier> ::= LOCAL | TIME ZONE <interval primary>
     let private pTimeZoneSuffix =
@@ -2494,13 +2566,9 @@ module ExpressionParser =
         // 8.2/8.9 — both operands of a comparison are <row value predicand>s, so a TOP-LEVEL
         // boolean operand is rejected: left-associative `opp` would otherwise chain
         // (`a = b = c` ≡ `(a = b) = c`) and a predicate could stand on either side
-        // (`x = EXISTS (...)`). A term (6.29 <term>) or signed factor (6.29 <factor>) is
-        // ALSO rejected: per 7.2 <row value predicand> is a <value expression primary>, which
-        // a term is not (`a + b = c` and `c = a + b` are both rejected; the historical lenient
-        // form is recorded in [docs/gotchas.md](docs/gotchas.md)). The check reads the parser
-        // result's top node — a chain always surfaces there, while a parenthesized boolean
-        // (`(a = b) = c`) stays legal; the `=` DESUGARED by 6.12 NULLIF is nested inside its
-        // Case and must not be flagged.
+        // (`x = EXISTS (...)`). The check reads the parser result's top node — a chain always
+        // surfaces there, while a parenthesized boolean (`(a = b) = c`) stays legal; the `=`
+        // DESUGARED by 6.12 NULLIF is nested inside its Case and must not be flagged.
         let isComparisonOperator =
             function
             | BinaryOperator.Equal
@@ -2511,23 +2579,15 @@ module ExpressionParser =
             | BinaryOperator.GreaterThanOrEqual -> true
             | _ -> false
 
-        // 7.2 <row value predicand> for 8.2/8.9 — anything that is not a term (6.27) or a
-        // signed factor (6.25). The default `true` arm covers <value expression primary>s,
-        // <explicit row value constructor>s, predicate nodes, parenthesized expressions, etc.
-        let isRowValuePredicand (e: Expression) =
-            match e.Kind with
-            | BinaryOp((Add | Subtract | Multiply | Divide | Concatenate), _, _) -> false
-            | UnaryOp((UnaryOperator.Plus | UnaryOperator.Minus), _) -> false
-            | _ -> true
-
+        // 7.2 <row value predicand> for 8.2/8.9 — it expands (via
+        // <row value constructor predicand>, 7.1) to a <common value expression> (6.28, which
+        // INCLUDES a 6.29 <term> and a signed 6.29 <factor>), a 6.39 <boolean predicand>, or a
+        // <explicit row value constructor>. So `a + b = c`, `c = a + b` and `-x = 1` are all
+        // valid, and a TOP-LEVEL boolean is the only shape excluded.
         let invalidComparisonOperands (e: Expression) =
             match e.Kind with
-            | BinaryOp(op, l, r) when isComparisonOperator op ->
-                isBooleanTopLevel l
-                || isBooleanTopLevel r
-                || not (isRowValuePredicand l)
-                || not (isRowValuePredicand r)
-            | QuantifiedComparison(_, _, x, _) -> isBooleanTopLevel x || not (isRowValuePredicand x)
+            | BinaryOp(op, l, r) when isComparisonOperator op -> isBooleanTopLevel l || isBooleanTopLevel r
+            | QuantifiedComparison(_, _, x, _) -> isBooleanTopLevel x
             | _ -> false
 
         opp.ExpressionParser
@@ -2649,11 +2709,13 @@ module ExpressionParser =
             match e.Kind with
             | IsBoolean _ -> None
             | _ when isBooleanTopLevel e -> Some(pBooleanTestPart2 |>> fun applySuffix -> applySuffix e)
-            | _ when isPredicateOperand e ->
+            | _ when isBooleanPredicand e ->
                 match e.Kind with
                 | RowValueConstructor _ -> Some(pPredicateNoBooleanTest |>> fun applySuffix -> applySuffix e)
                 | _ -> Some(pPredicate |>> fun applySuffix -> applySuffix e)
-            | _ -> None
+            // A term or a signed primary: every 8.x suffix applies (its left operand is the
+            // wider <row value predicand>), but the 6.39 boolean test does not.
+            | _ -> Some(pPredicateNoBooleanTest |>> fun applySuffix -> applySuffix e)
 
         let suffix =
             match predicateSuffix with
@@ -2819,6 +2881,19 @@ module ExpressionParser =
                 [ yield r
                   yield name
                   yield! sqlArgumentChildren (arguments |> Option.toList |> List.collect (fun a -> a.Arguments)) ]
+            // 6.15 / 6.17 / 6.18 / 6.19 / 6.11 all hold sub-expressions that must be traversed —
+            // without these arms they fall into the `| _ -> []` catch-all and silently escape
+            // findExpressionViolationIn (see docs/gotchas.md).
+            | FieldReference(r, name) -> [ r; name ]
+            | MethodInvocation(r, name, arguments) ->
+                [ yield r; yield name; yield! sqlArgumentChildren arguments.Arguments ]
+            | StaticMethodInvocation(typ, name, arguments) ->
+                [ yield typ
+                  yield name
+                  yield! sqlArgumentChildren (arguments |> Option.toList |> List.collect (fun a -> a.Arguments)) ]
+            | NewSpecification(typ, arguments) -> typ :: sqlArgumentChildren arguments.Arguments
+
+            | ValueOf(e, _, defaultVal) -> e :: Option.toList defaultVal
             | RowPatternNavigation(RowPatternNavigation.Logical(_, _, x, offset)) ->
                 [ yield x; yield! Option.toList offset ]
             | RowPatternNavigation(RowPatternNavigation.Physical(_, x, offset)) ->

@@ -96,7 +96,7 @@ module DynamicParser =
             |>> fun (target, name) -> target, name
 
         pKeyword "GET" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. DataManipulationParser.pExtendedName
+        >>. DataManipulationParser.pDescriptorOrCursorName
         .>>. (attempt (
                   pKeyword "VALUE" >>. pSimpleValueSpecification
                   .>>. sepBy1 pGetItemInformation (token (pstring ","))
@@ -118,7 +118,7 @@ module DynamicParser =
             |>> fun (name, value) -> name, value
 
         pKeyword "SET" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-        >>. DataManipulationParser.pExtendedName
+        >>. DataManipulationParser.pDescriptorOrCursorName
         .>>. (attempt (
                   pKeyword "VALUE" >>. pSimpleValueSpecification
                   .>>. sepBy1 pSetItemInformation (token (pstring ","))
@@ -141,11 +141,12 @@ module DynamicParser =
 
         // 20.6 <copy descriptor statement> ::= COPY <source descriptor name> TO <target descriptor name>
         //     | COPY <source descriptor name> VALUE <item number 1> ( <options> ) TO <target descriptor name> VALUE <item number 2>
-        // 20.6 <source descriptor name> ::= <descriptor name> — admits the 5.4 extended form via `pExtendedName`.
+        // 20.6 <source descriptor name> ::= <descriptor name> — admits the 5.4 extended form
+        // via `pExtendedName` and the <PTF descriptor name> alternative.
         // 20.6 <target descriptor name> ::= <PTF descriptor name> ::= PTF <simple value specification>.
         let pTargetDescriptorName = pKeyword "PTF" >>. pSimpleValueSpecification
 
-        pKeyword "COPY" >>. DataManipulationParser.pExtendedName
+        pKeyword "COPY" >>. DataManipulationParser.pDescriptorOrCursorName
         >>= fun source ->
             attempt (
                 pKeyword "VALUE" >>. pSimpleValueSpecification
@@ -203,9 +204,10 @@ module DynamicParser =
             <|> (pKeyword "WITHOUT" >>. pKeyword "NESTING" >>% false)
 
         // 20.10 <using descriptor> ::= USING [ SQL ] DESCRIPTOR <descriptor name>
+        // 5.4 <descriptor name> ::= <conventional descriptor name> | <PTF descriptor name>
         let pUsingDescriptor =
             pKeyword "USING" >>. opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
-            >>. DataManipulationParser.pExtendedName
+            >>. DataManipulationParser.pDescriptorOrCursorName
 
         // 20.10 <cursor name> in the CURSOR branch is the strict 5.4 <local qualified name>
         // (at most two parts, MODULE the only <local qualifier>); the 20.17 extended form
@@ -331,7 +333,8 @@ module DynamicParser =
             <|> (pKeyword "RELATIVE" >>. pSimpleValueSpecification |>> Relative)
 
         pKeyword "FETCH" >>. opt (attempt (opt pFetchOrientation .>> pKeyword "FROM"))
-        .>>. DataManipulationParser.pExtendedName
+        // 5.4 <dynamic cursor name> ::= <conventional dynamic cursor name> | <PTF cursor name>
+        .>>. DataManipulationParser.pDescriptorOrCursorName
         .>>. DataManipulationParser.pOutputUsingClause
         |>> fun ((head, cursor), output) -> DynamicFetch(Option.flatten head, cursor, output)
 

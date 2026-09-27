@@ -68,6 +68,37 @@ let ``GET DESCRIPTOR VALUE verification`` () =
     | res -> Assert.Fail(sprintf "Expected GetDescriptor VALUE, got %A" res)
 
 [<Fact>]
+let ``PTF descriptor and cursor names (5.4)`` () =
+    // 5.4 <descriptor name> ::= <conventional descriptor name> | <PTF descriptor name>
+    // 5.4 <dynamic cursor name> ::= <conventional dynamic cursor name> | <PTF cursor name>
+    // <PTF descriptor name> / <PTF cursor name> ::= PTF <simple value specification>, and
+    // neither takes a <scope option>, so Scope is None.
+    match parseStatement "GET DESCRIPTOR PTF :d :n = COUNT" with
+    | GetDescriptor({ Scope = None
+                      SimpleValue = { Kind = Parameter ":D" } },
+                    GetHeader [ ({ Kind = Parameter ":N" }, "COUNT") ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected a PTF descriptor name, got %A" res)
+
+    match parseStatement "SET DESCRIPTOR PTF :d COUNT = 1" with
+    | SetDescriptor({ Scope = None
+                      SimpleValue = { Kind = Parameter ":D" } },
+                    SetHeader [ ("COUNT", { Kind = Literal(Number 1m) }) ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected a PTF descriptor name, got %A" res)
+
+    match parseStatement "DESCRIBE OUTPUT s USING SQL DESCRIPTOR PTF :d" with
+    | Describe { IsInput = false
+                 Descriptor = { Scope = None
+                                SimpleValue = { Kind = Parameter ":D" } } } -> ()
+    | res -> Assert.Fail(sprintf "Expected a PTF descriptor name, got %A" res)
+
+    match parseStatement "FETCH FROM PTF :c INTO :x" with
+    | DynamicFetch(_,
+                   { Scope = None
+                     SimpleValue = { Kind = Parameter ":C" } },
+                   _) -> ()
+    | res -> Assert.Fail(sprintf "Expected a PTF cursor name, got %A" res)
+
+[<Fact>]
 let ``GET DESCRIPTOR targets are simple target specifications (20.4)`` () =
     // 20.4 <get header information> / <get item information> take a <simple target specification>,
     // which admits a host parameter as well as a column reference. (A host parameter name is an
@@ -104,23 +135,29 @@ let ``COPY DESCRIPTOR verification`` () =
     // 20.6 — the target descriptor name is a <PTF descriptor name> (PTF <simple value spec>).
     parseStatementFails "COPY d1 TO d2"
 
-    match parseStatement "COPY d1 TO PTF ?" with
+    // 6.4 <simple value specification> has no <dynamic parameter specification>, so `?` is out.
+    parseStatementFails "COPY d1 TO PTF ?"
+
+    match parseStatement "COPY d1 TO PTF :d2" with
     | CopyDescriptor { Source = { Scope = None
                                   SimpleValue = { Kind = Identifier "D1" } }
                        SourceItem = None
                        Options = None
-                       Target = { Kind = Parameter "?" }
+                       Target = { Kind = Parameter ":D2" }
                        TargetItem = None } -> ()
     | res -> Assert.Fail(sprintf "Expected CopyDescriptor, got %A" res)
 
 [<Fact>]
 let ``COPY DESCRIPTOR VALUE verification`` () =
-    match parseStatement "COPY d1 VALUE 1 (NAME, TYPE) TO PTF ? VALUE 2" with
+    // <item number 1> / <item number 2> are <simple value specification>s — no `?`.
+    parseStatementFails "COPY d1 VALUE ? (NAME) TO PTF :d2 VALUE 2"
+
+    match parseStatement "COPY d1 VALUE 1 (NAME, TYPE) TO PTF :d2 VALUE 2" with
     | CopyDescriptor { Source = { Scope = None
                                   SimpleValue = { Kind = Identifier "D1" } }
                        SourceItem = Some { Kind = Literal(Number 1m) }
                        Options = Some [ "NAME"; "TYPE" ]
-                       Target = { Kind = Parameter "?" }
+                       Target = { Kind = Parameter ":D2" }
                        TargetItem = Some { Kind = Literal(Number 2m) } } -> ()
     | res -> Assert.Fail(sprintf "Expected CopyDescriptor VALUE, got %A" res)
 
@@ -418,10 +455,14 @@ let ``ALLOCATE EXTENDED DYNAMIC CURSOR verification`` () =
 
 [<Fact>]
 let ``ALLOCATE EXTENDED DYNAMIC CURSOR with dynamic names verification`` () =
-    match parseStatement "ALLOCATE ? CURSOR FOR LOCAL :s1" with
+    // 20.17 <extended cursor name> ::= [ <scope option> ] <simple value specification> —
+    // no <dynamic parameter specification>, so `ALLOCATE ? CURSOR` is rejected.
+    parseStatementFails "ALLOCATE ? CURSOR FOR LOCAL :s1"
+
+    match parseStatement "ALLOCATE :c1 CURSOR FOR LOCAL :s1" with
     | AllocateExtendedDynamicCursor ac ->
         match ac.Cursor.Scope, ac.Cursor.SimpleValue.Kind, ac.Statement.Scope, ac.Statement.SimpleValue.Kind with
-        | None, Parameter "?", Some ScopeLocal, Parameter ":S1" -> ()
+        | None, Parameter ":C1", Some ScopeLocal, Parameter ":S1" -> ()
         | _ -> Assert.Fail(sprintf "Unexpected AllocateExtendedDynamicCursor %A" ac)
     | res -> Assert.Fail(sprintf "Expected AllocateExtendedDynamicCursor, got %A" res)
 

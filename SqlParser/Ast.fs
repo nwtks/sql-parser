@@ -371,7 +371,8 @@ and ExpressionKind =
     // 6.17 <generalized invocation> ::= ( <value expression primary> AS <data type> ) <period> <method name> [ <SQL argument list> ]
     | GeneralizedInvocation of Expression * DataType * Expression * SqlArgumentList option
     // 6.18 <static method invocation>
-    | StaticMethodInvocation of Expression * Expression * SqlArgumentList
+    // 6.18 <static method invocation> — the [ <SQL argument list> ] is OPTIONAL
+    | StaticMethodInvocation of Expression * Expression * SqlArgumentList option
     // 6.19 <new specification>
     | NewSpecification of Expression * SqlArgumentList
     // 6.20 <attribute or method reference>
@@ -488,7 +489,9 @@ and ExpressionKind =
     // 7.19 <scalar subquery> ::= <subquery>
     | SubqueryExpression of Query
     // 8.3 <between predicate> ::= <row value predicand> [ NOT ] BETWEEN [ ASYMMETRIC | SYMMETRIC ] <left> AND <right>
-    | Between of Expression * bool * bool * Expression * Expression
+    // The two keywords are distinct and semantically opposed, so they are kept apart rather
+    // than collapsed into one flag (compare 7.6 <query system time period specification>).
+    | Between of Expression * bool * BetweenSymmetry * Expression * Expression
     // 8.4 <in predicate> — <in predicate value> IN <in predicate value list>
     | InList of Expression * bool * Expression list
     // 8.4 <in predicate> — <row value predicand> [ NOT ] IN <table subquery>
@@ -678,6 +681,20 @@ and SystemTimeSymmetry =
     | Symmetric
     | Asymmetric
 
+// 8.3 <between predicate> ::= <row value predicand> [ NOT ] BETWEEN [ ASYMMETRIC | SYMMETRIC ] …
+// `Default` is the absent keyword — the two spelled-out values are NOT symmetric.
+and BetweenSymmetry =
+    | Default
+    | Asymmetric
+    | Symmetric
+
+// 7.13 <group by clause> ::= GROUP BY [ <set quantifier> ] <grouping element list>
+// 7.16 <set quantifier> ::= DISTINCT | ALL — `ALL` is a real flag for GROUP BY (it is the
+// default, but stating it explicitly is not the same as omitting it), so it is kept.
+and SetQuantifier =
+    | QuantifierAll
+    | QuantifierDistinct
+
 and SystemTimeSpec =
     | AsOf of Expression
     | Between of Expression * Expression * SystemTimeSymmetry option
@@ -695,11 +712,16 @@ and ResultOption =
 // — table reference variants
 and TableSourceKind =
     // 7.6 <table primary>
-    | Table of Expression * Expression option
+    // 7.6 <table or query name> ::= <table name>
+    //     [ <query system time period specification> ] [ <correlation or recognition> ]
+    //     — the trailing <correlation or recognition> carries an optional <derived column list>.
+    | Table of Expression * Expression option * Expression list option
     | Subquery of Query * Expression * Expression list option
     | ValuesTable of Expression list list * Expression * Expression list option
     | Lateral of Query * Expression * Expression list option
-    | Unnest of Expression * bool * Expression * Expression list option
+    // 7.6 <collection derived table> ::= UNNEST ( <collection value expression>
+    //     [ { <comma> <collection value expression> }... ] ) [ WITH ORDINALITY ] <correlation or recognition>
+    | Unnest of Expression list * bool * Expression * Expression list option
     | TableSample of TableSource * string * Expression * Expression option
     | Only of Expression * Expression option * Expression list option
     | SystemTime of TableSource * SystemTimeSpec
@@ -965,7 +987,7 @@ and SelectStatement =
       From: TableSource list
       Where: Expression option
       GroupBy: GroupingElement list
-      GroupByDistinct: bool
+      GroupByQuantifier: SetQuantifier
       Having: Expression option
       Window: (Expression * WindowDefinition) list
       OrderBy: (Expression * bool * NullsOrder option) list
@@ -2018,7 +2040,7 @@ and SelectIntoStatement =
       From: TableSource list
       Where: Expression option
       GroupBy: GroupingElement list
-      GroupByDistinct: bool
+      GroupByQuantifier: SetQuantifier
       Having: Expression option
       Window: (Expression * WindowDefinition) list }
 
@@ -2069,7 +2091,7 @@ and MergeMatchCondition =
 
 // 14.12 <merge update specification> | <merge delete specification> | <merge insert specification>
 and MergeAction =
-    | MergeUpdate of (Expression * Expression) list
+    | MergeUpdate of SetClause list
     | MergeDelete
     // MergeInsert (insert column list, override, values)
     | MergeInsert of Expression list option * bool option * Expression list

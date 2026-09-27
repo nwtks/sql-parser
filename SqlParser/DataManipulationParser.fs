@@ -158,12 +158,27 @@ module DataManipulationParser =
             { Scope = scope
               SimpleValue = simpleValue }
 
+    // 5.4 <PTF descriptor name> ::= PTF <simple value specification>
+    // 5.4 <PTF cursor name> ::= PTF <simple value specification>
+    // Both are an alternative of <descriptor name> / <dynamic cursor name>; neither takes a
+    // <scope option>, so the scope slot is None.
+    let private pPtfName =
+        pKeyword "PTF" >>. pSimpleValueSpecification
+        |>> fun simpleValue ->
+            { Scope = None
+              SimpleValue = simpleValue }
+
+    // 5.4 <descriptor name> and 5.4 <dynamic cursor name> both admit
+    // `<conventional ...> | <PTF ...>`, so both slots share this one parser.
+    let pDescriptorOrCursorName = pExtendedName <|> pPtfName
+
     // 20.10 <using descriptor> / 20.12 <into descriptor>
     // The `[ SQL ] DESCRIPTOR <descriptor name>` tail shared by both.
-    // 5.4 <descriptor name> ::= <conventional descriptor name> — the 20.17 extended form is
-    // also admitted via `pExtendedName`.
+    // 5.4 <descriptor name> ::= <conventional descriptor name> | <PTF descriptor name> — the
+    // 20.17 extended form is also admitted via `pExtendedName`.
     let private pDescriptorName =
-        opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR" >>. pExtendedName
+        opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
+        >>. (pExtendedName <|> pPtfName)
 
     // 20.11 <input using clause> / 20.12 <output using clause> — shared by
     // 20.19 <dynamic open statement>, 20.20 <dynamic fetch statement> and
@@ -195,11 +210,16 @@ module DataManipulationParser =
              <|> (sepBy1 pTargetSpecification (token (pstring ",")) |>> UsingClause.UsingArguments))
 
     // 14.4 <open statement> ::= OPEN <cursor name>
-    // 20.19 <dynamic open statement> ::= OPEN <conventional dynamic cursor name> [ <input using clause> ]
+    // The [ <input using clause> ] belongs to 20.19 <dynamic open statement> only, so this
+    // parser stays bare. The `notFollowedBy` guard matters: 14.4 is dispatched BEFORE 20.19,
+    // and without it `OPEN cur USING :a` would satisfy the bare form, succeed, and then fail
+    // the enclosing statement on the trailing USING instead of backtracking to the dynamic one.
     let pOpenStatement =
-        pKeyword "OPEN" >>. pLocalQualifiedNameExpression
-        .>>. opt (attempt pInputUsingClause)
-        |>> Open
+        attempt (
+            pKeyword "OPEN"
+            >>. (pLocalQualifiedNameExpression .>> notFollowedBy (pKeyword "USING"))
+            |>> fun name -> Open(name, None)
+        )
 
     // 14.5 <fetch statement> ::= FETCH [ [ <fetch orientation> ] FROM ]
     //                                <cursor name> INTO <fetch target list>
@@ -256,10 +276,10 @@ module DataManipulationParser =
                             >>= fun hav ->
                                 opt (attempt QueryParser.pWindowClause)
                                 |>> fun win ->
-                                    let grpDistinct, grpList =
+                                    let grpQuantifier, grpList =
                                         match grp with
-                                        | Some(d, l) -> Option.defaultValue false d, l
-                                        | None -> false, []
+                                        | Some(d, l) -> Option.defaultValue SetQuantifier.QuantifierAll d, l
+                                        | None -> SetQuantifier.QuantifierAll, []
 
                                     { IsDistinct = Option.defaultValue false dist
                                       Columns = cols
@@ -267,7 +287,7 @@ module DataManipulationParser =
                                       From = from
                                       Where = whr
                                       GroupBy = grpList
-                                      GroupByDistinct = grpDistinct
+                                      GroupByQuantifier = grpQuantifier
                                       Having = hav
                                       Window = Option.defaultValue [] win }
                                     |> SelectInto
@@ -276,10 +296,18 @@ module DataManipulationParser =
     //   positioned: WHERE CURRENT OF <cursor name>
     //   searched:   WHERE <search condition>
     // Returns (cursor, search condition) — exactly one is Some.
+    //
+    // 20.26 <preparable dynamic cursor name> ::= [ <scope option> ] <cursor name> is the name
+    // 20.23/20.24/20.25/20.27 use, and those forms share this parser with the static
+    // 14.8/14.13, whose slot is the bare <cursor name>. Accepting the optional <scope option>
+    // here therefore also lets `WHERE CURRENT OF LOCAL c` through 14.8/14.13 — a documented
+    // relaxation, chosen over rejecting the grammar-valid dynamic forms. The AST slot is a
+    // plain Expression, so the scope itself is validated and then not stored.
     let private pWhereClause =
         pKeyword "WHERE"
         >>. (attempt (
-                 pKeyword "CURRENT" >>. pKeyword "OF" >>. pLocalQualifiedNameExpression
+                 pKeyword "CURRENT" >>. pKeyword "OF" >>. opt (attempt pScopeOption)
+                 >>= fun _scope -> pLocalQualifiedNameExpression
                  |>> fun c -> Some c, None
              )
              <|> (pExpression |>> fun e -> None, Some e))
@@ -443,6 +471,64 @@ module DataManipulationParser =
                           Override = ovr }
                 )
 
+    // 14.15 <update target> ::= <object column>
+    //     | <object column> <left bracket or trigraph> <simple value specification> <right bracket or trigraph>
+    // 14.15 <set clause> ::= <set target> <equals operator> <update source>
+    //     | <multiple column assignment> | <mutated set clause>
+    // <set target> is an <update target> or a <mutated set clause>, so the array form is
+    // available to the single-assignment, multiple-assignment and mutated forms alike.
+    // These two live at module level — above 14.12 — because 14.12
+    // <merge update specification> ::= UPDATE SET <set clause list> reuses them verbatim.
+    // Define-before-use wins over clause order here (see AGENTS.md).
+    let private pSetClause =
+        let pUpdateTarget =
+            pIdentifierExpression
+            .>>. opt (attempt (between (token pLeftBracket) (token pRightBracket) pSimpleValueSpecification))
+            |>> fun (column, index) ->
+                match index with
+                | Some idx ->
+                    { Expression.Kind = ArrayElement(column, idx)
+                      Pos = column.Pos }
+                | None -> column
+
+        // 14.15 <multiple column assignment> ::= <set target list> <equals operator> <assigned row>
+        // <set target list> ::= ( <set target> [ { <comma> <set target> }... ] )
+        attempt (
+            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pUpdateTarget (token (pstring ",")))
+            .>> token (pstring "=")
+            // <assigned row> is a <contextually typed row value expression>: NULL is legal.
+            .>>. between
+                (token (pstring "("))
+                (token (pstring ")"))
+                (sepBy1 (pContextuallyTypedValueSpecification <|> pExpression) (token (pstring ",")))
+            |>> MultipleSet
+        )
+        <|> attempt (
+            // 14.15 <mutated set clause> ::= <mutated target> <period> <method name>
+            // <mutated target> ::= <object column> | <mutated set clause>
+            // <set clause> ::= <mutated set clause> <equals operator> <update source>
+            pUpdateTarget .>>. many1 (token (pstring ".") >>. pIdentifierExpression)
+            .>> token (pstring "=")
+            .>>. (pContextuallyTypedValueSpecification <|> pExpression)
+            |>> fun ((first, rest), value) ->
+                // The last segment is the method name; the rest is the
+                // mutated target (folded into a FieldReference chain).
+                let target: Expression =
+                    List.fold
+                        (fun (acc: Expression) (name: Expression) ->
+                            { Kind = FieldReference(acc, name)
+                              Pos = acc.Pos })
+                        first
+                        (List.take (rest.Length - 1) rest)
+
+                MutatedSet(target, List.last rest, value)
+        )
+        <|> ( // 14.15 <set clause> ::= <set target> <equals operator> <update source>
+        // <set target> ::= <update target> (<object column> [ [ <simple value specification> ] ])
+        pUpdateTarget .>> token (pstring "=")
+        .>>. (pContextuallyTypedValueSpecification <|> pExpression)
+        |>> SingleSet)
+
     // 14.12 <merge statement> ::= MERGE INTO <target table> [ [ AS ] <merge correlation name> ]
     //     USING <table reference> ON <search condition> <merge operation specification>
     // <merge operation specification> ::= <merge when clause>...
@@ -450,16 +536,12 @@ module DataManipulationParser =
     let pMergeStatement =
         // 14.12 <merge update specification> ::= UPDATE SET <set clause list>
         // 14.12 <merge delete specification> ::= DELETE
+        // <merge update or delete specification> ::= <merge update specification> | <merge delete specification>
+        // <set clause list> is 14.15's, shared verbatim — so <multiple column assignment>,
+        // array <update target>s and <mutated set clause>s are all available here.
         let pMatchedAction =
-            // <merge update or delete specification> ::= <merge update specification> | <merge delete specification>
-            // <set clause> shares 14.15's <update source>, which admits a 6.5
-            // <contextually typed value specification> (NULL).
             choice
-                [ attempt (pKeyword "UPDATE" >>. pKeyword "SET")
-                  >>. sepBy1
-                          (pIdentifierExpression .>> token (pstring "=")
-                           .>>. (pContextuallyTypedValueSpecification <|> pExpression))
-                          (token (pstring ","))
+                [ attempt (pKeyword "UPDATE" >>. pKeyword "SET" >>. sepBy1 pSetClause (token (pstring ",")))
                   |>> MergeUpdate
                   pKeyword "DELETE" >>% MergeDelete ]
 
@@ -518,61 +600,6 @@ module DataManipulationParser =
     // 20.27 <preparable dynamic update statement: positioned> ::= UPDATE [ <target table> ] SET <set clause list>
     //     WHERE CURRENT OF <preparable dynamic cursor name>
     let pUpdateStatement =
-        // 14.15 <set clause> ::= <set target> <equals operator> <update source>
-        //     | <multiple column assignment> | <mutated set clause>
-        // 14.15 <update target> ::= <object column>
-        //     | <object column> <left bracket or trigraph> <simple value specification> <right bracket or trigraph>
-        // <set target> is an <update target> or a <mutated set clause>, so the array form is
-        // available to the single-assignment, multiple-assignment and mutated forms alike.
-        let pUpdateTarget =
-            pIdentifierExpression
-            .>>. opt (attempt (between (token pLeftBracket) (token pRightBracket) pSimpleValueSpecification))
-            |>> fun (column, index) ->
-                match index with
-                | Some idx ->
-                    { Expression.Kind = ArrayElement(column, idx)
-                      Pos = column.Pos }
-                | None -> column
-
-        let pSetClause =
-            // 14.15 <multiple column assignment> ::= <set target list> <equals operator> <assigned row>
-            // <set target list> ::= ( <set target> [ { <comma> <set target> }... ] )
-            attempt (
-                between (token (pstring "(")) (token (pstring ")")) (sepBy1 pUpdateTarget (token (pstring ",")))
-                .>> token (pstring "=")
-                // <assigned row> is a <contextually typed row value expression>: NULL is legal.
-                .>>. between
-                    (token (pstring "("))
-                    (token (pstring ")"))
-                    (sepBy1 (pContextuallyTypedValueSpecification <|> pExpression) (token (pstring ",")))
-                |>> MultipleSet
-            )
-            <|> attempt (
-                // 14.15 <mutated set clause> ::= <mutated target> <period> <method name>
-                // <mutated target> ::= <object column> | <mutated set clause>
-                // <set clause> ::= <mutated set clause> <equals operator> <update source>
-                pUpdateTarget .>>. many1 (token (pstring ".") >>. pIdentifierExpression)
-                .>> token (pstring "=")
-                .>>. (pContextuallyTypedValueSpecification <|> pExpression)
-                |>> fun ((first, rest), value) ->
-                    // The last segment is the method name; the rest is the
-                    // mutated target (folded into a FieldReference chain).
-                    let target: Expression =
-                        List.fold
-                            (fun (acc: Expression) (name: Expression) ->
-                                { Kind = FieldReference(acc, name)
-                                  Pos = acc.Pos })
-                            first
-                            (List.take (rest.Length - 1) rest)
-
-                    MutatedSet(target, List.last rest, value)
-            )
-            <|> ( // 14.15 <set clause> ::= <set target> <equals operator> <update source>
-            // <set target> ::= <update target> (<object column> [ [ <simple value specification> ] ])
-            pUpdateTarget .>> token (pstring "=")
-            .>>. (pContextuallyTypedValueSpecification <|> pExpression)
-            |>> SingleSet)
-
         // 20.25 <preparable dynamic delete statement: positioned> /
         // 20.27 <preparable dynamic update statement: positioned> omit the <target table>.
         let pOptionalDmlTarget =

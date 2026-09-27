@@ -66,16 +66,28 @@ module ControlParser =
         // 10.4 <table argument ordering column> ::= <column reference> [ <ordering specification> ] [ <null ordering> ]
         // 10.4 <table argument ordering list> ::= <table argument ordering column>
         //     | ( <table argument ordering column> [ { <comma> ... }... ] )
+        // The key is a <column reference> — NOT a 10.10 <sort specification>, whose key is a
+        // full <value expression> — so the sort key parser is not reused here. The optional
+        // [ <ordering specification> ] [ <null ordering> ] tail keeps ASC/DESC/... as written.
+        let pOrderingColumn =
+            pColumnReferenceExpression
+            >>= fun col ->
+                opt (pKeyword "ASC" >>% true <|> (pKeyword "DESC" >>% false))
+                >>= fun asc ->
+                    opt (
+                        pKeyword "NULLS"
+                        >>. (pKeyword "FIRST" >>% NullsOrder.NullsFirst
+                             <|> (pKeyword "LAST" >>% NullsOrder.NullsLast))
+                    )
+                    |>> fun nulls -> col, Option.defaultValue true asc, nulls
+
         let pOrdering =
             pKeyword "ORDER"
             >>. pKeyword "BY"
             >>. (attempt (
-                     between
-                         (token (pstring "("))
-                         (token (pstring ")"))
-                         (sepBy1 QueryParser.pSortSpecification (token (pstring ",")))
+                     between (token (pstring "(")) (token (pstring ")")) (sepBy1 pOrderingColumn (token (pstring ",")))
                  )
-                 <|> (QueryParser.pSortSpecification |>> fun s -> [ s ]))
+                 <|> (pOrderingColumn |>> fun c -> [ c ]))
 
         let pCorrelation =
             attempt (opt (pKeyword "AS") >>. pCorrelationName .>>. opt (attempt pDerivedColumnList))
@@ -143,13 +155,21 @@ module ControlParser =
 
         // 10.4 <copartition clause> ::= COPARTITION <copartition list>
         let pCopartition =
-            // 10.4 <copartition specification> ::= ( <range variable> [ { <comma> <range variable> }... ] )
+            // 10.4 <copartition specification> ::= ( <range variable> <comma> <range variable>
+            //     [ { <comma> <range variable> }... ] ) — AT LEAST TWO range variables.
             // 10.4 <range variable> ::= <table name> | <query name> | <correlation name>
             let pCopartitionSpecification =
                 between
                     (token (pstring "("))
                     (token (pstring ")"))
-                    (sepBy1 pSchemaQualifiedNameExpression (token (pstring ",")))
+                    (pSchemaQualifiedNameExpression
+                     >>= fun first ->
+                         token (pstring ",") >>% ()
+                         >>= fun () ->
+                             pSchemaQualifiedNameExpression
+                             >>= fun second ->
+                                 many (token (pstring ",") >>. pSchemaQualifiedNameExpression)
+                                 |>> fun rest -> first :: second :: rest)
 
             pKeyword "COPARTITION"
             >>. sepBy1 pCopartitionSpecification (token (pstring ","))

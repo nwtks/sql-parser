@@ -237,7 +237,7 @@ let ``TABLESAMPLE SYSTEM verification`` () =
     match parse "SELECT * FROM users TABLESAMPLE SYSTEM (10)" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = TableSample({ Kind = TableSourceKind.Table({ Kind = Identifier "USERS" }, None) },
+        | [ { Kind = TableSample({ Kind = TableSourceKind.Table({ Kind = Identifier "USERS" }, None, None) },
                                  "SYSTEM",
                                  { Kind = Literal(Number 10m) },
                                  None) } ] -> ()
@@ -253,7 +253,7 @@ let ``TABLESAMPLE verification`` () =
     match parse "SELECT * FROM users TABLESAMPLE BERNOULLI (10)" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = TableSample({ Kind = TableSourceKind.Table({ Kind = Identifier "USERS" }, None) },
+        | [ { Kind = TableSample({ Kind = TableSourceKind.Table({ Kind = Identifier "USERS" }, None, None) },
                                  "BERNOULLI",
                                  { Kind = Literal(Number 10m) },
                                  None) } ] -> ()
@@ -265,8 +265,8 @@ let ``FOR SYSTEM_TIME verification`` () =
     match parse "SELECT * FROM t FOR SYSTEM_TIME AS OF '2020-01-01'" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = SystemTime({ Kind = TableSourceKind.Table({ Kind = Identifier "T" }, None) }, SystemTimeSpec.AsOf _) } ] ->
-            ()
+        | [ { Kind = SystemTime({ Kind = TableSourceKind.Table({ Kind = Identifier "T" }, None, None) },
+                                SystemTimeSpec.AsOf _) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected SystemTime AsOf, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
@@ -687,15 +687,28 @@ let ``TableSource types verification`` () =
     match parse "SELECT * FROM users" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = TableSourceKind.Table({ Kind = Identifier "USERS" }, None) } ] -> ()
+        | [ { Kind = TableSourceKind.Table({ Kind = Identifier "USERS" }, None, None) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected Table, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
     match parse "SELECT * FROM users AS u" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = TableSourceKind.Table({ Kind = Identifier "USERS" }, Some { Kind = Identifier "U" }) } ] -> ()
+        | [ { Kind = TableSourceKind.Table({ Kind = Identifier "USERS" }, Some { Kind = Identifier "U" }, None) } ] ->
+            ()
         | res -> Assert.Fail(sprintf "Expected Table, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    // 7.6 <table or query name> [ <query system time period specification> ]
+    //     [ <correlation or recognition> ] — the trailing group carries a
+    // <parenthesized derived column list>, so `t AS x (a, b)` is accepted.
+    match parse "SELECT * FROM users u (id, name)" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = TableSourceKind.Table({ Kind = Identifier "USERS" },
+                                           Some { Kind = Identifier "U" },
+                                           Some [ { Kind = Identifier "ID" }; { Kind = Identifier "NAME" } ]) } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected a derived column list, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
     match parse "SELECT * FROM (SELECT id FROM users) sub" with
@@ -712,7 +725,7 @@ let ``Schema-qualified table name verification`` () =
     match parse "SELECT * FROM app.users" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = TableSourceKind.Table({ Kind = ColumnReference [ "APP"; "USERS" ] }, None) } ] -> ()
+        | [ { Kind = TableSourceKind.Table({ Kind = ColumnReference [ "APP"; "USERS" ] }, None, None) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected schema-qualified table, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
@@ -734,8 +747,21 @@ let ``UNNEST derived table verification`` () =
     match parse "SELECT * FROM UNNEST(arr) WITH ORDINALITY AS u" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = Unnest({ Kind = Identifier "ARR" }, true, { Kind = Identifier "U" }, None) } ] -> ()
+        | [ { Kind = Unnest([ { Kind = Identifier "ARR" } ], true, { Kind = Identifier "U" }, None) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected Unnest, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    // 7.6 <collection derived table> ::= UNNEST ( <collection value expression>
+    //     [ { <comma> <collection value expression> }... ] ) [ WITH ORDINALITY ]
+    //     <correlation or recognition> — the standard multi-array form.
+    match parse "SELECT * FROM UNNEST(a, b, c) WITH ORDINALITY AS u (n)" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = Unnest([ { Kind = Identifier "A" }; { Kind = Identifier "B" }; { Kind = Identifier "C" } ],
+                            true,
+                            { Kind = Identifier "U" },
+                            Some [ { Kind = Identifier "N" } ]) } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected a multi-array Unnest, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
@@ -806,16 +832,32 @@ let ``TABLE function and PTF derived table verification`` () =
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
-let ``Delta table without alias is rejected`` () =
-    parseFails "SELECT * FROM NEW TABLE (INSERT INTO t VALUES (1))"
-    parseFails "SELECT * FROM OLD TABLE (DELETE FROM t WHERE id = 1)"
-    parseFails "SELECT * FROM FINAL TABLE (UPDATE t SET id = 1)"
-
-    match parse "SELECT * FROM NEW TABLE (INSERT INTO t VALUES (1)) AS n" with
+let ``Delta table correlation is optional (7.6)`` () =
+    // 7.6 <data change delta table> ::= <result option> TABLE ( <data change statement> )
+    //     [ <correlation or recognition> ] — the correlation is OPTIONAL, unlike the other
+    // <table primary> alternatives.
+    match parse "SELECT * FROM NEW TABLE (INSERT INTO t VALUES (1))" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = DataChangeDelta(ResultOption.New, Insert _, Some _, None) } ] -> ()
-        | res -> Assert.Fail(sprintf "Expected DataChangeDelta New, got %A" res)
+        | [ { Kind = DataChangeDelta(ResultOption.New, Insert _, None, None) } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected DataChangeDelta New with no alias, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    match parse "SELECT * FROM OLD TABLE (DELETE FROM t WHERE id = 1)" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = DataChangeDelta(ResultOption.Old, Delete _, None, None) } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected DataChangeDelta Old with no alias, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    match parse "SELECT * FROM FINAL TABLE (UPDATE t SET id = 1) AS f (id)" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = DataChangeDelta(ResultOption.Final,
+                                     Update _,
+                                     Some { Kind = Identifier "F" },
+                                     Some [ { Kind = Identifier "ID" } ]) } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected DataChangeDelta with a derived column list, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
     match parse "SELECT * FROM OLD TABLE (DELETE FROM t WHERE id = 1) AS o" with
@@ -918,6 +960,20 @@ let ``PARTITION BY join rejects an expression (7.10)`` () =
     // <partitioned join column reference list> is a list of <column reference>s.
     parseFails "SELECT * FROM t1 PARTITION BY (a + b) JOIN t2 ON t1.id = t2.id"
 
+    // … on the RIGHT operand too: 7.10 <qualified join> is
+    // { <table reference> | <partitioned join table> } [ <join type> ] JOIN
+    // { <table reference> | <partitioned join table> } <join specification>.
+    parseFails "SELECT * FROM t1 JOIN t2 PARTITION BY (a + b) ON t1.id = t2.id"
+
+[<Fact>]
+let ``PARTITION BY join on the right operand (7.10)`` () =
+    match parse "SELECT * FROM t1 JOIN t2 PARTITION BY (t2.a) ON t1.id = t2.id" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = JoinedTable { PartitionBy = Some [ { Kind = ColumnReference [ "T2"; "A" ] } ] } } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected a right-operand PARTITION BY join, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
 [<Fact>]
 let ``NATURAL JOIN and USING verification`` () =
     match parse "SELECT * FROM t1 NATURAL JOIN t2" with
@@ -959,8 +1015,8 @@ let ``Comma-separated FROM list verification`` () =
     match parse "SELECT * FROM users, orders" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = TableSourceKind.Table({ Kind = Identifier "USERS" }, None) }
-            { Kind = TableSourceKind.Table({ Kind = Identifier "ORDERS" }, None) } ] -> ()
+        | [ { Kind = TableSourceKind.Table({ Kind = Identifier "USERS" }, None, None) }
+            { Kind = TableSourceKind.Table({ Kind = Identifier "ORDERS" }, None, None) } ] -> ()
         | res -> Assert.Fail(sprintf "Expected two tables, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
@@ -988,11 +1044,21 @@ let ``GROUP BY grouping elements verification`` () =
 
     match parse "SELECT a FROM t GROUP BY DISTINCT a, b" with
     | Select(SelectQuery s) ->
-        Assert.True(s.GroupByDistinct)
+        Assert.Equal(SetQuantifier.QuantifierDistinct, s.GroupByQuantifier)
 
         match s.GroupBy with
         | [ GroupingSet [ { Kind = Identifier "A" } ]; GroupingSet [ { Kind = Identifier "B" } ] ] -> ()
         | res -> Assert.Fail(sprintf "Expected GroupBy DISTINCT a, b, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    // 7.13 [ <set quantifier> ] — ALL is a real flag here (the default, but stating it is
+    // not the same as omitting it), so both spellings are preserved.
+    match parse "SELECT a FROM t GROUP BY ALL a, b" with
+    | Select(SelectQuery s) -> Assert.Equal(SetQuantifier.QuantifierAll, s.GroupByQuantifier)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    match parse "SELECT a FROM t GROUP BY a, b" with
+    | Select(SelectQuery s) -> Assert.Equal(SetQuantifier.QuantifierAll, s.GroupByQuantifier)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
     match parse "SELECT a FROM t GROUP BY GROUPING SETS ((a), (b))" with
@@ -1171,6 +1237,28 @@ let ``OFFSET without ROW or ROWS fails verification`` () =
     match SqlParser.parse "SELECT * FROM t OFFSET 5;" with
     | Error _ -> ()
     | Ok res -> Assert.Fail(sprintf "Expected failure, got %A" res)
+
+[<Fact>]
+let ``OFFSET and FETCH row counts reject a dynamic parameter (7.17)`` () =
+    // 7.17 <offset row count> / <fetch first row count> are <simple value specification>s,
+    // and 6.4 <simple value specification> has no <dynamic parameter specification>.
+    let fails (sql: string) =
+        match SqlParser.parse sql with
+        | Error _ -> ()
+        | Ok res -> Assert.Fail(sprintf "Expected failure for %s, got %A" sql res)
+
+    fails "SELECT * FROM t OFFSET ? ROWS"
+    fails "SELECT * FROM t OFFSET ? ROWS FETCH FIRST 5 ROWS ONLY"
+    fails "SELECT * FROM t FETCH FIRST ? ROWS ONLY"
+    fails "SELECT * FROM t FETCH FIRST ? PERCENT ROWS ONLY"
+
+    // A host parameter is a <host parameter name>, so it is still accepted.
+    match parse "SELECT * FROM t OFFSET :n ROWS" with
+    | Select(SelectQuery q) ->
+        match q.Offset with
+        | Some { Kind = Parameter ":N" } -> ()
+        | res -> Assert.Fail(sprintf "Expected a host parameter offset, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
 let ``FETCH clause verification`` () =
@@ -1434,9 +1522,13 @@ let ``ORDER BY on an explicit table and a table value constructor (7.17)`` () =
     | Select(QueryExpression(ExplicitTable _, [ { Kind = Literal(Number 1m) }, _, _ ], None, None)) -> ()
     | res -> Assert.Fail(sprintf "Expected an ORDER BY over EXPLICIT TABLE, got %A" res)
 
-    match parse "VALUES (1), (2) ORDER BY 1" with
+    // 7.1 <explicit row value constructor> needs at least TWO elements, so a single-element
+    // `(1)` row must use the ROW (…) form.
+    match parse "VALUES ROW(1), ROW(2) ORDER BY 1" with
     | Select(QueryExpression(TableValueConstructor _, [ { Kind = Literal(Number 1m) }, _, _ ], None, None)) -> ()
     | res -> Assert.Fail(sprintf "Expected an ORDER BY over VALUES, got %A" res)
+
+    parseFails "VALUES (1), (2) ORDER BY 1"
 
 [<Fact>]
 let ``ORDER BY OFFSET FETCH and locking on a WITH statement verification`` () =

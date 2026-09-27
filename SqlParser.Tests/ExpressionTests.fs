@@ -768,6 +768,22 @@ let ``VALUE_OF function verification`` () =
         | res -> Assert.Fail(sprintf "Expected ValueOf delta, got %A" res)
     | res -> Assert.Fail(sprintf "Expected ValueOf with delta and default, got %A" res)
 
+    // 6.11 <row marker offset> ::= <simple value specification> | <dynamic parameter specification>
+    // — the one production that names a dynamic parameter beside a simple value specification.
+    match parse "SELECT VALUE_OF(x AT CURRENT_ROW + ?)" with
+    | ValueOf({ Kind = Identifier "X" },
+              { Marker = RowMarker.CurrentRow
+                Delta = Some(true, { Kind = Parameter "?" }) },
+              None) -> ()
+    | res -> Assert.Fail(sprintf "Expected ValueOf with a dynamic parameter delta, got %A" res)
+
+    match parse "SELECT VALUE_OF(x AT END_FRAME - :n)" with
+    | ValueOf({ Kind = Identifier "X" },
+              { Marker = RowMarker.EndFrame
+                Delta = Some(false, { Kind = Parameter ":N" }) },
+              None) -> ()
+    | res -> Assert.Fail(sprintf "Expected ValueOf with a host parameter delta, got %A" res)
+
 [<Fact>]
 let ``Case expression verification`` () =
     match parse "SELECT CASE WHEN a = 1 THEN 'one' ELSE 'other' END" with
@@ -800,6 +816,22 @@ let ``CAST FORMAT template verification (6.13)`` () =
     // <cast target> is a <domain name> or a <data type> — DESCRIPTOR is neither; the
     // CAST ( NULL AS DESCRIPTOR ) form is the 10.4 <descriptor argument> (see below).
     parseFails "SELECT CAST(x AS DESCRIPTOR) FROM t"
+
+    // 6.13 <cast operand> ::= <value expression> | <implicitly typed value specification>,
+    // and 6.5 <implicitly typed value specification> ::= <null specification> | <empty specification>.
+    // <empty specification> ::= ARRAY [] | MULTISET [] — the 6.42 / 6.45 constructors both
+    // require at least one element, so without this alternative CAST could not reach them.
+    match parse "SELECT CAST(ARRAY[] AS INTEGER) FROM t" with
+    | Cast({ Kind = ArrayConstructor [] }, Integer, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected a cast of an empty array, got %A" res)
+
+    match parse "SELECT CAST(MULTISET[] AS INTEGER) FROM t" with
+    | Cast({ Kind = MultisetConstructor [] }, Integer, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected a cast of an empty multiset, got %A" res)
+
+    match parse "SELECT CAST(NULL AS INTEGER) FROM t" with
+    | Cast({ Kind = Literal Null }, Integer, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected a cast of NULL, got %A" res)
 
 [<Fact>]
 let ``Descriptor arguments in SQL argument lists (10.4)`` () =
@@ -917,13 +949,28 @@ let ``SQL argument forms (10.4)`` () =
         | res -> Assert.Fail(sprintf "Expected a table argument, got %A" res)
     | res -> Assert.Fail(sprintf "Expected my_ptf, got %A" res)
 
-    // <copartition clause> ::= COPARTITION <copartition list>
+    // 10.4 <table argument ordering column> ::= <column reference> [ <ordering specification> ] [ <null ordering> ]
+    // — the key is a column reference, not the 10.10 <sort specification>'s <value expression>.
+    match parse "SELECT my_ptf(TABLE(t) ORDER BY b DESC NULLS LAST) FROM t" with
+    | FunctionCall(_, _, arguments, _, _, _, _) ->
+        match arguments.Arguments with
+        | [ SqlArgumentTable { OrderBy = Some [ { Kind = Identifier "B" }, false, Some NullsLast ] } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected an ORDER BY table argument, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected my_ptf, got %A" res)
+
+    parseFails "SELECT my_ptf(TABLE(t) ORDER BY 1 + 1) FROM t"
+    parseFails "SELECT my_ptf(TABLE(t) ORDER BY 'x') FROM t"
+
+    // 10.4 <copartition clause> ::= COPARTITION <copartition list>
     match parse "SELECT my_ptf(TABLE(t1) PARTITION BY a, TABLE(t2) COPARTITION (t1, t2)) FROM t" with
     | FunctionCall(_, _, arguments, _, _, _, _) ->
         match arguments.Copartition with
         | Some [ [ { Kind = Identifier "T1" }; { Kind = Identifier "T2" } ] ] -> ()
         | res -> Assert.Fail(sprintf "Expected a copartition clause, got %A" res)
     | res -> Assert.Fail(sprintf "Expected my_ptf, got %A" res)
+
+    // 10.4 <copartition specification> requires AT LEAST TWO <range variable>s.
+    parseFails "SELECT my_ptf(TABLE(t1) PARTITION BY a COPARTITION (t1)) FROM t"
 
     // 10.4 — a reserved built-in takes <value expression> arguments only.
     parseFails "SELECT ABS(1, TABLE(t)) FROM t"
@@ -989,6 +1036,16 @@ let ``TREAT subtype treatment verification`` () =
     | Treat({ Kind = Identifier "X" }, UserDefinedType { Kind = Identifier "T" }) -> ()
     | res -> Assert.Fail(sprintf "Expected Treat, got %A" res)
 
+    // 6.16 <target subtype> ::= <path-resolved user-defined type name> | <reference type>
+    match parse "SELECT TREAT(x AS REF (my_udt))" with
+    | Treat(_, ReferenceType(UserDefinedType { Kind = Identifier "MY_UDT" }, _)) -> ()
+    | res -> Assert.Fail(sprintf "Expected a reference target subtype, got %A" res)
+
+    // A predefined type or a row/collection type is neither of the two.
+    parseFails "SELECT TREAT(x AS INTEGER)"
+    parseFails "SELECT TREAT(x AS ROW(a INTEGER))"
+    parseFails "SELECT TREAT(x AS INT ARRAY)"
+
 [<Fact>]
 let ``Generalized method invocation verification`` () =
     match parse "SELECT (x AS mytype).m()" with
@@ -1014,8 +1071,13 @@ let ``Static method invocation verification`` () =
     match parse "SELECT my_type::prune(x)" with
     | StaticMethodInvocation({ Kind = Identifier "MY_TYPE" },
                              { Kind = Identifier "PRUNE" },
-                             SqlValueArguments([ { Kind = Identifier "X" } ], None)) -> ()
+                             Some(SqlValueArguments([ { Kind = Identifier "X" } ], None))) -> ()
     | res -> Assert.Fail(sprintf "Expected StaticMethodInvocation, got %A" res)
+
+    // 6.18 [ <SQL argument list> ] is OPTIONAL.
+    match parse "SELECT my_type::prune" with
+    | StaticMethodInvocation({ Kind = Identifier "MY_TYPE" }, { Kind = Identifier "PRUNE" }, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected a bare static method reference, got %A" res)
 
 [<Fact>]
 let ``NEW specification verification`` () =
@@ -1509,6 +1571,18 @@ let ``JSON_OBJECT function verification`` () =
                  Some _) -> ()
     | res -> Assert.Fail(sprintf "Expected JsonObject full, got %A" res)
 
+    // 6.33 the null / uniqueness clauses sit INSIDE the optional
+    // [ <JSON name and value> … ] group, so they need at least one name-and-value first.
+    parseFails "SELECT JSON_OBJECT(NULL ON NULL)"
+    parseFails "SELECT JSON_OBJECT(WITH UNIQUE KEYS)"
+    parseFails "SELECT JSON_OBJECT(WITHOUT UNIQUE KEYS)"
+
+    // The ARRAY constructor is the mirror image — there the clauses sit OUTSIDE, and the
+    // name-and-value group does not exist.
+    match parse "SELECT JSON_ARRAY(NULL ON NULL)" with
+    | JsonArray(_, Some JsonNullOnNull, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonArray NULL ON NULL, got %A" res)
+
     match parse "SELECT JSON_OBJECT('a' : 1)" with
     | JsonObject([ { Name = { Kind = Literal(String "a") }
                      Value = { Kind = Literal(Number 1m) }
@@ -1892,8 +1966,37 @@ let ``EXTRACT with invalid field is rejected`` () =
     parseFails "EXTRACT('YEAR' FROM ts)"
 
 [<Fact>]
+let ``String and extract function operands are boolean-free`` () =
+    // Each of these slots is a 6.29 <numeric value expression> / 6.31 <string value
+    // expression> / 6.35 <datetime value expression> / <interval value expression>, none of
+    // which admits a 6.39 <boolean value expression> at the top level.
+    parseFails "SELECT UPPER(a = b)"
+    parseFails "SELECT LOWER(a = b)"
+    parseFails "SELECT NORMALIZE(a = 1)"
+    parseFails "SELECT SUBSTRING(a SIMILAR b ESCAPE c = d)"
+    parseFails "SELECT EXTRACT(YEAR FROM a = b)"
+    parseFails "SELECT OCTET_LENGTH(a = b)"
+    parseFails "SELECT CHAR_LENGTH(a = b)"
+
+    // The conforming forms still parse.
+    match parse "SELECT UPPER(a || b) FROM t" with
+    | Fold(FoldFunction.FoldUpper, { Kind = BinaryOp(Concatenate, _, _) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected a folded concatenation, got %A" res)
+
+    match parse "SELECT EXTRACT(YEAR FROM ts) FROM t" with
+    | Extract(_, { Kind = Identifier "TS" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected an extract source, got %A" res)
+
+    match parse "SELECT EXTRACT(MONTH FROM INTERVAL '3' MONTH) FROM t" with
+    | Extract(_, { Kind = Literal(Interval _) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected an interval extract source, got %A" res)
+
+[<Fact>]
 let ``TRIM_ARRAY with invalid count is rejected`` () =
     // Comparisons/boolean operators are not <numeric value expression>
     parseFails "SELECT TRIM_ARRAY(arr, a = b)"
     parseFails "SELECT TRIM_ARRAY(arr, x OR y)"
     parseFails "SELECT TRIM_ARRAY(arr, EXISTS (SELECT 1))"
+    // … and the <array value expression> operand is boolean-free too, not just the count.
+    parseFails "SELECT TRIM_ARRAY(a = b, 2)"
+    parseFails "SELECT TRIM_ARRAY(x OR y, 2)"

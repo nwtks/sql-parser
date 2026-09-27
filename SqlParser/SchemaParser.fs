@@ -65,31 +65,47 @@ module SchemaParser =
               DataTypeList = dataTypeList
               ForType = forType }
 
-        // The <data type list> belongs to 10.6 <member name> only, so a caller that wants the
-        // production transcribed literally (a 12.3 <object name>) passes false and gets neither
-        // the bare-name form nor the list.
+        // 10.6 <member name alternatives> ::= <schema qualified routine name> | <method name>
+        // 5.4 <method name> ::= <identifier> is a single part, whereas
+        // <schema qualified routine name> is 1-3 parts. The <routine type> is the only thing
+        // that decides, so it is read first and the name parser is then chosen from it.
+        let pMemberNameAfter routineType =
+            match routineType with
+            | Some(RoutineType.Method _) -> pMethodNameExpression
+            | _ -> pSchemaQualifiedNameExpression
+
+        // <data type list> belongs to 10.6 <member name> in BOTH alternatives, so a caller that
+        // wants the <routine type> mandatory (a 12.3 <object name>) passes false and gives up
+        // only the bare-name form. What that slot still needs narrowed is the <routine type>
+        // itself: without it, `ON ROUTINE_TABLE` would be read as a routine designator and
+        // shadow the optional-[ TABLE ] <table name> alternative.
+        let memberNameParts routineType =
+            pMemberNameAfter routineType
+            .>>. opt (attempt pDataTypeList)
+            .>>. opt (attempt (pKeyword "FOR" >>. pSchemaQualifiedNameExpression))
+            |>> fun ((name, dataTypeList), forType) -> (name, dataTypeList, forType)
+
         let pMemberName =
             if allowBareRoutineName then
                 choice
                     [ attempt (
                           opt pRoutineType
-                          .>>. pSchemaQualifiedNameExpression
-                          .>>. opt (attempt pDataTypeList)
-                          .>>. opt (attempt (pKeyword "FOR" >>. pSchemaQualifiedNameExpression))
-                          |>> fun (((routineType, name), dataTypeList), forType) ->
-                              mk false routineType name dataTypeList forType
+                          >>= fun routineType ->
+                              memberNameParts routineType
+                              |>> fun (name, dataTypeList, forType) -> mk false routineType name dataTypeList forType
                       )
                       attempt (
                           pRoutineType
-                          .>>. pSchemaQualifiedNameExpression
-                          .>>. opt (attempt (pKeyword "FOR" >>. pSchemaQualifiedNameExpression))
-                          |>> fun ((routineType, name), forType) -> mk false (Some routineType) name None forType
+                          >>= fun routineType ->
+                              memberNameParts (Some routineType)
+                              |>> fun (name, dataTypeList, forType) ->
+                                  mk false (Some routineType) name dataTypeList forType
                       ) ]
             else
                 pRoutineType
-                .>>. pSchemaQualifiedNameExpression
-                .>>. opt (attempt (pKeyword "FOR" >>. pSchemaQualifiedNameExpression))
-                |>> fun ((routineType, name), forType) -> mk false (Some routineType) name None forType
+                >>= fun routineType ->
+                    memberNameParts (Some routineType)
+                    |>> fun (name, dataTypeList, forType) -> mk false (Some routineType) name dataTypeList forType
 
         choice
             [ attempt (
@@ -100,10 +116,10 @@ module SchemaParser =
 
     let pSpecificRoutineDesignator = pSpecificRoutineDesignatorImpl true
 
-    // 10.6 <specific routine designator> transcribed literally: <routine type> is mandatory in
-    // both alternatives and <member name> carries no <data type list>. A 12.3 <object name>
-    // needs this shape, because its other alternatives (a kind keyword or a bare
-    // <table name>) would otherwise be shadowed by the bare-name form.
+    // 10.6 <specific routine designator> with the <routine type> mandatory in both alternatives
+    // and no bare-name form — the shape a 12.3 <object name> needs, because its other
+    // alternatives (a kind keyword or a bare <table name>) would otherwise be shadowed by the
+    // bare-name form. The optional <data type list> of <member name> is kept.
     let pTypedSpecificRoutineDesignator = pSpecificRoutineDesignatorImpl false
 
     // 10.8 <constraint enforcement> ::= [ NOT ] ENFORCED   (true = ENFORCED, false = NOT ENFORCED)

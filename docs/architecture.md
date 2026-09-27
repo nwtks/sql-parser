@@ -8,19 +8,18 @@ flows through the parsers, and which conventions the implementation follows.
 ## 1. Design principles
 
 - **F# + [FParsec](https://www.quanttec.com/fparsec/)** — a scannerless,
-  combinator-based parser; there is no separate token stream.
-- **Functional-first** — recursion, immutability and composition over loops,
-  mutation and statements; `[<TailCall>]` marks recursive loops.
-- **Grammar-faithful** — [sql-2016-grammar.txt](../sql-2016-grammar.txt) (the
-  SQL:2016 foundation grammar, ISO/IEC 9075-2:2016 clause numbering) is the
-  design document. Comments cite the rule they implement as
-  `// <clause> <rule name>` (enforced by `RuleNumberingTests.fs`) and top-level
-  definitions follow ascending clause order where F#'s define-before-use allows
-  (see [AGENTS.md](../AGENTS.md)). The parser is as strict as the standard —
-  deviations are recorded in [trade-off.md](trade-off.md).
-- **Parse-only, errors as values** — the library returns an AST
-  (`Result<Statement, ParseError>`); it performs no name resolution, type
-  checking or evaluation, and never throws for malformed input.
+  combinator-based parser; no separate token stream.
+- **Functional-first** — recursion, immutability and composition over loops and
+  mutation; `[<TailCall>]` marks recursive loops.
+- **Grammar-faithful** — [sql-2016-grammar.txt](../sql-2016-grammar.txt)
+  (ISO/IEC 9075-2:2016 clause numbering) is the design document: definitions
+  cite `// <clause> <rule name>` (enforced by `RuleNumberingTests.fs`) and
+  follow ascending clause order where define-before-use allows (see
+  [AGENTS.md](../AGENTS.md)). Deviations are recorded in
+  [trade-off.md](trade-off.md).
+- **Parse-only, errors as values** — the library returns
+  `Result<Statement, ParseError>`; no name resolution, type checking or
+  evaluation, and no exceptions for malformed input.
 
 ## 2. Parse pipeline
 
@@ -35,29 +34,30 @@ flowchart LR
     C --> G["Result&lt;Statement, ParseError&gt;"]
 ```
 
-A single FParsec pass: `Lexer.fs` produces character-level tokens; the statement
-modules (§4) parse clauses and delegate `<value expression>`s to the
-`OperatorPrecedenceParser` (`opp`) in `ExpressionParser.fs`, which consumes the
-§8 `<predicate>` chain from `PredicateParser.fs`. `runParser` turns FParsec's
-`Failure` into `ParseError(message, Position)` and `Success` into `Ok`; both
-entry points consume leading whitespace and require `eof`.
+A single FParsec pass: the statement modules (§4) delegate `<value expression>`s
+to the `OperatorPrecedenceParser` (`opp`) in `ExpressionParser.fs`, which
+consumes the §8 `<predicate>` chain from `PredicateParser.fs`. `runParser` maps
+FParsec's `Failure` to `ParseError(message, Position)` and `Success` to `Ok`;
+both entry points consume leading whitespace and require the trailing
+`<semicolon>` and `eof`.
 
 ## 3. Entry points
 
-Two public functions, both requiring the trailing `<semicolon>`:
+Both functions require the trailing `<semicolon>`; the accepted statement lists
+are in [README.md](../README.md#usage). Architectural points:
 
-| Function | Grammar rule | Accepts |
-|----------|--------------|---------|
-| `SqlParser.parse` | 22.1 `<direct SQL statement>` | The directly executable families: searched `DELETE`, `SELECT`, `INSERT`, searched `UPDATE`, `TRUNCATE`, `MERGE`, `<temporary table declaration>`, `WITH ... <query>`, plus schema, transaction, connection and session statements. A bare `SELECT`/`WITH` is a 22.2 `<cursor specification>`, so it may carry a 14.3 `<updatability clause>`. |
-| `SqlParser.parseStatement` | 13.4 `<SQL procedure statement>` | The `<SQL executable statement>` families: schema, `<SQL data statement>` (`OPEN`/`FETCH`/`CLOSE`, `SELECT ... INTO`, `FREE`/`HOLD LOCATOR`, positioned and searched DML), `CALL`/`RETURN`, transaction, connection, session, `GET DIAGNOSTICS`, and all dynamic-SQL statements. Excludes `DECLARE CURSOR` (14.1), `<temporary table declaration>` (14.16), multi-row `SELECT` and `WITH` — those are 22.1 forms. |
-
-Neither entry point is a superset of the other: `parse` rejects positioned
-`UPDATE`/`DELETE` via `pSearchedUpdateStatement`/`pSearchedDeleteStatement`;
-`parseStatement` rejects the 22.x query forms. The omitted-target DML forms
-(20.25/20.27) are preparable-only, so both reject them via `rejectOmittedTarget`
-while the DML parsers keep the form for a future preparable-statement surface.
-`pStatement` (wired to `parseStatement`, routine bodies and triggers) is
-therefore strict 13.4. See [README.md](../README.md#usage).
+- `SqlParser.parse` (22.1 `<direct SQL statement>`) accepts the directly
+  executable families; a bare `SELECT`/`WITH` is a 22.2 `<cursor specification>`,
+  so it may carry a 14.3 `<updatability clause>`.
+- `SqlParser.parseStatement` (13.4 `<SQL procedure statement>`) is wired to
+  `pStatement` (routine bodies, triggers) and is strict 13.4: `DECLARE CURSOR`
+  (14.1), `<temporary table declaration>` (14.16) and the 22.x query forms are
+  reachable only through `parse`.
+- Neither is a superset of the other: `parse` rejects positioned
+  `UPDATE`/`DELETE` (`pSearchedUpdateStatement`/`pSearchedDeleteStatement`) and
+  `parseStatement` rejects the 22.x query forms; both reject the preparable-only
+  omitted-target DML forms (20.25/20.27) via `rejectOmittedTarget`, while the
+  DML parsers keep the form for a future preparable-statement surface.
 
 ## 4. Module map
 
@@ -68,12 +68,12 @@ low-level parsers first, the dispatcher last) in `SqlParser/SqlParser.fsproj`:
 |------|------------------|----------------|
 | `Ast.fs` | — | All AST types (`Statement`, `Expression`, `DataType`, …). No parsers. |
 | `Lexer.fs` | §5, 10.1, 10.5 | Reserved words, whitespace/comments, identifiers, literals, operators, terminal characters, interval qualifiers, `<character set specification>`. |
-| `ExpressionParser.fs` | §6, §7/§8 fragments, §10 | Operator-precedence parser, routine invocation, subqueries, row patterns, JSON functions, `<data type>` family, shared `<scope clause>`/`pMethodKind`, name-arity parsers (§9). |
+| `ExpressionParser.fs` | §6, §7/§8 fragments, §10 | Operator-precedence parser, routine invocation, subqueries, row patterns, JSON functions, `<data type>` family, shared `<scope clause>`/`pMethodKind`, 5.4 name-arity parsers. |
 | `QueryParser.fs` | §6.10, §7, 10.10 | `<query expression>`, `SELECT`, table/join references, windows, CTEs, `MATCH_RECOGNIZE`. |
 | `PredicateParser.fs` | §8 | `<predicate>` postfix chain (`BETWEEN`/`IN`/`LIKE`/`SIMILAR TO`/`IS …`) and the standalone `EXISTS`/`UNIQUE`/`JSON_EXISTS`/period predicates. |
 | `SchemaParser.fs` | §11 | Schema definition/manipulation (`CREATE`/`ALTER`/`DROP`) including user-defined types (11.51–11.53) and `CREATE PROCEDURE`/`FUNCTION`/`METHOD`/`TRIGGER` (11.49/11.60/11.61); `DROP ROLE` (12.6) is a branch of the `DROP` dispatcher. |
 | `AccessControlParser.fs` | §12 | `GRANT`/`REVOKE` (privileges and roles) and `CREATE ROLE` (12.2–12.5, 12.7). |
-| `DataManipulationParser.fs` | §14 | The whole of §14: DML (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `TRUNCATE`) plus cursors/locators (`DECLARE CURSOR` — parsed but exposed by no entry point — `OPEN`/`FETCH`/`CLOSE`, `SELECT ... INTO`, `<temporary table declaration>`, `USING`/`INTO` clauses). |
+| `DataManipulationParser.fs` | §14 | The whole of §14: DML (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `TRUNCATE`), the 14.3 `<cursor specification>` with its `<updatability clause>`, cursors/locators (`DECLARE CURSOR` — parsed but exposed by no entry point —, `OPEN`/`FETCH`/`CLOSE`, `SELECT ... INTO`, `<temporary table declaration>`, `USING`/`INTO` clauses). |
 | `ControlParser.fs` | §16, 10.4 | `CALL`, `RETURN`, plus the `<SQL argument>` / `<SQL argument list>` parsers consumed by §6's routine and method invocations. |
 | `TransactionParser.fs` | §17 | `START TRANSACTION`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `SET TRANSACTION`, `SET CONSTRAINTS`. |
 | `ConnectionParser.fs` | §18 | `CONNECT`, `SET CONNECTION`, `DISCONNECT`. |
@@ -82,11 +82,11 @@ low-level parsers first, the dispatcher last) in `SqlParser/SqlParser.fsproj`:
 | `DiagnosticsParser.fs` | §23 | `GET DIAGNOSTICS`. |
 | `SqlParser.fs` | §22 | Top-level dispatchers, forward-reference wiring (§5), public `parse`/`parseStatement`. |
 
-Clause numbers stay roughly ascending, but dependencies win: §8 compiles after
-§7 (it needs `ExpressionParser` parsers and the `pQuery` ref); §12 needs
-`SchemaParser`'s `pSpecificRoutineDesignator` (10.6) and `pDropBehavior` (11.2);
-`DataManipulationParser.fs` owns `pInputUsingClause`/`pOutputUsingClause`, which
-`pOpenStatement` needs before `DynamicParser.fs` compiles.
+Clause order yields to dependencies: §8 compiles after §7 (it needs
+`ExpressionParser` parsers and the `pQuery` ref); §12 needs `SchemaParser`'s
+`pSpecificRoutineDesignator` (10.6) and `pDropBehavior` (11.2);
+`DynamicParser.fs` consumes the `USING` clauses that `DataManipulationParser.fs`
+owns.
 
 ## 5. Forward references and wiring
 
@@ -105,7 +105,7 @@ Most refs are wired where their target is defined; `SqlParser.fs` wires
 | `pQueryRef` | `ExpressionParser.fs` | `pQueryExpression` (`QueryParser.fs`) | Scalar and quantified subqueries (6.29). |
 | `pWindowNameOrSpecification`, `pSortSpecification` | `ExpressionParser.fs` | the 6.10 / 10.10 parsers (`QueryParser.fs`) | The 10.4 `<table argument>` ordering list, 10.9 `WITHIN GROUP`, 10.11 `JSON_ARRAYAGG`. |
 | `pSqlArgumentList`, `pSqlArgumentListBody` | `ExpressionParser.fs` | the 10.4 parsers (`ControlParser.fs`) | `<routine invocation>` bodies and the 6.17–6.21 method/new/dereference postfixes. |
-| `pExpression`, `pNonBooleanValueExpression`, `pNumericValueExpression`, `pMultisetValueExpression`, `pBooleanFactor`, `pDataType`, `pDatetimeValueExpression` | `ExpressionParser.fs` | same module | Used before `opp` is complete; `pNumericValueExpression` breaks the `pValueExpressionPrimaryImpl → pArrayElementReference` cycle; the boolean-free variant keeps JSON slots and `<point in time>` (6.35) from consuming `AND`/`OR`. |
+| `pDataType`, `pExpression`, `pExtractSource`, `pDatetimeValueExpression`, `pMultisetValueExpression`, `pNonBooleanValueExpression`, `pNumericValueExpression` | `ExpressionParser.fs` | same module | Wired once their targets exist (`pExpression` after `opp`, `pExtractSource` after 6.35/6.37); `pNumericValueExpression` breaks the `pValueExpressionPrimaryImpl → pArrayElementReference` cycle; the boolean-free variant keeps JSON slots and `<point in time>` (6.35) from consuming `AND`/`OR`. |
 | `pRowPattern`, `pTableReference`, `pQueryExpressionBody`, `pGroupingElement`, `pJsonTableColumnsClause`, `pJsonTablePlan` | `QueryParser.fs` | same module | Left-recursive §7 rules: row patterns (7.9), parenthesised `<joined table>`s, `UNION`/`EXCEPT` bodies, nested `GROUPING SETS`, `JSON_TABLE` columns/plans. |
 
 **Never read `.Value` at module-initialisation time** — it holds FParsec's dummy
@@ -117,18 +117,16 @@ parser until assigned. Reference the forwarding *parser* instead.
   `Ast.fs`, so parsers pattern-match without opening a types module.
 - **Position tracking.** `Statement`, `Expression` and `TableSource` carry a
   `Pos` (`{ Line: int64; Column: int64 }`), attached by `withStmtPosition` /
-  `withExprPosition` / `withTablePosition` where the node starts; other types
-  are unpositioned.
+  `withExprPosition` / `withTablePosition`; other types are unpositioned.
 - **One big recursive group.** `DataType` (6.1) and `ExpressionKind` open an
   `and`-chain that includes nearly every AST type; new types referencing
   `Expression` must join it with `and`.
 - **DUs first, names mirror the grammar.** Domain choices are DUs
-  (`Query`, `TableSourceKind`, `AlterTableAction`, …) for exhaustiveness;
-  parsers and AST cases mirror the non-terminals they implement.
+  (`Query`, `TableSourceKind`, `AlterTableAction`, …) for exhaustiveness.
 - **`option` vs `bool`; fields over cases.** An absent clause is `None`; a
-  two-way choice with a required operand is usually a `bool` (`true` =
-  `CASCADE`/`ENFORCED`/`USER`). Records gain `… : X option` fields rather than
-  new DU cases, unless the alternatives are structurally different.
+  two-way choice with a required operand is usually a `bool` (`CASCADE`,
+  `ENFORCED`, `USER`, …). Records gain `… : X option` fields rather than new DU
+  cases, unless the alternatives are structurally different.
 
 > ⚠️ `Expression`, `TableSource` and `Statement` all have `Kind` + `Pos` fields.
 > Unannotated record literals can be inferred to the wrong one; see
@@ -138,16 +136,14 @@ parser until assigned. Reference the forwarding *parser* instead.
 
 - `Lexer.reservedWords` is the 5.2 `<reserved word>` set; `pRegularIdentifier`
   rejects reserved words, delimited identifiers (`"…"`, Unicode) do not.
-- `pKeyword s` matches any keyword case-insensitively, requires a non-identifier
-  character after it (`SYSTEM` ≠ `SYSTEM_TIME`) and consumes trailing whitespace.
-  It works for reserved *and* non-reserved words — reservedness only constrains
-  identifiers.
-- Because keyword dispatch cannot rely on reservedness, alternative order is
-  load-bearing (`ALTER TYPE` before `ALTER ROUTINE`, `DROP TYPE` before
-  `DROP ROUTINE`, …); see [gotchas.md](gotchas.md).
+- `pKeyword s` matches keywords case-insensitively, requires a non-identifier
+  character after them (`SYSTEM` ≠ `SYSTEM_TIME`) and consumes trailing
+  whitespace. It works for reserved *and* non-reserved words, so keyword
+  dispatch cannot rely on reservedness and alternative order is load-bearing
+  (`ALTER TYPE` before `ALTER ROUTINE`, …); see [gotchas.md](gotchas.md).
 - Routine invocation splits into a reserved-keyword whitelist
-  (`functionKeywords` / `pReservedFunctionName`) and non-reserved/delimited
-  identifiers (`pRoutineName`). Reserved words that start dedicated constructs
+  (`functionKeywords` / `pReservedFunctionName`) and non-reserved or delimited
+  identifiers (`pRoutineName`); reserved words that start dedicated constructs
   (`EXISTS`, `UNIQUE`, `VALUE_OF`, `PERIOD`, …) stay off the whitelist so they
   cannot silently degrade to a generic `FunctionCall`.
 - Closed enumerations (diagnostics/descriptor item names, `<language name>`,
@@ -159,12 +155,12 @@ parser until assigned. Reference the forwarding *parser* instead.
 - **No exceptions for bad input.** `runParser` converts FParsec results to
   `Result<Statement, ParseError>` (with a try/with safety net).
 - **Semantic guards run inside the parser** where the grammar demands more than
-  syntax — the searched-only entry points (22.1), `rejectOmittedTarget`
-  (20.25/20.27), `validateRoutine` (11.60), the lexer's date/interval value
-  checks — using `>>=` plus `fail`, because `|>>` cannot fail.
+  syntax (searched-only entry points, `rejectOmittedTarget` for 20.25/20.27,
+  `validateRoutine` for 11.60, the lexer's date/interval checks), using `>>=`
+  plus `fail`, because `|>>` cannot fail.
 - **Backtracking.** A `choice` alternative that has consumed input is not
-  retried by `<|>`, so optional or speculative prefixes are wrapped in `attempt`;
-  wrapping too little is a common bug — see [gotchas.md](gotchas.md).
+  retried by `<|>`, so optional or speculative prefixes are wrapped in
+  `attempt`; wrapping too little is a common bug — see [gotchas.md](gotchas.md).
 
 ## 9. Grammar coverage
 
@@ -193,7 +189,7 @@ parser until assigned. Reference the forwarding *parser* instead.
 - **Missing (✗):** §9.38/9.39/9.44 (SQL/JSON path language and datetime
   templates — heading-only sections) and §13.1–13.3 (SQL-client module
   definition; not applicable to a library).
-- **N/A (⊘):** §13.4, §20.26, and all of §21 (embedded SQL host programs).
+- **N/A (⊘):** §13.4 and all of §21 (embedded SQL host programs).
 - **Over-permissive:** none — accepted-but-not-standard constructs are limited
   to the deliberate deviations in [trade-off.md](trade-off.md).
 - Clause-level counts are an inventory summary, not an alternative-level
@@ -209,25 +205,23 @@ parser until assigned. Reference the forwarding *parser* instead.
 ## 10. Supported SQL features
 
 - **Querying** — `SELECT` clauses (`WHERE`/`GROUP BY`/`HAVING`/`WINDOW`/
-  `ORDER BY`/`OFFSET`/`FETCH` with `PERCENT`/`WITH TIES`), set operations,
-  window functions, `WITH [RECURSIVE]` CTEs (`SEARCH`/`CYCLE`), row value
-  constructors, all select-list asterisk forms, and the table references
-  (`ONLY (t)`, `FOR SYSTEM_TIME`, `UNNEST`, `LATERAL`, `TABLESAMPLE`,
-  `JSON_TABLE`, `MATCH_RECOGNIZE`, data-change delta tables).
-- **DML** — `INSERT` (values / query / `DEFAULT VALUES`), searched and
+  `ORDER BY`/`OFFSET`/`FETCH`), set operations, window functions,
+  `WITH [RECURSIVE]` CTEs (`SEARCH`/`CYCLE`), row value constructors, all
+  select-list asterisk forms, and the table references (`ONLY (t)`,
+  `FOR SYSTEM_TIME`, `UNNEST`, `LATERAL`, `TABLESAMPLE`, `JSON_TABLE`,
+  `MATCH_RECOGNIZE`, data-change delta tables).
+- **DML & cursors** — `INSERT` (values / query / `DEFAULT VALUES`), searched and
   positioned `UPDATE`/`DELETE` (`ONLY (t)`, `FOR PORTION OF`), `MERGE`,
-  `TRUNCATE`.
-- **Cursors & locators** — declared and dynamic cursors, `OPEN`/`FETCH`/`CLOSE`,
+  `TRUNCATE`; declared and dynamic cursors, `OPEN`/`FETCH`/`CLOSE`,
   `SELECT ... INTO`, local temporary tables, `FREE`/`HOLD LOCATOR`.
 - **DDL** — `CREATE`/`ALTER`/`DROP` for tables, views, schemas, domains,
   character sets, collations, translations, assertions, casts, orderings,
   transforms, types, sequences, routines and triggers, with the full constraint
   and `<alter table action>` sets; `GRANT`/`REVOKE` over every 12.3 object kind.
-- **Dynamic SQL, diagnostics & sessions** — `PREPARE`/`EXECUTE`/`EXECUTE
-  IMMEDIATE`/`DESCRIBE`, descriptors, dynamic cursors, `PIPE ROW`;
+- **Dynamic SQL, diagnostics, sessions & transactions** — `PREPARE`/`EXECUTE`/
+  `EXECUTE IMMEDIATE`/`DESCRIBE`, descriptors, dynamic cursors, `PIPE ROW`;
   `GET DIAGNOSTICS`; `CONNECT`/`SET CONNECTION`/`DISCONNECT`; the `SET` session
-  statements.
-- **Transactions** — `START TRANSACTION`, `COMMIT`/`ROLLBACK`, savepoints,
+  statements; `START TRANSACTION`, `COMMIT`/`ROLLBACK`, savepoints,
   `SET [LOCAL] TRANSACTION`, `SET CONSTRAINTS`.
 - **Expressions & types** — the full operator set and the §8 predicates; the
   standard function families — numeric, string, regex, collection
@@ -238,15 +232,13 @@ parser until assigned. Reference the forwarding *parser* instead.
 
 ## 11. Testing
 
-- **xUnit v3** (`dotnet test`): one test file per source module, in the same
-  compile order as `SqlParser.fsproj`.
-- **`RuleNumberingTests.fs`** validates that every `// <clause> <rule name>`
-  comment cites a clause that actually defines (or mentions) that rule in
-  `sql-2016-grammar.txt`.
+- **xUnit v3** (`dotnet test`) — one test file per source module, in
+  `SqlParser.fsproj` compile order.
+- **`RuleNumberingTests.fs`** — every `// <clause> <rule name>` comment must
+  cite a clause that defines (or mentions) that rule in `sql-2016-grammar.txt`.
 
 ## 12. Related documents
 
-| Document | Contents |
-|----------|----------|
-| [trade-off.md](trade-off.md) | Design decisions and the alternatives rejected. |
-| [gotchas.md](gotchas.md) | Recurring F#/FParsec/grammar pitfalls. |
+[trade-off.md](trade-off.md) — design decisions and rejected alternatives;
+[gotchas.md](gotchas.md) — recurring F#/FParsec/grammar pitfalls. Full list:
+[README.md](../README.md#documentation).

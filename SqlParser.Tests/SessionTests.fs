@@ -16,9 +16,16 @@ let parseFails (sql: string) =
 
 [<Fact>]
 let ``SET SESSION CHARACTERISTICS verification`` () =
+    // 19.1 <session transaction characteristics> ::= TRANSACTION <transaction mode> [ , <transaction mode> ... ]
+    // — the extra modes of ONE characteristic need no TRANSACTION keyword.
     match parse "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ ONLY" with
     | SetSessionCharacteristics [ Isolation Serializable; AccessMode ReadOnly ] -> ()
     | res -> Assert.Fail(sprintf "Expected SetSessionCharacteristics, got %A" res)
+
+    // … while a SECOND <session characteristic> repeats the keyword.
+    match parse "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY, TRANSACTION ISOLATION LEVEL SERIALIZABLE" with
+    | SetSessionCharacteristics [ AccessMode ReadOnly; Isolation Serializable ] -> ()
+    | res -> Assert.Fail(sprintf "Expected two session characteristics, got %A" res)
 
 [<Fact>]
 let ``SET SESSION AUTHORIZATION verification`` () =

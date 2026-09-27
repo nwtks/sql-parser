@@ -279,9 +279,26 @@ let ``GRANT EXECUTE ON specific routine designator verification`` () =
                    stmt) -> Assert.Equal(Identifier "ADD", stmt.Object.Kind)
     | res -> Assert.Fail(sprintf "Expected GrantRoutine ROUTINE FOR, got %A" res)
 
-    // The <member name> form carries no <data type list> here (10.6), so this is not a
-    // 12.3 <object name> …
-    parseFails "GRANT EXECUTE ON ROUTINE add (INTEGER) TO alice"
+    // 10.6 <member name> ::= <member name alternatives> [ <data type list> ], so the list is
+    // optional and a 12.3 <object name> keeps it.
+    match parse "GRANT EXECUTE ON ROUTINE add (INTEGER) TO alice" with
+    | GrantRoutine({ IsSpecific = false
+                     RoutineType = Some RoutineType.Routine
+                     Name = { Kind = Identifier "ADD" }
+                     DataTypeList = dtl },
+                   stmt) ->
+        Assert.Equal(Some [ Integer ], dtl)
+        Assert.Equal(Identifier "ADD", stmt.Object.Kind)
+    | res -> Assert.Fail(sprintf "Expected GrantRoutine with a data type list, got %A" res)
+
+    // … and the empty `<data type list>` form is legal too.
+    match parse "GRANT EXECUTE ON FUNCTION app.f() TO alice" with
+    | GrantRoutine({ DataTypeList = Some [] }, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected GrantRoutine with an empty data type list, got %A" res)
+
+    // 5.4 <method name> ::= <identifier> — a single part, unlike a schema qualified routine name.
+    parseFails "GRANT EXECUTE ON METHOD a.b.c TO alice"
+
     // … and a bare <table name> is still the optional-[ TABLE ] alternative.
     match parse "GRANT EXECUTE ON ROUTINE_TABLE TO alice" with
     | GrantTable _ -> ()

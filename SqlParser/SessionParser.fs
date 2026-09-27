@@ -7,15 +7,30 @@ open SqlParser.ExpressionParser
 module SessionParser =
     // 19.1 <set session characteristics statement>
     // ::= SET SESSION CHARACTERISTICS AS <session characteristic list>
-    // <session characteristic> ::= TRANSACTION <transaction mode> [ , ... ]
+    // 19.1 <session characteristic> ::= <session transaction characteristics>
+    // 19.1 <session transaction characteristics> ::= TRANSACTION <transaction mode>
+    //     [ { <comma> <transaction mode> }... ]
+    // 19.1 <session characteristic list> ::= <session characteristic> [ { <comma> <session characteristic> }... ]
+    // So the trailing modes of one characteristic need no TRANSACTION keyword, while a SECOND
+    // characteristic repeats it. `pTransactionMode` cannot start with TRANSACTION (a reserved
+    // word), so trying the keyword first disambiguates.
     let pSetSessionCharacteristicsStatement =
+        let pSessionCharacteristic =
+            pKeyword "TRANSACTION" >>. TransactionParser.pTransactionMode
+            >>= fun first ->
+                many (
+                    token (pstring ",")
+                    >>. choice [ pKeyword "TRANSACTION" >>% (); attempt (preturn ()) ]
+                    >>= fun () -> TransactionParser.pTransactionMode
+                )
+                |>> fun rest -> first :: rest
+
         pKeyword "SET"
         >>. pKeyword "SESSION"
         >>. pKeyword "CHARACTERISTICS"
         >>. pKeyword "AS"
-        >>. pKeyword "TRANSACTION"
-        >>. sepBy1 TransactionParser.pTransactionMode (token (pstring ","))
-        |>> SetSessionCharacteristics
+        >>. sepBy1 pSessionCharacteristic (token (pstring ","))
+        |>> fun modes -> SetSessionCharacteristics(List.concat modes)
 
     // 19.2 <set session user identifier statement>
     // ::= SET SESSION AUTHORIZATION <value specification>

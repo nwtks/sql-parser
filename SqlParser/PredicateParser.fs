@@ -144,17 +144,28 @@ module PredicateParser =
 
         // 8.3 <between predicate part 2> ::= [ NOT ] BETWEEN [ ASYMMETRIC | SYMMETRIC ]
         //     <row value predicand> AND <row value predicand>
+        // ASYMMETRIC and SYMMETRIC are distinct keywords with opposite meanings, so they
+        // are kept apart in the AST instead of collapsing into one flag.
         let pBetweenPart2 =
             attempt (
                 opt (pKeyword "NOT") .>> pKeyword "BETWEEN"
-                .>>. opt (pKeyword "ASYMMETRIC" <|> pKeyword "SYMMETRIC")
+                .>>. opt (
+                    pKeyword "ASYMMETRIC" >>% BetweenSymmetry.Asymmetric
+                    <|> (pKeyword "SYMMETRIC" >>% BetweenSymmetry.Symmetric)
+                )
                 .>>. pOperand
                 .>> pKeyword "AND"
                 .>>. pOperand
                 |>> fun (((isNot, sym), start), endBound) ->
                     fun e ->
                         { Expression.Kind =
-                            ExpressionKind.Between(e, Option.isSome isNot, Option.isSome sym, start, endBound)
+                            ExpressionKind.Between(
+                                e,
+                                Option.isSome isNot,
+                                Option.defaultValue BetweenSymmetry.Default sym,
+                                start,
+                                endBound
+                            )
                           Pos = e.Pos }
             )
 

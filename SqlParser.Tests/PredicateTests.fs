@@ -137,15 +137,23 @@ let ``Comparison operands are row value predicands (8.2)`` () =
     parseFails "SELECT 1 FROM t WHERE 1 = 2 < 3"
     parseFails "SELECT 1 FROM t WHERE x = EXISTS (SELECT 1 FROM u)"
 
-    // 7.2 <row value predicand> is a <value expression primary>; a term (6.29 <term>) or a
-    // signed factor (6.29 <factor>) is not one, on EITHER side.
-    parseFails "SELECT 1 FROM t WHERE 1 + 1 = 2"
-    parseFails "SELECT 1 FROM t WHERE 2 = 1 + 1"
-    parseFails "SELECT 1 FROM t WHERE a + b = c"
-    parseFails "SELECT 1 FROM t WHERE c = a + b"
-    parseFails "SELECT 1 FROM t WHERE x = a + 1"
-    parseFails "SELECT 1 FROM t WHERE -x = 1"
-    parseFails "SELECT 1 FROM t WHERE 1 + 1 = 2 OR 1 = 1"
+    // 7.2 <row value predicand> expands (via <row value constructor predicand>, 7.1) to a
+    // <common value expression>, and 6.29 <numeric value expression> includes a 6.29 <term>
+    // and a signed 6.29 <factor>. A term is therefore a valid predicand on EITHER side.
+    parse "SELECT 1 FROM t WHERE 1 + 1 = 2" |> ignore
+    parse "SELECT 1 FROM t WHERE 2 = 1 + 1" |> ignore
+    parse "SELECT 1 FROM t WHERE a + b = c" |> ignore
+    parse "SELECT 1 FROM t WHERE c = a + b" |> ignore
+    parse "SELECT 1 FROM t WHERE x = a + 1" |> ignore
+    parse "SELECT 1 FROM t WHERE -x = 1" |> ignore
+    parse "SELECT 1 FROM t WHERE 1 + 1 = 2 OR 1 = 1" |> ignore
+    parse "SELECT 1 FROM t WHERE price * 2 > 100" |> ignore
+    parse "SELECT 1 FROM t WHERE a || b = c" |> ignore
+
+    // A TOP-LEVEL boolean is still not a <row value predicand>: <common value expression>
+    // excludes <boolean value expression>, and `1 = 1` is neither a <boolean predicand>
+    // (a parenthesized boolean or a primary) nor an <explicit row value constructor>.
+    parseFails "SELECT 1 FROM t WHERE 1 = 2 = 3"
 
     // PARENTHESIZED booleans are 6.39 <boolean predicand>s and stay legal.
     match parse "(a = b) = c" with
@@ -176,10 +184,24 @@ let ``BETWEEN verification`` () =
     match parse "SELECT x BETWEEN 1 AND 10" with
     | ExpressionKind.Between({ Kind = Identifier "X" },
                              false,
-                             false,
+                             BetweenSymmetry.Default,
                              { Kind = Literal(Number 1m) },
                              { Kind = Literal(Number 10m) }) -> ()
     | res -> Assert.Fail(sprintf "Expected Between, got %A" res)
+
+    // 8.3 [ ASYMMETRIC | SYMMETRIC ] — the two keywords are distinct and opposite, so they
+    // are kept apart instead of collapsing into a single flag.
+    match parse "SELECT x BETWEEN ASYMMETRIC 1 AND 10" with
+    | ExpressionKind.Between(_, false, BetweenSymmetry.Asymmetric, _, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected BETWEEN ASYMMETRIC, got %A" res)
+
+    match parse "SELECT x BETWEEN SYMMETRIC 1 AND 10" with
+    | ExpressionKind.Between(_, false, BetweenSymmetry.Symmetric, _, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected BETWEEN SYMMETRIC, got %A" res)
+
+    match parse "SELECT x NOT BETWEEN SYMMETRIC 1 AND 10" with
+    | ExpressionKind.Between(_, true, BetweenSymmetry.Symmetric, _, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected NOT BETWEEN SYMMETRIC, got %A" res)
 
 [<Fact>]
 let ``Predicate part-2 operands are row value predicands (8.x)`` () =
@@ -216,7 +238,7 @@ let ``Predicate part-2 operands are row value predicands (8.x)`` () =
     match parse "SELECT x BETWEEN (1 = 1) AND 2" with
     | ExpressionKind.Between({ Kind = Identifier "X" },
                              false,
-                             false,
+                             BetweenSymmetry.Default,
                              { Kind = Parenthesized _ },
                              { Kind = Literal(Number 2m) }) -> ()
     | res -> Assert.Fail(sprintf "Expected Between with a parenthesized operand, got %A" res)
@@ -488,7 +510,12 @@ let ``COLLATE verification`` () =
 [<Fact>]
 let ``When operands are row value predicands (6.12)`` () =
     parseFails "SELECT CASE x WHEN 1 AND 2 THEN 1 END"
-    parseFails "SELECT CASE x WHEN 1 + 1 THEN 2 END FROM t"
+
+    // 6.12 <when operand> ::= <value expression> | <predicate part 2>, and a 6.29 <term> is a
+    // <value expression>, so `WHEN 1 + 1` is legal.
+    match parse "SELECT CASE x WHEN 1 + 1 THEN 2 END FROM t" with
+    | Case(Some { Kind = Identifier "X" }, _, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected simple CASE with a term when operand, got %A" res)
 
     // A PARENTHESIZED boolean form is a 6.39 <boolean predicand> and stays legal
     // (the Parenthesized node keeps the parens).
@@ -517,7 +544,9 @@ let ``When operand predicate part-2 forms are applied to the case operand (6.12)
     | res -> Assert.Fail(sprintf "Expected the null predicate part 2, got %A" res)
 
     match parse "CASE x WHEN BETWEEN 1 AND 2 THEN 2 END" with
-    | Case(None, [ ({ Kind = ExpressionKind.Between({ Kind = Identifier "X" }, false, false, _, _) }, _) ], None) -> ()
+    | Case(None,
+           [ ({ Kind = ExpressionKind.Between({ Kind = Identifier "X" }, false, BetweenSymmetry.Default, _, _) }, _) ],
+           None) -> ()
     | res -> Assert.Fail(sprintf "Expected the between predicate part 2, got %A" res)
 
     match parse "CASE x WHEN LIKE 'a%' THEN 2 END" with
@@ -557,7 +586,6 @@ let ``Predicate part-1 left operands are row value predicands (8.x)`` () =
     // sit on a boolean result. 6.39 `IS [NOT] TRUE|FALSE|UNKNOWN` is the exception — its
     // <boolean primary> legitimately includes a predicate.
     parseFails "SELECT 1 FROM t WHERE 1 = 2 IS NULL"
-    parseFails "SELECT 1 FROM t WHERE 1 + 1 IS NULL"
     parseFails "SELECT 1 FROM t WHERE 1 = 2 BETWEEN 1 AND 2"
     parseFails "SELECT 1 FROM t WHERE 1 = 2 LIKE 'a'"
     parseFails "SELECT 1 FROM t WHERE x LIKE 'a' IS NULL"
@@ -569,6 +597,22 @@ let ``Predicate part-1 left operands are row value predicands (8.x)`` () =
     parseFails "SELECT 1 FROM t WHERE 1 = 2 OVERLAPS x"
     parseFails "SELECT 1 FROM t WHERE 1 = 2 MEMBER OF m"
     parseFails "SELECT 1 FROM t WHERE JSON_EXISTS(doc, '$.a') IS NULL"
+
+    // 8.8 <null predicate> ::= <row value predicand> IS [ NOT ] NULL, and a 6.29 <term> is a
+    // <common value expression> — hence a <row value predicand>. Only the 6.39 <boolean
+    // test> (`IS [NOT] TRUE|FALSE|UNKNOWN`) demands the narrower <boolean predicand>.
+    match parse "1 + 1 IS NULL" with
+    | IsNull({ Kind = BinaryOp(Add, _, _) }, false) -> ()
+    | res -> Assert.Fail(sprintf "Expected a term left operand, got %A" res)
+
+    match parse "-x IS NOT NULL" with
+    | IsNull({ Kind = UnaryOp(Minus, _) }, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected a signed primary left operand, got %A" res)
+
+    // A PARENTHESIZED term is a 6.39 <boolean predicand>, so the boolean test applies.
+    match parse "(1 + 1) IS TRUE" with
+    | IsBoolean({ Kind = Parenthesized _ }, false, Some true) -> ()
+    | res -> Assert.Fail(sprintf "Expected a parenthesized boolean test, got %A" res)
 
     match parse "(1 = 2) IS NULL" with
     | IsNull({ Kind = Parenthesized _ }, false) -> ()
