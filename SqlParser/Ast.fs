@@ -550,13 +550,20 @@ and ExpressionKind =
         (Expression * bool * NullsOrder option) list option *
         ListaggOverflowBehavior option
     // 10.9 <array aggregate function> — ORDER BY is part of the production, not a
-    // generic SQL argument-list suffix.
-    | JsonObjectAgg of JsonNameValue * JsonConstructorNull option * bool option * JsonOutput option
+    // generic SQL argument-list suffix. The trailing `Expression option` is the
+    // 10.9 [ <filter clause> ], which every <aggregate function> alternative admits.
+    | JsonObjectAgg of JsonNameValue * JsonConstructorNull option * bool option * JsonOutput option * Expression option
     | JsonArrayAgg of
         Expression *
         (Expression * bool * NullsOrder option) list option *
         JsonConstructorNull option *
-        JsonOutput option
+        JsonOutput option *
+        Expression option
+    // 10.9 <array aggregate function> ::= ARRAY_AGG ( <value expression>
+    //     [ ORDER BY <sort specification list> ] ) [ <filter clause> ]
+    // Only the ORDER BY form gets this dedicated node; a plain ARRAY_AGG(x) stays a
+    // <routine invocation> FunctionCall.
+    | ArrayAgg of ArrayAggCall
     // 20.16 <descriptor value constructor> ::= DESCRIPTOR ( <descriptor column list> )
     | DescriptorValueConstructor of (Expression * DataType option) list
     // 10.4 <descriptor argument> ::= <descriptor value constructor> | CAST ( NULL AS DESCRIPTOR )
@@ -639,6 +646,13 @@ and JsonNameValue =
     { Name: Expression
       Value: Expression
       Key: bool }
+
+// 10.9 <array aggregate function> — the ORDER BY / FILTER payload of an
+// ARRAY_AGG ( <value expression> [ ORDER BY <sort specification list> ] ) call.
+and ArrayAggCall =
+    { Argument: Expression
+      OrderBy: (Expression * bool * NullsOrder option) list option
+      Filter: Expression option }
 
 // 6.33 <JSON constructor null clause> ::= NULL ON NULL | ABSENT ON NULL
 and JsonConstructorNull =
@@ -849,10 +863,9 @@ and JoinSource =
       Left: TableSource
       Right: TableSource
       Condition: JoinCondition option
-      // 7.10 <named columns join> USING (...) [ AS <join correlation name> ]
       UsingAlias: Expression option
-      // 7.10 <partitioned join table> PARTITION BY ( <cols> )
-      PartitionBy: Expression list option }
+      LeftPartitionBy: Expression list option
+      RightPartitionBy: Expression list option }
 
 // 7.11 <JSON table column definition>
 and JsonTableColumn =
@@ -1056,17 +1069,24 @@ and NormalizeResultLength =
     | NormalizeCharacterLargeObjectLength of LargeObjectLength
 
 // 8.13 <match predicate part 2> ::= MATCH [ UNIQUE ] [ SIMPLE | PARTIAL | FULL ] <table subquery>
+// The two optionals are independent: `UNIQUE` without an explicit match type is its own
+// form (the SR defines the absent type as FULL), distinct from an explicit `FULL`.
 and MatchOption =
     | Simple
     | Partial
     | Full
+    | Unique
 
 // 8.19 <user-defined type specification> — inclusive (plain name) or exclusive (ONLY name)
 and TypeSpec =
     | Inclusive of Expression
     | Exclusive of Expression
 
-// 8.20 <period predicate> operators (OVERLAPS is covered by the existing Overlaps case)
+// 8.20 <period predicate> — the seven alternatives' operators
+// 8.20 <period overlaps predicate> ::= <period predicand 1> OVERLAPS <period predicand 2>
+// — OVERLAPS is 8.20's own operator, distinct from the 8.14 <overlaps predicate> whose
+// right operand is a <row value predicand> rather than a <period predicand>. Both keep
+// their own node so the production is recoverable from the AST.
 and PeriodPredicateKind =
     | PeriodEquals
     | PeriodContains
@@ -1074,6 +1094,7 @@ and PeriodPredicateKind =
     | PeriodSucceeds
     | PeriodImmediatelyPrecedes
     | PeriodImmediatelySucceeds
+    | PeriodOverlaps
 
 // 8.22 <JSON predicate type constraint> ::= VALUE | ARRAY | OBJECT | SCALAR
 and JsonTypeConstraint =
@@ -1303,7 +1324,8 @@ and CreateTableStatement =
       // (empty when the <typed table clause> has no element list)
       TypedElements: TypedTableElement list
       // 11.3 <table element> also allows <like clause> ::= LIKE <table name> [ <like option>... ]
-      Like: (Expression * LikeOption list) option
+      // and <table element list> repeats <table element>, so the list is a LIST of clauses.
+      Like: (Expression * LikeOption list) list
       // 11.3 <system versioning clause> ::= SYSTEM VERSIONING
       WithSystemVersioning: bool
       // 11.3 ON COMMIT <table commit action> ROWS
@@ -1362,15 +1384,14 @@ and ColumnGeneration =
 // IsNullable / IsPrimaryKey / IsUnique / References / Check are convenience accessors
 // derived from Constraints (the <column constraint definition> list).
 // NOTE: 11.4 <column definition> ::= <column name> [ <data type or domain name> ]
-// makes the type slot OPTIONAL per spec, but typed-table columns (11.3 <typed table
-// element>) route through `ColumnOptions` (which has no type slot — see above) so the
-// optional slot is unreachable in our AST. The required-type variant here is also
-// load-bearing for the <as subquery clause> dispatch: `CREATE TABLE t (id, name)
-// AS SELECT …` requires `pColumnDefinition` to reject `(id, name)` so the
-// `( <column name list> )` slot of 11.3 <as subquery clause> gets a chance.
+// makes the type slot OPTIONAL per spec, hence the `DataType option`. Inside 11.3
+// <table element list> the parser still REQUIRES a type — `CREATE TABLE t (id, name)
+// AS SELECT …` needs pColumnDefinition to reject `(id, name)` so the
+// `( <column name list> )` slot of 11.3 <as subquery clause> gets a chance — but 11.11
+// <add column definition> and 11.27's period-column list carry `None`.
 and ColumnDefinition =
     { Name: Expression
-      DataType: DataType
+      DataType: DataType option
       IsNullable: bool option
       IsPrimaryKey: bool
       DefaultValue: Expression option
@@ -1755,11 +1776,10 @@ and ExternalSecurity =
 // 11.60 <transform group specification> ::= TRANSFORM GROUP { <single group specification> | <multiple group specification> }
 // 11.60 <single group specification> ::= <group name>
 // 11.60 <group specification> ::= <group name> FOR TYPE <path-resolved user-defined type name>
-// A single <group name> without FOR TYPE is the <single group specification> form; the two
-// alternatives are syntactically indistinguishable in that case (see docs/trade-off.md).
+// A single <group name> without FOR TYPE is the <single group specification> form.
 and TransformGroupSpecification =
     | SingleTransformGroup of Expression
-    | MultipleTransformGroups of (Expression * Expression option) list
+    | MultipleTransformGroups of (Expression * Expression) list
 
 // 11.60 <external body reference> ::= EXTERNAL [ NAME <external routine name> ]
 //     [ <parameter style clause> ] [ <transform group specification> ] [ <external security clause> ]
@@ -1856,7 +1876,7 @@ and TransformElement =
     | ToSql of SpecificRoutineDesignator
     | FromSql of SpecificRoutineDesignator
 
-// 11.67 <transform group> ::= <group name> <transform element> [ <transform element> ]
+// 11.67 <transform group> ::= <group name> ( <transform element list> )
 and TransformGroup =
     { Name: Expression
       Elements: TransformElement list }
@@ -2122,9 +2142,13 @@ and UpdateStatement =
       Cursor: Expression option }
 
 // 14.15 <set clause> ::= <set clause> | <multiple column assignment> | <mutated set clause>
+and SetTarget =
+    | UpdateTarget of Expression
+    | MutatedTarget of Expression * Expression
+
 and SetClause =
     | SingleSet of Expression * Expression
-    | MultipleSet of Expression list * Expression list
+    | MultipleSet of SetTarget list * Expression list
     // 14.15 <mutated set clause> ::= <mutated target> <period> <method name>
     //                      <equals operator> <update source>
     // MutatedSet (mutated target, method name, value)
@@ -2207,7 +2231,7 @@ and CursorAttribute =
 // 20.10 <describe statement>
 // DESCRIBE INPUT <name> <using descriptor> [ <nesting option> ]
 // | DESCRIBE [ OUTPUT ] <described object> <using descriptor> [ <nesting option> ]
-// `Name` carries the 20.17 <extended statement name> / 20.17 <extended cursor name>
+// `Name` carries the 5.4 <extended statement name> / 5.4 <extended cursor name>
 // scope option; `Descriptor` carries the 5.4 <conventional descriptor name>'s scope
 // (20.10 <using descriptor>).
 and DescribeStatement =
@@ -2228,8 +2252,8 @@ and UsingClause =
     | UsingDescriptor of ExtendedName
 
 // 20.15 <statement name>
-// 20.17 <extended statement name>
-// 20.17 <extended cursor name>
+// 5.4 <extended statement name>
+// 5.4 <extended cursor name>
 //     ::= [ <scope option> ] <simple value specification>
 and ExtendedName =
     { Scope: ScopeOption option
@@ -2420,7 +2444,7 @@ and StatementKind =
     | Savepoint of Expression
     // 17.6 <release savepoint statement> ::= RELEASE SAVEPOINT <savepoint specifier>
     | ReleaseSavepoint of Expression
-    // 17.7 <commit statement> ::= COMMIT [ AND { CHAIN | NO CHAIN } ]
+    // 17.7 <commit statement> ::= COMMIT [ WORK ] [ AND [ NO ] CHAIN ]
     | Commit of bool option
     // 17.8 <rollback statement> ::= ROLLBACK [ AND { CHAIN | NO CHAIN } ] [ TO SAVEPOINT <savepoint specifier> ]
     | Rollback of bool option * Expression option

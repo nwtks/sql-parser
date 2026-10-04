@@ -35,8 +35,11 @@ module PredicateParser =
               attempt (token (pstring "<")) >>% BinaryOperator.LessThan
               attempt (token (pstring ">")) >>% BinaryOperator.GreaterThan ]
 
-    // 8.20 <period predicate> operators (OVERLAPS is covered by the existing Overlaps case).
-    // Module-level because pPredicatePrimary needs a lookahead of it.
+    // 8.20 <period predicate> — the seven alternatives' operators, incl. OVERLAPS from
+    // 8.20 <period overlaps predicate>, which is 8.20's own production (the 8.14
+    // <overlaps predicate> takes a <row value predicand> on the right instead of a
+    // <period predicand>, and keeps its own `Overlaps` AST node). Module-level because
+    // pPredicatePrimary needs a lookahead of it.
     let private pPeriodPredicateOperator =
         choice
             [ pKeyword "EQUALS" >>% PeriodEquals
@@ -44,7 +47,8 @@ module PredicateParser =
               pKeyword "PRECEDES" >>% PeriodPrecedes
               pKeyword "SUCCEEDS" >>% PeriodSucceeds
               attempt (pKeyword "IMMEDIATELY" >>. pKeyword "PRECEDES" >>% PeriodImmediatelyPrecedes)
-              attempt (pKeyword "IMMEDIATELY" >>. pKeyword "SUCCEEDS" >>% PeriodImmediatelySucceeds) ]
+              attempt (pKeyword "IMMEDIATELY" >>. pKeyword "SUCCEEDS" >>% PeriodImmediatelySucceeds)
+              pKeyword "OVERLAPS" >>% PeriodOverlaps ]
 
     // 8.20 <period predicand> ::= <period reference> | PERIOD ( <period start value>, <period end value> )
     // Both slots are <datetime value expression> per the grammar, not general expressions.
@@ -87,14 +91,22 @@ module PredicateParser =
         // A parenthesized value expression (`(1)`) is a <value expression primary> but NOT a
         // <row value special case>; a term (`1 + 1`) or a signed primary is not a primary at all.
         // An explicit row value constructor (including a <row subquery>) is the other alternative.
-        // A grammar slot that requires a *value* expression (8.5/8.6/8.7 pattern and escape,
-        // 8.16/8.17 multiset operand): a boolean and an explicit row value constructor are both
-        // excluded, so `'a' LIKE (1, 2)` is rejected. Character-vs-numeric distinctions stay
-        // semantic — a parse-only library cannot see them.
+        // A grammar slot that requires a *value* expression (8.5/8.6/8.7 pattern and escape):
+        // a boolean, an explicit row value constructor and a 6.29 <term> / signed primary are
+        // all excluded, so `'a' LIKE (1, 2)` and `'a' LIKE 1 + 1` are rejected. A concatenation
+        // (6.31) and a COLLATE suffix ARE character-shaped expressions and stay legal.
         let isValueShaped e =
             not (isBooleanTopLevel e)
             && match e.Kind with
                | RowValueConstructor _ -> false
+               | BinaryOp(op, _, _) ->
+                   not (
+                       op = BinaryOperator.Add
+                       || op = BinaryOperator.Subtract
+                       || op = BinaryOperator.Multiply
+                       || op = BinaryOperator.Divide
+                   )
+               | UnaryOp(op, _) -> not (op = UnaryOperator.Plus || op = UnaryOperator.Minus)
                | _ -> true
 
         // A slot whose grammar is a *value* expression — the <character pattern> and
@@ -261,6 +273,9 @@ module PredicateParser =
 
         // 8.13 <match predicate> ::= MATCH [ UNIQUE ] [ SIMPLE | PARTIAL | FULL ]
         //     <table subquery>
+        // `UNIQUE` with no explicit match type maps to MatchOption.Unique — the grammar's
+        // absent <match type> means FULL semantically (8.13 SR), but it stays distinct
+        // from an explicit FULL/SIMPLE in the AST.
         let pMatchPart2 =
             attempt (
                 pKeyword "MATCH" >>. opt (pKeyword "UNIQUE" >>% true)
@@ -272,18 +287,34 @@ module PredicateParser =
                 .>>. between (token (pstring "(")) (token (pstring ")")) QueryParser.pQueryExpression
                 |>> fun ((isUnique, matchOption), q) ->
                     fun e ->
-                        { Expression.Kind = Match(e, Option.isSome isUnique, matchOption, q)
+                        let option =
+                            match isUnique, matchOption with
+                            | Some _, None -> Some MatchOption.Unique
+                            | _ -> matchOption
+
+                        { Expression.Kind = Match(e, Option.isSome isUnique, option, q)
                           Pos = e.Pos }
             )
 
         // 8.14 <overlaps predicate> ::= <row value predicand 1> OVERLAPS <row value predicand 2>
+        // 8.20 <period overlaps predicate> ::= <period predicand 1> OVERLAPS <period predicand 2>
+        // The two share the OVERLAPS token; the LEFT operand tells them apart. A `PERIOD ( … )`
+        // left is a 8.20 <period predicand>, so it takes the 8.20 node — otherwise both sides
+        // are <row value predicand>s and it is the 8.14 node. (A PERIOD ( … ) RIGHT operand
+        // never reaches here: as a part-1 primary it requires a following period operator, so
+        // `a OVERLAPS PERIOD ( … )` is rejected by pOperand and handled by pPeriodPart2 below.)
         let pOverlapsPart2 =
             attempt (
                 pKeyword "OVERLAPS" >>. pOperand
                 |>> fun r ->
-                    fun l ->
-                        { Expression.Kind = Overlaps(l, r)
-                          Pos = l.Pos }
+                    fun (l: Expression) ->
+                        match l.Kind with
+                        | ExpressionKind.PeriodValue _ ->
+                            { Expression.Kind = PeriodPredicate(PeriodOverlaps, l, r)
+                              Pos = l.Pos }
+                        | _ ->
+                            { Expression.Kind = Overlaps(l, r)
+                              Pos = l.Pos }
             )
 
         // 8.15 <distinct predicate> ::= <row value predicand> IS [ NOT ] DISTINCT FROM <row value predicand>
@@ -300,25 +331,44 @@ module PredicateParser =
             )
 
         // 8.16 <member predicate> ::= [ NOT ] MEMBER [ OF ] <multiset value expression>
+        // 6.43 <multiset value expression> bottoms out at a <multiset primary>, i.e. a
+        // <value expression primary> — an <explicit row value constructor> is NOT one, so
+        // `x MEMBER OF (1, 2)` is rejected (the base and every set-operation operand are
+        // checked alike).
+        let multisetOperandHasRowConstructor m =
+            let rec check (e: Expression) =
+                match e.Kind with
+                | RowValueConstructor _ -> true
+                | MultisetSetOperation(_, _, l, r) -> check l || check r
+                | _ -> false
+
+            check m
+
         let pMemberPart2 =
             attempt (
                 opt (pKeyword "NOT") .>> pKeyword "MEMBER" .>> opt (pKeyword "OF")
-                .>>. pValueOperand
-                |>> fun (isNot, multiset) ->
-                    fun e ->
-                        { Expression.Kind = MemberOf(e, Option.isSome isNot, multiset)
-                          Pos = e.Pos }
+                .>>. pMultisetValueExpression
+                >>= fun (isNot, multiset) ->
+                    if multisetOperandHasRowConstructor multiset then
+                        fail "a <multiset value expression> cannot be an explicit row value constructor (8.16)"
+                    else
+                        preturn (fun e ->
+                            { Expression.Kind = MemberOf(e, Option.isSome isNot, multiset)
+                              Pos = e.Pos })
             )
 
         // 8.17 <submultiset predicate> ::= [ NOT ] SUBMULTISET [ OF ] <multiset value expression>
         let pSubmultisetPart2 =
             attempt (
                 opt (pKeyword "NOT") .>> pKeyword "SUBMULTISET" .>> opt (pKeyword "OF")
-                .>>. pValueOperand
-                |>> fun (isNot, multiset) ->
-                    fun e ->
-                        { Expression.Kind = SubmultisetOf(e, Option.isSome isNot, multiset)
-                          Pos = e.Pos }
+                .>>. pMultisetValueExpression
+                >>= fun (isNot, multiset) ->
+                    if multisetOperandHasRowConstructor multiset then
+                        fail "a <multiset value expression> cannot be an explicit row value constructor (8.17)"
+                    else
+                        preturn (fun e ->
+                            { Expression.Kind = SubmultisetOf(e, Option.isSome isNot, multiset)
+                              Pos = e.Pos })
             )
 
         // 8.18 <set predicate> ::= IS [ NOT ] A SET
@@ -352,22 +402,24 @@ module PredicateParser =
             )
 
         // 8.20 <period predicate> ::= <period predicate operator> <period predicand>
-        // EQUALS / PRECEDES / SUCCEEDS / IMMEDIATELY ... require a <period predicand>
-        // on the right; only CONTAINS admits a <point in time> (<datetime value
-        // expression>). The LEFT operand is re-checked once the whole expression is parsed
-        // (ExpressionParser.findExpressionViolationIn).
+        // EQUALS / OVERLAPS / PRECEDES / SUCCEEDS / IMMEDIATELY ... require a <period
+        // predicand> on the right; only CONTAINS also admits a <period or point-in-time
+        // predicand> (a <datetime value expression>). The LEFT operand is re-checked once the
+        // whole expression is parsed (ExpressionParser.findExpressionViolationIn).
         let pPeriodPart2 =
             attempt (
                 pPeriodPredicateOperator
                 >>= fun kind ->
                     (if kind = PeriodContains then
-                         // CONTAINS admits a <point in time> (<datetime value expression>).
-                         attempt pPeriodPredicand <|> pOperand |>> fun right -> kind, right
+                         // CONTAINS admits a <point in time> (<datetime value expression>)
+                         // in addition to a <period predicand>.
+                         attempt pPeriodPredicand <|> pDatetimeValueExpression
+                         |>> fun right -> kind, right
                      else
-                         // EQUALS / PRECEDES / SUCCEEDS / IMMEDIATELY ... require a
-                         // <period predicand>: PERIOD ( ... ) or a <period reference>
-                         // (a plain name).
-                         attempt pPeriodPredicand <|> pSchemaQualifiedNameExpression
+                         // EQUALS / OVERLAPS / PRECEDES / SUCCEEDS / IMMEDIATELY ... require a
+                         // <period predicand>: PERIOD ( ... ) or a <period reference>, i.e. an
+                         // unbounded <basic identifier chain> — not a 3-part-capped name.
+                         attempt pPeriodPredicand <|> pColumnReferenceExpression
                          |>> fun right -> kind, right)
                     |>> fun (kind, right) ->
                         fun left ->

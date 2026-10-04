@@ -169,6 +169,25 @@ let ``MATCH_RECOGNIZE row pattern exclusion verification`` () =
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
+let ``MATCH_RECOGNIZE permute requires at least two patterns`` () =
+    // 7.9 <row pattern permute> ::= PERMUTE ( <row pattern> { <comma> <row pattern> }... )
+    match parse "SELECT * FROM t MATCH_RECOGNIZE (PATTERN (PERMUTE (A, B)) DEFINE A AS a > 0, B AS b > 0)" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = MatchRecognize(_, recog, _) } ] ->
+            match recog.Common.Pattern.Terms with
+            | [ { Factors = [ { Primary = RowPatternPermute patterns } ] } ] ->
+                match patterns with
+                | [ { Terms = [ { Factors = [ { Primary = RowPatternVariable _ } ] } ] }
+                    { Terms = [ { Factors = [ { Primary = RowPatternVariable _ } ] } ] } ] -> ()
+                | res -> Assert.Fail(sprintf "Expected two permuted patterns, got %A" res)
+            | res -> Assert.Fail(sprintf "Expected one factor, got %A" res)
+        | res -> Assert.Fail(sprintf "Expected MatchRecognize, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    parseFails "SELECT * FROM t MATCH_RECOGNIZE (PATTERN (PERMUTE (A)) DEFINE A AS a > 0)"
+
+[<Fact>]
 let ``WITH SEARCH clause verification`` () =
     match parse "WITH RECURSIVE t(n) AS (SELECT 1 FROM u) SEARCH DEPTH FIRST BY n SET ord SELECT * FROM t" with
     | WithStatement(true, [ cte ], _) ->
@@ -233,6 +252,28 @@ let ``Table value constructor as query verification`` () =
     | res -> Assert.Fail(sprintf "Expected TableValueConstructor, got %A" res)
 
 [<Fact>]
+let ``Table value constructor bare row value special case verification`` () =
+    // 7.3 <table row value expression> ::= <row value special case> | <row value constructor>
+    // 7.2 <row value special case> ::= <nonparenthesized value expression primary>
+    // So a single-column row needs no parentheses: VALUES 1 and VALUES 1, 2 are both valid.
+    match parse "VALUES 1" with
+    | Select(TableValueConstructor [ [ { Kind = Literal(Number 1m) } ] ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected a one-column TableValueConstructor, got %A" res)
+
+    match parse "VALUES 1, 2" with
+    | Select(TableValueConstructor [ [ { Kind = Literal(Number 1m) } ]; [ { Kind = Literal(Number 2m) } ] ]) -> ()
+    | res -> Assert.Fail(sprintf "Expected two one-column rows, got %A" res)
+
+    // 7.6 <derived table> ::= <table subquery> [ <correlation or recognition> ] reuses the
+    // same 7.3 <table value constructor>.
+    match parse "SELECT * FROM (VALUES 1) AS t" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = ValuesTable([ [ { Kind = Literal(Number 1m) } ] ], { Kind = Identifier "T" }, None) } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected ValuesTable, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
 let ``TABLESAMPLE SYSTEM verification`` () =
     match parse "SELECT * FROM users TABLESAMPLE SYSTEM (10)" with
     | Select(SelectQuery s) ->
@@ -247,6 +288,30 @@ let ``TABLESAMPLE SYSTEM verification`` () =
 [<Fact>]
 let ``TABLESAMPLE non-standard method is rejected`` () =
     parseFails "SELECT * FROM users TABLESAMPLE RANDOM (10)"
+
+[<Fact>]
+let ``TABLESAMPLE on a join operand verification`` () =
+    // 7.10 spells the join operands <table factor> (= <table primary> [ <sample clause> ]),
+    // not <table primary>, so a sample clause is legal on EITHER side of any join.
+    let rightOperandIsSampled expected sql =
+        match parse sql with
+        | Select(SelectQuery s) ->
+            match s.From with
+            | [ { Kind = JoinedTable { Right = { Kind = TableSample(_, method, _, _) } } } ] ->
+                Assert.Equal(expected, method)
+            | res -> Assert.Fail(sprintf "Expected a sampled RIGHT operand, got %A" res)
+        | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    match parse "SELECT * FROM a TABLESAMPLE SYSTEM (10) JOIN b ON a.id = b.id" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = JoinedTable { Left = { Kind = TableSample(_, "SYSTEM", _, _) } } } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected a sampled LEFT operand, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+    rightOperandIsSampled "BERNOULLI" "SELECT * FROM a JOIN b TABLESAMPLE BERNOULLI (5) ON a.id = b.id"
+    rightOperandIsSampled "SYSTEM" "SELECT * FROM a CROSS JOIN b TABLESAMPLE SYSTEM (1)"
+    rightOperandIsSampled "SYSTEM" "SELECT * FROM a NATURAL JOIN b TABLESAMPLE SYSTEM (1)"
 
 [<Fact>]
 let ``TABLESAMPLE verification`` () =
@@ -463,8 +528,42 @@ let ``MATCH_RECOGNIZE input output names verification`` () =
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
+let ``MATCH_RECOGNIZE name groups take an optional AS`` () =
+    // 7.6 <row pattern recognition clause and name> — both name groups are
+    // [ [ AS ] <name> [ ( <derived column list> ) ] ]: the AS is optional.
+    match parse "SELECT * FROM t x MATCH_RECOGNIZE (PATTERN (A) DEFINE A AS a > 0) AS y" with
+    | Select(SelectQuery { From = [ { Kind = MatchRecognize(Some({ Kind = Identifier "X" }, _),
+                                                            _,
+                                                            Some({ Kind = Identifier "Y" }, _)) } ] }) -> ()
+    | res -> Assert.Fail(sprintf "Expected an input name without AS, got %A" res)
+
+    match parse "SELECT * FROM t MATCH_RECOGNIZE (PATTERN (A) DEFINE A AS a > 0) res" with
+    | Select(SelectQuery { From = [ { Kind = MatchRecognize(_, _, Some({ Kind = Identifier "RES" }, _)) } ] }) -> ()
+    | res -> Assert.Fail(sprintf "Expected an output name without AS, got %A" res)
+
+[<Fact>]
 let ``MATCH_RECOGNIZE missing DEFINE is rejected`` () =
     parseFails "SELECT * FROM t MATCH_RECOGNIZE (PATTERN (A))"
+
+[<Fact>]
+let ``MATCH_RECOGNIZE is a correlation only after a table or query name`` () =
+    // 7.6 <correlation or recognition> ::= [ AS ] <correlation name> …
+    //     | <row pattern recognition clause and name>
+    // The second alternative is the [ <correlation or recognition> ] slot of EVERY
+    // <table primary>, but only the <table or query name> one has an AST node
+    // (`MatchRecognize`) for it — `Subquery`, `ValuesTable`, `Lateral`, `Unnest` and
+    // `JsonTable` all record a correlation NAME. Accepting-and-dropping the whole clause
+    // would hand consumers a plain UNNEST, so those forms are rejected instead.
+    // See docs/trade-off.md ("Omissions").
+    parseFails "SELECT * FROM UNNEST(a) MATCH_RECOGNIZE (PATTERN (A) DEFINE A AS a > 0)"
+
+    parseFails "SELECT * FROM (SELECT 1 FROM t) MATCH_RECOGNIZE (PATTERN (A) DEFINE A AS a > 0)"
+
+    parseFails "SELECT * FROM LATERAL (SELECT 1 FROM t) MATCH_RECOGNIZE (PATTERN (A) DEFINE A AS a > 0)"
+
+    // 7.6 <table primary> never lists <row pattern recognition clause and name> on its own —
+    // the clause is the [ <correlation or recognition> ] slot of another <table primary>.
+    parseFails "SELECT * FROM MATCH_RECOGNIZE (PATTERN (A) DEFINE A AS a > 0)"
 
 [<Fact>]
 let ``JSON_TABLE formatted column verification`` () =
@@ -488,8 +587,51 @@ let ``JSON_TABLE formatted column verification`` () =
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
+let ``JSON_TABLE formatted column quotes behavior verification`` () =
+    // 7.11 [ <JSON table formatted column quotes behavior> QUOTES [ ON SCALAR STRING ] ]
+    // — the behavior comes FIRST; QUOTES closes it, exactly like the WRAPPER slot and
+    // like the 6.34 <JSON query> parser.
+    let formattedColumn sql =
+        match parse sql with
+        | Select(SelectQuery s) ->
+            match s.From with
+            | [ { Kind = JsonTable(stmt, Some _) } ] ->
+                match stmt.Columns with
+                | [ JsonFormatted column ] -> column
+                | res -> failwithf "Expected JsonFormatted, got %A" res
+            | res -> failwithf "Expected JsonTable, got %A" res
+        | res -> failwithf "Expected Select, got %A" res
+
+    Assert.Equal(
+        Some Keep,
+        (formattedColumn
+            "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (c VARCHAR(10) FORMAT JSON KEEP QUOTES ON SCALAR STRING)) AS jt")
+            .Quotes
+    )
+
+    Assert.Equal(
+        Some Omit,
+        (formattedColumn "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (c VARCHAR(10) FORMAT JSON OMIT QUOTES)) AS jt")
+            .Quotes
+    )
+
+    // The optional `ON SCALAR STRING` qualifier is parsed but collapsed away — the
+    // JsonQueryQuotes DU has no case for it. See docs/trade-off.md.
+    Assert.Equal(
+        (formattedColumn "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (c VARCHAR(10) FORMAT JSON KEEP QUOTES)) AS jt")
+            .Quotes,
+        (formattedColumn
+            "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (c VARCHAR(10) FORMAT JSON KEEP QUOTES ON SCALAR STRING)) AS jt")
+            .Quotes
+    )
+
+[<Fact>]
+let ``JSON_TABLE quotes behavior after QUOTES is rejected`` () =
+    // The keyword order is fixed by 7.11 — `QUOTES KEEP` is not SQL-2016.
+    parseFails "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (c VARCHAR(10) FORMAT JSON QUOTES KEEP)) AS jt"
+
+[<Fact>]
 let ``JSON_TABLE regular columns reject formatted-only clauses`` () =
-    // 7.11 — WRAPPER and EMPTY ARRAY/OBJECT belong only to a formatted column.
     parseFails "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT WITH WRAPPER))"
     parseFails "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT EMPTY ARRAY ON EMPTY))"
     parseFails "SELECT * FROM JSON_TABLE(doc, '$' COLUMNS (a INT EMPTY OBJECT ON ERROR))"
@@ -950,7 +1092,7 @@ let ``PARTITION BY join verification`` () =
     match parse "SELECT * FROM t1 PARTITION BY (a, b) JOIN t2 ON t1.id = t2.id" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = JoinedTable { PartitionBy = Some [ { Kind = Identifier "A" }; { Kind = Identifier "B" } ] } } ] ->
+        | [ { Kind = JoinedTable { LeftPartitionBy = Some [ { Kind = Identifier "A" }; { Kind = Identifier "B" } ] } } ] ->
             ()
         | res -> Assert.Fail(sprintf "Expected PARTITION BY join, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
@@ -970,8 +1112,18 @@ let ``PARTITION BY join on the right operand (7.10)`` () =
     match parse "SELECT * FROM t1 JOIN t2 PARTITION BY (t2.a) ON t1.id = t2.id" with
     | Select(SelectQuery s) ->
         match s.From with
-        | [ { Kind = JoinedTable { PartitionBy = Some [ { Kind = ColumnReference [ "T2"; "A" ] } ] } } ] -> ()
+        | [ { Kind = JoinedTable { RightPartitionBy = Some [ { Kind = ColumnReference [ "T2"; "A" ] } ] } } ] -> ()
         | res -> Assert.Fail(sprintf "Expected a right-operand PARTITION BY join, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
+let ``PARTITION BY join preserves both operands (7.10)`` () =
+    match parse "SELECT * FROM t1 PARTITION BY (t1.a) JOIN t2 PARTITION BY (t2.b) ON t1.id = t2.id" with
+    | Select(SelectQuery s) ->
+        match s.From with
+        | [ { Kind = JoinedTable { LeftPartitionBy = Some [ { Kind = ColumnReference [ "T1"; "A" ] } ]
+                                   RightPartitionBy = Some [ { Kind = ColumnReference [ "T2"; "B" ] } ] } } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected both partition clauses to be preserved, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
 
 [<Fact>]
@@ -1186,6 +1338,26 @@ let ``All fields reference verification`` () =
     parseFails "SELECT ** FROM t"
 
 [<Fact>]
+let ``search condition rejects a term in WHERE and HAVING`` () =
+    // 8.21 <search condition> ::= <boolean value expression>, which bottoms out at a
+    // <boolean primary> — a 6.29 <term> (`1 + 1`, `a || b`) or a signed <numeric primary>
+    // (`-x`) is not a <value expression primary>, so neither is legal.
+    parseFails "SELECT a FROM t WHERE 1 + 1"
+    parseFails "SELECT a FROM t WHERE a || b"
+    parseFails "SELECT a FROM t WHERE -x"
+    parseFails "SELECT a FROM t GROUP BY a HAVING 1 + 1"
+
+    // A bare primary IS a <boolean predicand>, so these stay legal (type-checking them is
+    // semantic and out of scope), as does a parenthesised term.
+    parse "SELECT a FROM t WHERE 1" |> ignore
+    parse "SELECT a FROM t WHERE 'x'" |> ignore
+    parse "SELECT a FROM t WHERE (1 + 1)" |> ignore
+
+    parse "SELECT a FROM t WHERE a > 1 AND b = 2 OR NOT c" |> ignore
+
+    parse "SELECT a FROM t GROUP BY a HAVING a > 1" |> ignore
+
+[<Fact>]
 let ``Full SELECT structure verification`` () =
     match
         parse
@@ -1324,6 +1496,20 @@ let ``Join specification rules (7.10)`` () =
     parseFails "SELECT * FROM a CROSS JOIN b ON a.x = b.x"
     parseFails "SELECT * FROM a NATURAL JOIN b USING (x)"
 
+    // 7.10 <join condition> ::= ON <search condition> — a bare 6.29 <term> is not one.
+    parseFails "SELECT * FROM a JOIN b ON a.x + 1"
+
+    // 7.10 — a <qualified join>'s right operand is { <table reference> |
+    // <partitioned join table> }, so a nested join can be the right operand with the
+    // OUTER join taking the trailing specification: `b CROSS JOIN c` joins to `a` via USING.
+    match parse "SELECT * FROM a JOIN b CROSS JOIN c USING (y)" with
+    | Select(SelectQuery { From = [ { Kind = JoinedTable _ } ] }) -> ()
+    | res -> Assert.Fail(sprintf "Expected a nested right operand, got %A" res)
+
+    // 7.10 <cross join> ::= <table reference> CROSS JOIN <table factor> — no partitioned operand.
+    parseFails "SELECT * FROM a PARTITION BY (x) CROSS JOIN b"
+    parseFails "SELECT * FROM a CROSS JOIN b PARTITION BY (x)"
+
     // positive
     match parse "SELECT * FROM a JOIN b ON a.x = b.x" with
     | Select(SelectQuery s) ->
@@ -1331,6 +1517,20 @@ let ``Join specification rules (7.10)`` () =
         | [ { Kind = JoinedTable _ } ] -> ()
         | res -> Assert.Fail(sprintf "Expected JoinedTable, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Select, got %A" res)
+
+[<Fact>]
+let ``MODULE-qualified table names are accepted (5.4)`` () =
+    // 5.4 <table name> ::= <local or schema qualified name>, and MODULE is the only
+    // <local qualifier> — so `MODULE.c` is a table name, in a <table primary>, an
+    // <only spec> and an <explicit table> alike.
+    match parse "SELECT * FROM MODULE.c" with
+    | Select(SelectQuery { From = [ { Kind = TableSourceKind.Table({ Kind = ColumnReference [ "MODULE"; "C" ] },
+                                                                   None,
+                                                                   None) } ] }) -> ()
+    | res -> Assert.Fail(sprintf "Expected MODULE.c table, got %A" res)
+
+    parse "SELECT * FROM ONLY (MODULE.c)" |> ignore
+    parse "TABLE MODULE.c" |> ignore
 
 [<Fact>]
 let ``Derived tables require a correlation (7.6)`` () =
@@ -1506,6 +1706,31 @@ let ``INTERSECT binds tighter than UNION`` () =
                           { Kind = Union },
                           SetOperation(SelectQuery _, { Kind = Intersect }, SelectQuery _))) -> ()
     | res -> Assert.Fail(sprintf "Expected INTERSECT to bind tighter than UNION, got %A" res)
+
+    // The mirror image also holds: INTERSECT binds tighter, so it is the LEFT operand of UNION.
+    match parse "SELECT 1 FROM t INTERSECT SELECT 2 FROM t UNION SELECT 3 FROM t" with
+    | Select(SetOperation(SetOperation(SelectQuery _, { Kind = Intersect }, SelectQuery _),
+                          { Kind = Union },
+                          SelectQuery _)) -> ()
+    | res -> Assert.Fail(sprintf "Expected UNION over INTERSECT, got %A" res)
+
+[<Fact>]
+let ``set operation chains follow left recursive grammar (7.17)`` () =
+    match parse "SELECT 1 FROM t UNION SELECT 2 FROM t UNION SELECT 3 FROM t" with
+    | Select(SetOperation(SetOperation(SelectQuery _, { Kind = Union }, SelectQuery _), { Kind = Union }, SelectQuery _)) ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected a left-associated UNION chain, got %A" res)
+
+    match parse "SELECT 1 FROM t UNION SELECT 2 FROM t EXCEPT SELECT 3 FROM t" with
+    | Select(SetOperation(SetOperation(SelectQuery _, { Kind = Union }, SelectQuery _), { Kind = Except }, SelectQuery _)) ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected a left-associated UNION/EXCEPT chain, got %A" res)
+
+    match parse "SELECT 1 FROM t INTERSECT SELECT 2 FROM t INTERSECT SELECT 3 FROM t" with
+    | Select(SetOperation(SetOperation(SelectQuery _, { Kind = Intersect }, SelectQuery _),
+                          { Kind = Intersect },
+                          SelectQuery _)) -> ()
+    | res -> Assert.Fail(sprintf "Expected a left-associated INTERSECT chain, got %A" res)
 
 [<Fact>]
 let ``ORDER BY applies to whole set operation`` () =

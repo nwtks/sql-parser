@@ -22,8 +22,9 @@ lives in [architecture.md](architecture.md), the rationale in [trade-off.md](tra
 
 ## FParsec combinator pitfalls
 
-- **Precedence** — `<|>` binds tighter than `.>>`/`.>>.`/`>>.`, `|>>` looser than `<|>`:
-  parenthesise alternatives and constructor branches. **`>>=` binds tighter than
+- **Precedence** — in F#, `>>.`, `>>%`, `<|`, `|>>` and `>>=` all begin with a relational
+  character, so they share ONE precedence level and associate **left to right**.
+  Parenthesise alternatives and constructor branches. **`>>=` binds tighter than
   `.>>.`** — a `.>>.`-chain with a bind does not group left-associatively; use explicit
   `>>=` binds.
 - **`>>.` discards the left result** (a `>>.`-chain returns the last keyword's string) —
@@ -32,26 +33,35 @@ lives in [architecture.md](architecture.md), the rationale in [trade-off.md](tra
   A projection cannot fail, so semantic validation needs `>>=` + `fail`.
 - **`opt` does not backtrack partial consumption** — wrap optional multi-keyword clauses
   in `attempt` (the `WITH`-prefixed clauses, `FOR UPDATE OF`, …).
-- **`notFollowedBy` makes failure fatal** — `opt` cannot catch it, and it is not a parser
-  on its own: write `p .>> notFollowedBy q` inside `attempt`.
+- **`attempt` swallows a committed failure, so an arity/shape guard inside it is
+  unobservable** — `attempt (kw >>. body >>= fun x -> if bad x then fail …)` restores the
+  input on the guard's failure and a later alternative re-parses the same tokens as a
+  different production. A keyword branch that must REJECT a malformed suffix (7.9
+  `PERMUTE ( <row pattern> { , … } )` with fewer than two patterns) must NOT be
+  `attempt`-wrapped; committing is the only way the guard is visible.
+- **`notFollowedBy` makes failure fatal** — `opt` cannot catch it; write
+  `p .>> notFollowedBy q` inside `attempt`.
 - **`many`/`sepBy1` do not backtrack a consumed token/separator** — postfix loops need
   `many (attempt …)`.
 - **Whitespace is not skipped automatically** — `pKeyword` skips no *leading* ws; raw
   parsers (`pchar '*'`, `pUnsignedInteger`) consume no *trailing* ws — add `.>> ws`.
 - **`pstring` rejects newline characters in its argument** — `pstring "\r\n"` throws at
   module-initialisation time; spell newlines with `pchar`.
-- **`ws` is the separator consumer, so it eats comments too** (5.2) — where a comment must
-  NOT be accepted between two tokens (an `<introducer>`, intra-literal spaces of a
-  datetime literal), use `spaces`/`spaces1`.
+- **`ws` is the separator consumer, so it eats comments too** (5.2) — where a comment
+  must NOT sit between two tokens (an `<introducer>`, a datetime literal's interior),
+  use `spaces`/`spaces1`.
 - **`pKeyword` returns `Parser<string, unit>`** — coerce with `>>% ()` before combining
-  with a `Parser<unit, _>`. It keeps the *input* casing and refuses a keyword followed by
-  an identifier character (`SYSTEM` ≠ `SYSTEM_TIME`).
+  with a `Parser<unit, _>`. It keeps the *input* casing and refuses a trailing identifier
+  character (`SYSTEM` ≠ `SYSTEM_TIME`).
 
 ## Definition order, forward references and dispatch
 
 - **Define before use** — move the dependency up, nest single-use sub-parsers, or use
   `createParserForwardedToRef`. Ascending ISO clause order is best-effort;
   `define-before-use` wins, and uncited helpers stay next to their consumer.
+- **`<value expression primary>` and the non-boolean expression are forward refs** near
+  the top of `ExpressionParser.fs`; operand slots needing the narrower production (6.17,
+  6.23, 6.4, 6.25) must reference the ref, not a local parser (use-before-define).
 - **Cross-module refs are wired where the target is defined** (inventory:
   [architecture.md](architecture.md) §5). Reference the forwarding *parser*, never
   `…Ref.Value` — reading `.Value` at initialisation captures FParsec's dummy parser.
@@ -67,11 +77,11 @@ lives in [architecture.md](architecture.md), the rationale in [trade-off.md](tra
   14.1 `DECLARE CURSOR` is rejected by *both* (`pDeclareCursor` has no caller). A test
   that mixes them passes/fails for the wrong reason.
 - **Comparison operands must be `<row value predicand>`s, judged on the parser result's
-  top node.** A top-level boolean is rejected (`1 = 2 = 3`, `x = EXISTS (…)`) but a term
-  is not (`a + b = c` is valid); `(a = b) = c` survives through its `Parenthesized` node.
-  The 6.39 `<boolean test>` uses a narrower gate (`isBooleanPredicand`): `1 + 1 IS TRUE`
-  is rejected, `1 + 1 IS NULL` (8.8) is not. Desugared `=` (NULLIF) sits inside a `Case`
-  and must not be flagged.
+  top node** — a top-level boolean is rejected (`1 = 2 = 3`, `x = EXISTS (…)`), a term is
+  not (`a + b = c` is valid), and `(a = b) = c` survives through its `Parenthesized` node.
+  The 6.39 `<boolean test>` gate (`isBooleanPredicand`) is narrower: `1 + 1 IS TRUE` is
+  rejected, `1 + 1 IS NULL` (8.8) is not. Desugared `=` (NULLIF) sits inside a `Case` and
+  must not be flagged.
 - **6.4 has three value-specification widths** — `?` belongs to `<general value
   specification>` and `<target specification>` only, so a `<simple value specification>`
   slot must not accept it; 6.11 `<row marker offset>` re-adds it explicitly.
@@ -79,34 +89,34 @@ lives in [architecture.md](architecture.md), the rationale in [trade-off.md](tra
   consume a following `USING` (it would fail the enclosing statement instead of letting
   20.19 match); guard with `notFollowedBy (pKeyword "USING")`. When narrowing a parser,
   check that a broader sibling dispatched later still gets its turn.
-- **Predicate suffixes are gated on the accumulated expression** —
-  `pBooleanTestSuffixes` picks per shape (boolean → boolean-test only; term/row →
-  no-boolean-test predicate; else full `pPredicate`). A new predicate in
-  `PredicateParser.pPredicateImpl` must decide three things: boolean primary? dropped when
-  `includeBooleanTest = false`? part of 6.12 `<when operand>`? Do not fold the suffixes
-  back into `many ( … )`.
+- **Predicate suffixes are gated on the accumulated expression** — `pBooleanTestSuffixes`
+  picks per shape (top-level boolean → boolean-test only; term/row → no-boolean-test
+  predicate; else full `pPredicate`). A new predicate in `PredicateParser.pPredicateImpl`
+  must decide: boolean primary? dropped when `includeBooleanTest = false`? part of 6.12
+  `<when operand>`? Do not fold the suffixes back into `many ( … )`.
 - **`<table argument>` vs its syntactic twins** — `<table function invocation>` and
   `TABLE ( <query> )` are also `<value expression>`s, so `pTableArgument` accepts them only
   with a following table-argument clause. `COPARTITION` is *not* reserved — reject it as a
   correlation name and try it before the argument list.
 - **Desugared nodes must not be re-checked post-parse** — `COALESCE`/`NULLIF` expand to
   shapes a naive traversal would reject; the left-operand rule lives in parse-time suffix
-  gating, and `findExpressionViolationIn` checks only standalone `QuantifiedSubquery` and
-  the `<period predicate>` left operand.
+  gating, and `findExpressionViolationIn` checks only `QuantifiedSubquery` and the
+  `<period predicate>` left operand.
 - **`CAST ( NULL AS DESCRIPTOR )` is not a cast** — `<cast target>` excludes `DESCRIPTOR`;
   the form is `pDescriptorArgument`, and `DESCRIPTOR ( … )` is the shared 20.16
   `pDescriptorValueConstructor`.
-- **Do not reuse a parser whose grammar doesn't cover the slot** — `INSERT` keeps
-  `pSchemaQualifiedNameExpression` (14.11 has no `ONLY`), and the omitted DML target
-  relies on `SET`/`WHERE` being reserved: a permissive identifier parser would read
-  `UPDATE SET …`'s `SET` as the table.
+- **Do not reuse a parser whose grammar doesn't cover the slot** — `INSERT` uses the
+  narrow `pTableNameExpression` (14.11's `<insertion target>` has no `ONLY`), and the
+  omitted DML target relies on `SET`/`WHERE` being reserved: a permissive identifier
+  parser would read `UPDATE SET …`'s `SET` as the table.
 
 ## Reserved words and keywords
 
 - **`pReservedFunctionName` is a whitelist** (`functionKeywords` in `Lexer.fs`);
   `pRoutineName` wraps it with non-reserved/delimited identifiers. Reserved words that
   start dedicated constructs (`EXISTS`, `UNIQUE`, `JSON_EXISTS`, `PERIOD`, `VALUE_OF`)
-  must stay off it — their parsers are tried before `pRoutineInvocation`.
+  must stay off it — they parse through their own productions (`pPredicatePrimary`,
+  `pValueOfExpressionAtRow`, …), never as a generic routine invocation.
 - **Closed enumerations need explicit `choice [ pKeyword "…" ]` lists** — a raw identifier
   parser also accepts `ALL`/`SELECT`/…, and reserved words cannot go through `pIdentifier`.
 - **A citation must name the defining clause** (`<local qualified name>` is 5.4,
@@ -130,12 +140,12 @@ lives in [architecture.md](architecture.md), the rationale in [trade-off.md](tra
 
 ## Grammar-specific traps
 
-- **`pExpression` includes boolean operators** — where `AND` must not be consumed, use the
-  boolean-free parser: `<point in time>` / `FOR PORTION OF` use the 6.35 datetime parser;
-  JSON slots use `pNonBooleanValueExpression`.
+- **`pExpression` includes boolean operators** — where `AND` must not be consumed, use
+  the boolean-free parser: `<point in time>` / `FOR PORTION OF` use the 6.35 datetime
+  parser (`pDatetimeValueExpression`), JSON slots use `pNonBooleanValueExpression`.
 - **`pDataType` accepts any identifier as a UDT** — `NESTED PATH '$.items'` would read as
-  column `NESTED` of type `PATH`; the UDT branch ends `.>>? notFollowedBy pIdentifier` and
-  the JSON_TABLE `NESTED` branch is tried first.
+  column `NESTED` of type `PATH`; `pUserDefinedType` ends `.>>? notFollowedBy pIdentifier`
+  and the JSON_TABLE `NESTED` branch is tried first.
 - **Recursive/ambiguous forms** — `JSON_ARRAY(NULL ON NULL)` needs a `notFollowedBy` guard;
   `pExplicitRowValueConstructor` needs `attempt` so `(a)` falls through; `SET ( … )` ↔
   multiset recursion uses a forward ref; `pIntervalSign` must not swallow `->`;
@@ -163,17 +173,29 @@ lives in [architecture.md](architecture.md), the rationale in [trade-off.md](tra
 - **Reordering source definitions means reordering their tests** (AGENTS.md: compile
   order, then definition order; review-only, so drift is silent).
 - **A name slot is only as strict as the parser it names** — `pSchemaQualifiedNameExpression`
-  accepts three parts; most 5.4 productions are narrower (`<schema name>`, `<cursor
+  accepts three parts; most 5.4 productions are narrower (`<schema name>`, `<character
+  set name>`, `<cursor name>`, `<table name>`, `<external routine name>`, `<group
   name>`, …). Use `pSchemaNameExpression` / `pCharacterSetNameExpression` /
-  `pLocalQualifiedNameExpression`; add new narrow productions through `pNameOfArity`.
+  `pLocalQualifiedNameExpression` / `pTableNameExpression` / `pIdentifierExpression`;
+  add new narrow productions through `pNameOfArity`.
 - **A permissive sub-parser inside a `choice` swallows its siblings** — in 12.3
   `<object name>` the bare-name-accepting designator parser made every `GRANT SELECT ON
   t1` resolve to `GrantRoutine`; use the literal `pTypedSpecificRoutineDesignator`
   instead of reordering the alternatives.
+- **`Assert.Fail` is not `unit`-only but also not polymorphic** — it is usable as the
+  last branch of a `unit` match, but a match that must *produce a value* cannot use it
+  (`type constraint mismatch: 'unit' is not compatible with 'string'`). Write the helper
+  as `unit`-returning, or extract with `failwithf`, or assert inside the branch.
+- **Record and list patterns split across lines need same-column alignment (FS0010)** —
+  `{ DataType = Some(…) }` written over several lines inside `[ … ]` fails to parse.
+  Bind first (`| CreateTable { Columns = [ column ] } -> match column.DataType with …`)
+  instead of nesting the pattern.
+- **Inside `[ … ]` a comma makes a TUPLE, not two list elements** — use `;`:
+  `[ _; pair ]`, not `[ _, pair ]`.
 
 ## Known residual deviations (out of scope)
 
-- **TRANSFORM GROUP `<multiple group specification>` is lenient.** 11.60
-  `pTransformGroupSpecification` makes every group's `FOR TYPE` optional, so
-  `g1, g2 FOR TYPE my_type` parses with only the last group typed, although the strict
-  grammar requires `FOR TYPE` on each group. An existing test pins the lenient form.
+- **20.26 `<preparable dynamic cursor name>` scope option** — `WHERE CURRENT OF`
+  shares one parser between the static 14.8/14.13 (bare `<cursor name>`) and the
+  dynamic 20.23–20.27 forms, so `WHERE CURRENT OF LOCAL c` also parses in static
+  statements. Deliberate; documented in [trade-off.md](trade-off.md).

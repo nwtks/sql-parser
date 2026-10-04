@@ -698,26 +698,33 @@ module Lexer =
     // 5.3 <introducer> ::= <underscore>
     let private pIntroducer = pchar '_' .>> ws
 
-    // 10.5 <character set specification> ::= <character set name>
-    // <character set name> ::= [ <schema name> <period> ] <SQL language identifier>
-    let pCharacterSetSpecification =
-        // 5.2 <SQL language identifier> ::= <SQL language identifier start> [ <SQL language identifier part>... ]
-        // <SQL language identifier start> ::= <simple Latin letter>
-        // <SQL language identifier part> ::= <simple Latin letter> | <digit> | <underscore>
-        let pSqlLanguageIdentifier =
-            many1Satisfy2L isAsciiLetter (fun c -> isAsciiLetter c || isDigit c || c = '_') "SQL language identifier"
-            |>> (fun s -> s.ToUpperInvariant())
-            .>> ws
+    // 5.2 <SQL language identifier> ::= <SQL language identifier start> [ <SQL language identifier part>... ]
+    // <SQL language identifier start> ::= <simple Latin letter>
+    // <SQL language identifier part> ::= <simple Latin letter> | <digit> | <underscore>
+    let pSqlLanguageIdentifier: Parser<string, unit> =
+        many1Satisfy2L isAsciiLetter (fun c -> isAsciiLetter c || isDigit c || c = '_') "SQL language identifier"
+        |>> (fun s -> s.ToUpperInvariant())
+        .>> ws
 
-        // `attempt` is required: pSqlLanguageIdentifier consumes the name before the
-        // optional <period> fails, which would otherwise reject an unqualified
-        // <character set name> such as `_UTF8'abc'`.
-        opt (attempt (pSqlLanguageIdentifier .>> token (pstring ".")))
-        .>>. pSqlLanguageIdentifier
-        |>> fun (schema, name) ->
-            match schema with
-            | Some s -> s + "." + name
-            | None -> name
+    // 10.5 <character set specification> ::= <character set name>
+    // `attempt` is required: pSqlLanguageIdentifier consumes the name before the
+    // optional <period> fails, which would otherwise reject an unqualified
+    // <character set name> such as `_UTF8'abc'`.
+    // <schema name> = [ <catalog name> . ] <unqualified schema name>, so the
+    // catalog part and the schema part are the same two-part shape; `cat.sch.cs`
+    // parses as three parts.
+    let pCharacterSetSpecification =
+        let pCatalog = opt (attempt (pSqlLanguageIdentifier .>> token (pstring ".")))
+        let pSchemaPart = opt (attempt (pSqlLanguageIdentifier .>> token (pstring ".")))
+        let pName = pSqlLanguageIdentifier
+
+        pCatalog .>>. pSchemaPart .>>. pName
+        |>> fun ((catalog, schema), name) ->
+            match catalog, schema with
+            | Some c, Some s -> c + "." + s + "." + name
+            | Some c, None -> c + "." + name
+            | None, Some s -> s + "." + name
+            | None, None -> name
 
     // 5.3 <character string literal> — the body is shared with the <national character string
     // literal>, whose production has no <introducer> <character set specification> slot.

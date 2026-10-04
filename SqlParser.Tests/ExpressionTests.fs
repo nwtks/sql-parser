@@ -202,7 +202,8 @@ let ``String type modifiers are parsed (6.1)`` () =
     parseFails "SELECT CAST(x AS NCHAR(8) CHARACTER SET utf8) FROM t"
 
     // 10.5 <character set specification> is always a <character set name>, i.e.
-    // [ <schema name> <period> ] <SQL language identifier> (5.4) — at most two parts.
+    // [ <schema name> <period> ] <SQL language identifier> (5.4). <schema name> is
+    // [ <catalog name> . ] <unqualified schema name>, so a THREE-part name is legal.
     match parse "SELECT CAST(x AS VARCHAR(10) CHARACTER SET info.utf8) FROM t" with
     | Cast(_, CharacterTypeWithModifiers(Varchar _, modifiers), _) ->
         Assert.Equal<ExpressionKind option>(
@@ -211,7 +212,16 @@ let ``String type modifiers are parsed (6.1)`` () =
         )
     | res -> Assert.Fail(sprintf "Expected a schema-qualified character set, got %A" res)
 
-    parseFails "SELECT CAST(x AS VARCHAR(10) CHARACTER SET cat.info.utf8) FROM t"
+    match parse "SELECT CAST(x AS VARCHAR(10) CHARACTER SET cat.info.utf8) FROM t" with
+    | Cast(_, CharacterTypeWithModifiers(Varchar _, modifiers), _) ->
+        Assert.Equal<ExpressionKind option>(
+            Some(ColumnReference [ "CAT"; "INFO"; "UTF8" ]),
+            modifiers.CharacterSet |> Option.map (fun e -> e.Kind)
+        )
+    | res -> Assert.Fail(sprintf "Expected a catalog-qualified character set, got %A" res)
+
+    // A FOUR-part name is beyond <schema name> (5.4).
+    parseFails "SELECT CAST(x AS VARCHAR(10) CHARACTER SET a.b.c.d) FROM t"
 
 [<Fact>]
 let ``Exact numeric type variants are parsed`` () =
@@ -676,13 +686,48 @@ let ``Window functions verification`` () =
 
 [<Fact>]
 let ``Window-only functions require an OVER clause`` () =
-    parseFails "SELECT ROW_NUMBER()"
-    parseFails "SELECT RANK()"
-    parseFails "SELECT DENSE_RANK()"
-    parseFails "SELECT LEAD(x)"
-    parseFails "SELECT NTILE(4)"
-    parseFails "SELECT PERCENTILE_CONT(0.5)"
-    parseFails "SELECT LISTAGG(x, ',')"
+    // Non-vacuous: the FROM clause is present so the rejection is the function gate itself.
+    parseFails "SELECT ROW_NUMBER() FROM t"
+    parseFails "SELECT RANK() FROM t"
+    parseFails "SELECT DENSE_RANK() FROM t"
+    parseFails "SELECT LEAD(x) FROM t"
+    parseFails "SELECT NTILE(4) FROM t"
+    // 10.9 <inverse distribution function> REQUIRES its WITHIN GROUP.
+    parseFails "SELECT PERCENTILE_CONT(0.5) FROM t"
+    parseFails "SELECT LISTAGG(x, ',') FROM t"
+
+[<Fact>]
+let ``Aggregate suffix gates follow 10.9`` () =
+    // 10.9 — every <aggregate function> alternative admits [ <filter clause> ], including
+    // the binary set functions and ARRAY_AGG; <window function type> (6.10) accepts them
+    // via <aggregate function>.
+    parse "SELECT COVAR_POP(a, b) FILTER (WHERE p) FROM t" |> ignore
+    parse "SELECT ARRAY_AGG(x) FILTER (WHERE p) FROM t" |> ignore
+    parse "SELECT ARRAY_AGG(x ORDER BY y) FROM t" |> ignore
+    parse "SELECT ARRAY_AGG(x ORDER BY y) FILTER (WHERE p) FROM t" |> ignore
+    parse "SELECT ARRAY_AGG(x) OVER (ORDER BY y) FROM t" |> ignore
+    parse "SELECT RUNNING ARRAY_AGG(x ORDER BY y) FROM t" |> ignore
+
+    // …but the <set quantifier> belongs to <general set function> / LISTAGG only.
+    parseFails "SELECT my_func(DISTINCT 1) FROM t"
+    parseFails "SELECT ARRAY_AGG(DISTINCT x) FROM t"
+    parseFails "SELECT RANK(DISTINCT 1) WITHIN GROUP (ORDER BY x) FROM t"
+    parseFails "SELECT COVAR_POP(DISTINCT a, b) FROM t"
+
+    // 10.9 <row pattern count function> ::= COUNT ( <row pattern variable name> <period>
+    //     <asterisk> ) — and the `*` argument stays COUNT-only/single.
+    match parse "SELECT COUNT(v.*) FROM t" with
+    | FunctionCall({ Kind = Identifier "COUNT" },
+                   _,
+                   SqlValueArguments([ { Kind = QualifiedStar [ "V" ] } ], _),
+                   _,
+                   _,
+                   _,
+                   _) -> ()
+    | res -> Assert.Fail(sprintf "Expected COUNT(v.*), got %A" res)
+
+    parseFails "SELECT SUM(v.*) FROM t"
+    parseFails "SELECT COUNT(v.*, 1) FROM t"
 
 [<Fact>]
 let ``Set functions that need a suffix are accepted with one`` () =
@@ -1066,6 +1111,10 @@ let ``Generalized method invocation verification`` () =
     | GeneralizedInvocation(_, _, { Kind = Identifier "M" }, None) -> ()
     | res -> Assert.Fail(sprintf "Expected GeneralizedInvocation without args, got %A" res)
 
+    // 6.17 <generalized invocation> — the operand is a <value expression primary>, so a
+    // term is rejected.
+    parseFails "SELECT (1 + 1 AS mytype).m"
+
 [<Fact>]
 let ``Static method invocation verification`` () =
     match parse "SELECT my_type::prune(x)" with
@@ -1108,6 +1157,10 @@ let ``DEREF reference resolution verification`` () =
     | Deref { Kind = Identifier "X" } -> ()
     | res -> Assert.Fail(sprintf "Expected Deref, got %A" res)
 
+    // 6.23 <reference resolution> — the operand is a <reference value expression>
+    // (= <value expression primary>), so a boolean is rejected.
+    parseFails "SELECT DEREF(1 = 1)"
+
 [<Fact>]
 let ``Array element reference verification`` () =
     match parse "SELECT arr[1]" with
@@ -1128,6 +1181,10 @@ let ``ELEMENT multiset element reference verification`` () =
     match parse "SELECT ELEMENT(x)" with
     | Element { Kind = Identifier "X" } -> ()
     | res -> Assert.Fail(sprintf "Expected Element, got %A" res)
+
+    // 6.25 <multiset element reference> — the operand is a <multiset value expression>,
+    // so a boolean is rejected.
+    parseFails "SELECT ELEMENT(1 = 1)"
 
 [<Fact>]
 let ``Row pattern navigation verification`` () =
@@ -1155,6 +1212,17 @@ let ``Row pattern navigation verification`` () =
     match parse "SELECT NEXT(x, 2)" with
     | RowPatternNavigation(RowPatternNavigation.Physical(PrevOrNext.Next, _, Some { Kind = Literal(Number 2m) })) -> ()
     | res -> Assert.Fail(sprintf "Expected NEXT(x, 2), got %A" res)
+
+    // 6.26 <logical offset> / <physical offset> ::= <simple value specification>
+    //     | <dynamic parameter specification>
+    match parse "SELECT FIRST(x, ?)" with
+    | RowPatternNavigation(RowPatternNavigation.Logical(None, FirstOrLast.First, _, Some { Kind = Parameter "?" })) ->
+        ()
+    | res -> Assert.Fail(sprintf "Expected FIRST(x, ?), got %A" res)
+
+    match parse "SELECT NEXT(x, ?)" with
+    | RowPatternNavigation(RowPatternNavigation.Physical(PrevOrNext.Next, _, Some { Kind = Parameter "?" })) -> ()
+    | res -> Assert.Fail(sprintf "Expected NEXT(x, ?), got %A" res)
 
     match parse "SELECT PREV(FIRST(x), 2)" with
     | RowPatternNavigation(RowPatternNavigation.Compound(PrevOrNext.Prev,
@@ -1198,6 +1266,11 @@ let ``JSON input clause is preserved`` () =
     | JsonValue({ Passing = [ { InputFormat = Some(JsonEncoding None) } ] }, None, None, None) -> ()
     | res -> Assert.Fail(sprintf "Expected passing FORMAT kept, got %A" res)
 
+    // 10.14 — AS <identifier> is mandatory in a <JSON argument>; a bare PASSING value
+    // is rejected (the FROM keeps these rejection checks non-vacuous).
+    parseFails "SELECT JSON_VALUE(x, '$.a' PASSING y) FROM t"
+    parseFails "SELECT JSON_VALUE(x, '$.a' PASSING y FORMAT JSON) FROM t"
+
 [<Fact>]
 let ``JSON_VALUE function verification`` () =
     match parse "SELECT JSON_VALUE(doc, '$.name')" with
@@ -1209,6 +1282,25 @@ let ``JSON_VALUE function verification`` () =
                 None,
                 None) -> ()
     | res -> Assert.Fail(sprintf "Expected JsonValue, got %A" res)
+
+    // 6.27 <JSON value empty behavior> ::= ERROR | NULL | DEFAULT <value expression>
+    //     — <value expression> includes the boolean forms.
+    match parse "SELECT JSON_VALUE(doc, '$.name' DEFAULT (1 = 1) ON EMPTY)" with
+    | JsonValue({ Context = { Kind = Identifier "DOC" }
+                  Path = "$.name"
+                  PathName = None
+                  Passing = [] },
+                None,
+                Some(JsonDefault { Kind = Parenthesized _ }),
+                None) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonValue with DEFAULT, got %A" res)
+
+[<Fact>]
+let ``COLLATION FOR takes a string value expression (6.4)`` () =
+    // 6.4 <current collation specification> ::= COLLATION FOR ( <string value expression> )
+    // — the operand is a <string value expression>, so a boolean is rejected.
+    parse "SELECT COLLATION FOR ('a')" |> ignore
+    parseFails "SELECT COLLATION FOR (1 = 1)"
 
 [<Fact>]
 let ``JSON path must be a character string literal (10.14)`` () =
@@ -1846,14 +1938,24 @@ let ``JSON_OBJECTAGG function verification`` () =
                       Value = { Kind = Identifier "X" } },
                     None,
                     None,
+                    None,
                     None) -> ()
     | res -> Assert.Fail(sprintf "Expected JsonObjectAgg, got %A" res)
+
+    // 10.9 — every <aggregate function> alternative admits a [ <filter clause> ].
+    match parse "SELECT JSON_OBJECTAGG('a' VALUE x) FILTER (WHERE p)" with
+    | JsonObjectAgg(_, _, _, _, Some { Kind = Identifier "P" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonObjectAgg FILTER, got %A" res)
 
 [<Fact>]
 let ``JSON_ARRAYAGG function verification`` () =
     match parse "SELECT JSON_ARRAYAGG(x ORDER BY y)" with
-    | JsonArrayAgg({ Kind = Identifier "X" }, Some [ { Kind = Identifier "Y" }, true, None ], None, None) -> ()
+    | JsonArrayAgg({ Kind = Identifier "X" }, Some [ { Kind = Identifier "Y" }, true, None ], None, None, None) -> ()
     | res -> Assert.Fail(sprintf "Expected JsonArrayAgg, got %A" res)
+
+    match parse "SELECT JSON_ARRAYAGG(x) FILTER (WHERE p)" with
+    | JsonArrayAgg(_, None, None, None, Some { Kind = Identifier "P" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected JsonArrayAgg FILTER, got %A" res)
 
 [<Fact>]
 let ``RUNNING and FINAL set function verification`` () =

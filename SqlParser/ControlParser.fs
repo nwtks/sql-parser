@@ -16,12 +16,15 @@ module ControlParser =
     let private pTableArgument =
         // 10.4 <table argument correlation name> ::= <correlation name> — the optional AS
         // is not kept (the AST models correlations as a name + optional column list).
-        // COPARTITION starts the <copartition clause> and is never a correlation.
+        // COPARTITION starts the <copartition clause>, and PRUNE/KEEP start the
+        // <table argument pruning> clause (both non-reserved), so neither may be read as a
+        // correlation name.
         let pCorrelationName =
             pIdentifierExpression
             >>= fun name ->
                 match name.Kind with
                 | Identifier "COPARTITION" -> fail "COPARTITION starts a <copartition clause> (10.4)"
+                | Identifier("PRUNE" | "KEEP") -> fail "PRUNE/KEEP start a <table argument pruning> clause (10.4)"
                 | _ -> preturn name
 
         // 10.4 <table argument parenthesized derived column list>
@@ -144,12 +147,22 @@ module ControlParser =
             pExpression .>> pKeyword "AS" .>>. pSchemaQualifiedNameExpression
             |>> fun (e, name) -> SqlArgumentGeneralized(e, UserDefinedType name)
 
+        // The delimiter that ends an <SQL argument>: `,`, `)` or the <copartition clause>.
+        let pSqlArgumentEnd =
+            token (pstring ",") >>% ()
+            <|> (token (pstring ")") >>% ())
+            <|> (pKeyword "COPARTITION" >>% ())
+
         // 10.4 <named argument SQL argument> ::= <value expression> | <target specification>
         //     | <contextually typed value specification> | <table argument> | <descriptor argument>
         let pNamedArgumentValue =
             choice
                 [ attempt pDescriptorArgument |>> SqlArgumentDescriptor
                   attempt pTableArgument |>> SqlArgumentTable
+                  // A <target specification> adds the <host parameter specification> with
+                  // an <indicator parameter>, which no <value expression> reaches.
+                  attempt (DataManipulationParser.pTargetSpecification .>> followedBy pSqlArgumentEnd)
+                  |>> SqlArgumentValue
                   pContextuallyTypedValueSpecification |>> SqlArgumentValue
                   pExpression |>> SqlArgumentValue ]
 
@@ -181,12 +194,6 @@ module ControlParser =
             pIdentifierExpression .>> token (pstring "=>") .>>. pNamedArgumentValue
             |>> SqlArgumentNamed
 
-        // The delimiter that ends an <SQL argument>: `,`, `)` or the <copartition clause>.
-        let pSqlArgumentEnd =
-            token (pstring ",") >>% ()
-            <|> (token (pstring ")") >>% ())
-            <|> (pKeyword "COPARTITION" >>% ())
-
         // 10.4 <SQL argument> ::= <value expression> | <generalized expression>
         //     | <target specification> | <contextually typed value specification>
         //     | <named argument specification> | <table argument> | <descriptor argument>
@@ -198,6 +205,10 @@ module ControlParser =
                   // `f(x) AS t PARTITION BY a` is a <table argument> (10.4).
                   attempt (pGeneralizedExpressionArgument .>> followedBy pSqlArgumentEnd)
                   attempt pTableArgument |>> SqlArgumentTable
+                  // A <target specification> adds the <host parameter specification> with
+                  // an <indicator parameter>, which no <value expression> reaches.
+                  attempt (DataManipulationParser.pTargetSpecification .>> followedBy pSqlArgumentEnd)
+                  |>> SqlArgumentValue
                   pContextuallyTypedValueSpecification |>> SqlArgumentValue
                   pExpression |>> SqlArgumentValue ]
 

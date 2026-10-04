@@ -59,11 +59,19 @@ module QueryParser =
                   )
                   attempt (token pCircumflex >>% RowPatternAnchorStart)
                   attempt (token pDollarSign >>% RowPatternAnchorEnd)
-                  attempt (
-                      pKeyword "PERMUTE"
-                      >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pRowPattern (token (pstring ",")))
-                      |>> RowPatternPermute
-                  )
+                  // 7.9 <row pattern permute> ::= PERMUTE ( <row pattern>
+                  //     { <comma> <row pattern> }... ) — at least TWO patterns. This branch
+                  // is deliberately NOT attempt-wrapped: PERMUTE is not in
+                  // Lexer.reservedWords, but inside a row pattern primary it acts as a
+                  // committed keyword, so a malformed permute (`PERMUTE (A)`) fails the
+                  // whole pattern instead of falling back to a variable+group reading.
+                  pKeyword "PERMUTE"
+                  >>. between
+                          (token (pstring "("))
+                          (token (pstring ")"))
+                          (pRowPattern .>> token (pstring ",")
+                           .>>. sepBy1 pRowPattern (token (pstring ",")))
+                  |>> fun (first, rest) -> RowPatternPermute(first :: rest)
                   attempt (
                       between (token (pstring "(")) (token (pstring ")")) (opt pRowPattern)
                       |>> RowPatternGroup
@@ -107,7 +115,7 @@ module QueryParser =
 
         // 7.9 <row pattern definition> ::= <var> AS <search condition>
         let pRowPatternDefinition =
-            pIdentifierExpression .>> pKeyword "AS" .>>. pExpression
+            pIdentifierExpression .>> pKeyword "AS" .>>. pSearchCondition
             |>> fun (name, cond) -> { Name = name; Condition = cond }
 
         opt (attempt (pKeyword "AFTER" >>. pKeyword "MATCH" >>. pRowPatternSkipTo))
@@ -194,7 +202,7 @@ module QueryParser =
     // 10.10 <sort specification> ::= <sort key> [ <ordering specification> ] [ <null ordering> ]
     // 10.10 <sort key> ::= <value expression> — booleans are value expressions (6.28), so the
     // full expression parser is used rather than the boolean-free one.
-    // 10.4 <ordering specification> ::= ASC | DESC — 10.10 <null ordering> ::= NULLS FIRST | NULLS LAST
+    // 10.10 <ordering specification> ::= ASC | DESC — 10.10 <null ordering> ::= NULLS FIRST | NULLS LAST
     let pSortSpecification =
         let pNullsOrder =
             pKeyword "NULLS"
@@ -269,6 +277,10 @@ module QueryParser =
     // one-element `(1)` is not a <row value special case> (which is a
     // <nonparenthesized value expression primary>). ROW ( … ) is the 7.1 <row value constructor>
     // form and takes one or more.
+    //
+    // The bare <row value special case> must come LAST: it is the widest alternative
+    // (any <value expression>), so `VALUES 1` and `VALUES 1, 2` parse. Mirrors the
+    // <contextually typed table value constructor> arm in DataManipulationParser.fs.
     let private pTableValueConstructor =
         let pRow =
             choice
@@ -280,7 +292,9 @@ module QueryParser =
                       (token (pstring "("))
                       (token (pstring ")"))
                       (pExpression
-                       >>= fun first -> many1 (token (pstring ",") >>. pExpression) |>> fun rest -> first :: rest) ]
+                       >>= fun first -> many1 (token (pstring ",") >>. pExpression) |>> fun rest -> first :: rest)
+                  // 7.2 <row value special case> ::= <nonparenthesized value expression primary>
+                  pExpression |>> (fun e -> [ e ]) ]
 
         pKeyword "VALUES" >>. sepBy1 pRow (token (pstring ","))
 
@@ -288,12 +302,28 @@ module QueryParser =
     let private pCorrelationName =
         attempt (pKeyword "AS") >>. pIdentifierExpression <|> pIdentifierExpression
 
-    // 7.6 <correlation or recognition> ::= [ AS ] <correlation name> [ ( <derived column list> ) ]
-    let private pCorrelationOrRecognition =
-        pCorrelationName
-        .>>. opt (
-            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
-        )
+    // 7.6 <parenthesized derived column list> ::= ( <identifier> [ { , <identifier> }... ] )
+    let private pParenthesizedDerivedColumnList =
+        between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
+
+    // 7.6 <correlation or recognition> has two alternatives with different result shapes, so
+    // the shared slot carries this private sum instead of a bare tuple. `Correlated` is
+    // alternative 1 ([ AS ] <correlation name> [ ( <parenthesized derived column list> ) ])
+    // and `Recognized` is alternative 2 (<row pattern recognition clause and name>), which
+    // produces the MatchRecognize <table primary> node directly. The two are mutually
+    // exclusive — MATCH_RECOGNIZE is a reserved word (Lexer.fs), so it can never satisfy
+    // <correlation name>.
+    /// The three pieces of 7.6 <row pattern recognition clause and name>: the optional
+    /// <row pattern input name>, the clause itself, and the optional
+    /// <row pattern output name>.
+    type private RecognitionCorrelation =
+        { InputName: (Expression * Expression list option) option
+          Recognition: RowPatternRecognition
+          OutputName: (Expression * Expression list option) option }
+
+    type private CorrelationOrRecognition =
+        | Correlated of Expression * Expression list option
+        | Recognized of RecognitionCorrelation
 
     // 7.6 <table reference> ::= <table factor> | <joined table>
     // Forward reference so <table primary> can nest a parenthesized <joined table>.
@@ -360,9 +390,15 @@ module QueryParser =
                                   // The behavior comes first; WRAPPER closes it.
                                   opt (attempt (pJsonQueryWrapper .>> pKeyword "WRAPPER"))
                                   >>= fun wrapper ->
+                                      // 7.11 <JSON table formatted column quotes behavior>
+                                      //     ::= KEEP | OMIT
+                                      //     [ <quotes behavior> QUOTES [ ON SCALAR STRING ] ] —
+                                      // the behavior comes FIRST and QUOTES closes it, exactly
+                                      // like the WRAPPER slot above and 6.34 <JSON query>.
                                       opt (
                                           attempt (
-                                              pKeyword "QUOTES" >>. pJsonQueryQuotes
+                                              pJsonQueryQuotes
+                                              .>> pKeyword "QUOTES"
                                               .>> opt (pKeyword "ON" .>> pKeyword "SCALAR" .>> pKeyword "STRING")
                                           )
                                       )
@@ -690,6 +726,66 @@ module QueryParser =
                            Plan = None
                            OnError = Some onError })
 
+        // 7.6 <correlation or recognition> has two alternatives with different result shapes,
+        // so the shared slot carries a private sum instead of a bare tuple. `Correlated` is
+        // alternative 1 ([ AS ] <correlation name> [ ( <parenthesized derived column list> ) ])
+        // and `Recognized` is alternative 2 (<row pattern recognition clause and name>), which
+        // produces the MatchRecognize <table primary> node directly. The two are mutually
+        // exclusive — MATCH_RECOGNIZE is a reserved word (Lexer.fs), so it can never satisfy
+        // <correlation name>. Defined here because it needs 7.7's <row pattern recognition clause>.
+        let pCorrelationOrRecognition =
+            // 7.6 <row pattern recognition clause and name>
+            //     ::= [ [ AS ] <row pattern input name> [ ( <input derived column list> ) ] ]
+            //         <row pattern recognition clause>
+            //         [ [ AS ] <row pattern output name> [ ( <output derived column list> ) ] ]
+            // <row pattern input name> / <row pattern output name> ::= <correlation name> — a
+            // plain identifier, NOT a schema-qualified name; there is exactly ONE optional
+            // name group on each side of the recognition clause. AS is optional in both
+            // groups, and pCorrelationName already parses `[ AS ] <identifier>`.
+            let pNameGroup = pCorrelationName .>>. opt (attempt pParenthesizedDerivedColumnList)
+
+            let pRecognized =
+                opt (attempt pNameGroup)
+                .>>. pRowPatternRecognitionClause
+                .>>. opt (attempt pNameGroup)
+                |>> fun ((input, recog), output) ->
+                    Recognized
+                        { InputName = input
+                          Recognition = recog
+                          OutputName = output }
+
+            attempt pRecognized
+            <|> (pCorrelationName .>>. opt (attempt pParenthesizedDerivedColumnList)
+                 |>> fun (name, cols) -> Correlated(name, cols))
+
+        // Splits a <correlation or recognition> into the ( alias, columns ) pair that the
+        // surrounding <table primary> alternative stores.
+        //
+        // 7.6 allows <row pattern recognition clause and name> in every one of these slots, but
+        // only the <table or query name> alternative has an AST node (`MatchRecognize`) that can
+        // represent it — `Subquery`, `ValuesTable`, `Lateral`, `Unnest`, `JsonTable`, `Only`,
+        // `PtfTable`, `TableFunction` and `DataChangeDelta` all record a NAME. Rather than drop
+        // the recognition clause on the floor (a wrong AST is worse than a rejection for a
+        // parse-only library), the narrowing fails with an explanation; see docs/trade-off.md.
+        let pNamedCorrelation =
+            pCorrelationOrRecognition
+            >>= function
+                | Correlated(name, cols) -> preturn (name, cols)
+                | Recognized _ ->
+                    fail
+                        "7.6 <correlation or recognition>: a MATCH_RECOGNIZE clause is only representable after a <table or query name>"
+
+        // The OPTIONAL variant, for <only spec> / <data change delta table> /
+        // <PTF derived table>, where the correlation is absent entirely.
+        let pOptionalNamedCorrelation =
+            opt (attempt pCorrelationOrRecognition)
+            >>= function
+                | Some(Correlated(name, cols)) -> preturn (Some name, cols)
+                | Some(Recognized _) ->
+                    fail
+                        "7.6 <correlation or recognition>: a MATCH_RECOGNIZE clause is only representable after a <table or query name>"
+                | None -> preturn (None, None)
+
         let pBase =
             choice
                 [ // <derived table> = <table subquery>, i.e. ( <query expression> ).
@@ -699,20 +795,20 @@ module QueryParser =
                   // TableValueConstructor subquery.
                   attempt (
                       between (token (pstring "(")) (token (pstring ")")) pTableValueConstructor
-                      .>>. pCorrelationOrRecognition
+                      .>>. pNamedCorrelation
                       |>> fun (rows, (name, cols)) -> ValuesTable(rows, name, cols)
                   )
                   |> withTablePosition
                   attempt (
                       between (token (pstring "(")) (token (pstring ")")) pQuery
-                      .>>. pCorrelationOrRecognition
+                      .>>. pNamedCorrelation
                       |>> fun (q, (name, cols)) -> Subquery(q, name, cols)
                   )
                   |> withTablePosition
                   attempt (
                       pKeyword "LATERAL"
                       >>. between (token (pstring "(")) (token (pstring ")")) pQuery
-                      .>>. pCorrelationOrRecognition
+                      .>>. pNamedCorrelation
                       |>> fun (q, (name, cols)) -> Lateral(q, name, cols)
                   )
                   |> withTablePosition
@@ -724,7 +820,7 @@ module QueryParser =
                       pKeyword "UNNEST"
                       >>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pExpression (token (pstring ",")))
                       .>>. opt (pKeyword "WITH" >>. pKeyword "ORDINALITY" >>% true)
-                      .>>. pCorrelationOrRecognition
+                      .>>. pNamedCorrelation
                       |>> fun ((exprs, ord), (name, cols)) -> Unnest(exprs, Option.defaultValue false ord, name, cols)
                   )
                   |> withTablePosition
@@ -738,17 +834,13 @@ module QueryParser =
                           | _ -> fail "<parenthesized joined table> requires a joined table"
                   )
                   // <only spec> ::= ONLY ( <table or query name> ) [ <correlation or recognition> ]
+                  // <table or query name> (7.6) bottoms out at <table name> (5.4), a
+                  // <local or schema qualified name> — so `MODULE.c` is legal.
                   attempt (
                       pKeyword "ONLY"
-                      >>. between (token (pstring "(")) (token (pstring ")")) pSchemaQualifiedNameExpression
-                      .>>. opt (attempt pCorrelationOrRecognition)
-                      |>> fun (name, corr) ->
-                          let alias, cols =
-                              match corr with
-                              | Some(name, cols) -> Some name, cols
-                              | None -> None, None
-
-                          Only(name, alias, cols)
+                      >>. between (token (pstring "(")) (token (pstring ")")) pTableNameExpression
+                      .>>. pOptionalNamedCorrelation
+                      |>> fun (name, (alias, cols)) -> Only(name, alias, cols)
                   )
                   |> withTablePosition
                   // 7.6 <table function derived table>
@@ -758,16 +850,11 @@ module QueryParser =
                   attempt (
                       pKeyword "TABLE"
                       >>. between (token (pstring "(")) (token (pstring ")")) pExpression
-                      .>>. opt (attempt pCorrelationOrRecognition)
-                      >>= fun (expr, corr) ->
-                          let alias, cols =
-                              match corr with
-                              | Some(name, cols) -> Some name, cols
-                              | None -> None, None
-
+                      .>>. pOptionalNamedCorrelation
+                      >>= fun (expr, (alias, cols)) ->
                           match expr.Kind with
                           | FunctionCall _ -> preturn (PtfTable(expr, alias, cols))
-                          | _ when Option.isNone corr -> fail "a table function requires a correlation name"
+                          | _ when Option.isNone alias -> fail "a table function requires a correlation name"
                           | _ -> preturn (TableFunction(expr, alias, cols))
                   )
                   |> withTablePosition
@@ -780,19 +867,13 @@ module QueryParser =
                       <|> (pKeyword "OLD" >>% ResultOption.Old)
                       .>> pKeyword "TABLE"
                       .>>. between (token (pstring "(")) (token (pstring ")")) pDataChangeStatement
-                      .>>. opt (attempt pCorrelationOrRecognition)
-                      |>> fun ((result, stmt), corr) ->
-                          let alias, cols =
-                              match corr with
-                              | Some(name, cols) -> Some name, cols
-                              | None -> None, None
-
-                          DataChangeDelta(result, stmt, alias, cols)
+                      .>>. pOptionalNamedCorrelation
+                      |>> fun ((result, stmt), (alias, cols)) -> DataChangeDelta(result, stmt, alias, cols)
                   )
                   |> withTablePosition
                   // <JSON table> <correlation or recognition> — the correlation is MANDATORY.
                   attempt (
-                      pJsonTable .>>. pCorrelationOrRecognition
+                      pJsonTable .>>. pNamedCorrelation
                       |>> fun (stmt, corr) -> JsonTable(stmt, Some corr)
                   )
                   |> withTablePosition
@@ -802,66 +883,43 @@ module QueryParser =
                       |>> fun (stmt, name) -> JsonTablePrimitive(stmt, Some name)
                   )
                   |> withTablePosition
-                  // <table or query name> <row pattern recognition clause and name>
-                  //   ::= [ [ AS ] <input name> [ ( <input cols> ) ] ] MATCH_RECOGNIZE ( ... )
-                  //       [ [ AS ] <output name> [ ( <output cols> ) ] ]
-                  // Must precede the plain <table or query name> branch below so that
-                  // "t MATCH_RECOGNIZE(...)" is not consumed as just "t".
-                  // <row pattern recognition clause and name> ::=
-                  //   [ [ AS ] <row pattern input name> [ <input derived column list> ] ]
-                  //       <row pattern recognition clause>
-                  //       [ [ AS ] <row pattern output name> [ <output derived column list> ] ]
-                  // <row pattern input name> ::= <correlation name> — a plain identifier,
-                  // NOT a schema-qualified name; there is exactly ONE optional name group
-                  // before the recognition clause.
-                  attempt (
-                      opt (
-                          attempt (
-                              opt (pKeyword "AS") >>. pCorrelationName
-                              .>>. opt (
-                                  between
-                                      (token (pstring "("))
-                                      (token (pstring ")"))
-                                      (sepBy1 pIdentifierExpression (token (pstring ",")))
-                              )
-                          )
-                      )
-                      .>>. pRowPatternRecognitionClause
-                      .>>. opt (
-                          attempt (
-                              opt (pKeyword "AS") >>. pCorrelationName
-                              .>>. opt (
-                                  between
-                                      (token (pstring "("))
-                                      (token (pstring ")"))
-                                      (sepBy1 pIdentifierExpression (token (pstring ",")))
-                              )
-                          )
-                      )
-                      |>> fun ((input, recog), output) -> MatchRecognize(input, recog, output)
-                  )
-                  |> withTablePosition
                   // 7.6 <table or query name> [ <query system time period specification> ]
                   //     [ <correlation or recognition> ]
                   // The correlation here may carry a <parenthesized derived column list>
-                  // (`t AS x (a, b)`), so pCorrelationOrRecognition is used rather than the
-                  // bare pCorrelationName.
+                  // (`t AS x (a, b)`) or BE the second <correlation or recognition>
+                  // alternative — `t MATCH_RECOGNIZE ( ... )`.
+                  //
+                  // For the recognition form the <table or query name> and the clause's
+                  // optional <row pattern input name> name the SAME thing (both are a single
+                  // `[ AS ] <correlation name>`), and `MatchRecognize` has only the input-name
+                  // slot — so the table name fills it when the clause leaves it absent. The
+                  // explicit input name wins when both are given.
                   attempt (
                       getPosition
-                      .>>. (pSchemaQualifiedNameExpression
+                      .>>. (pTableNameExpression
                             .>>. opt (attempt pQuerySystemTimePeriodSpecification)
                             .>>. opt (attempt pCorrelationOrRecognition))
                       |>> fun (pos, ((name, sysTime), corr)) ->
                           let pos' = { Line = pos.Line; Column = pos.Column }
 
-                          let alias, cols =
-                              match corr with
-                              | Some(name, cols) -> Some name, cols
-                              | None -> None, None
-
                           let baseTable =
-                              { TableSource.Kind = TableSourceKind.Table(name, alias, cols)
-                                Pos = pos' }
+                              match corr with
+                              | Some(Recognized recog) ->
+                                  { TableSource.Kind =
+                                      MatchRecognize(
+                                          (match recog.InputName with
+                                           | Some i -> Some i
+                                           | None -> Some(name, None)),
+                                          recog.Recognition,
+                                          recog.OutputName
+                                      )
+                                    Pos = pos' }
+                              | Some(Correlated(alias, cols)) ->
+                                  { TableSource.Kind = TableSourceKind.Table(name, Some alias, cols)
+                                    Pos = pos' }
+                              | None ->
+                                  { TableSource.Kind = TableSourceKind.Table(name, None, None)
+                                    Pos = pos' }
 
                           match sysTime with
                           | Some spec ->
@@ -878,6 +936,14 @@ module QueryParser =
                 { TableSource.Kind = TableSample(tbl, method, percent, repeat)
                   Pos = tbl.Pos }
             | None -> tbl
+
+    // 7.6 <table factor> ::= <table primary> [ <sample clause> ]
+    // The binding above already includes the [ <sample clause> ] slot, so it is the FACTOR.
+    // This alias names it after the production, because 7.10 spells `<table factor>` (not
+    // `<table primary>`) at the join operands and at <partitioned join table> — which is why
+    // `FROM a TABLESAMPLE SYSTEM (10) JOIN b …` and `FROM a CROSS JOIN b TABLESAMPLE …` are
+    // both valid SQL-2016.
+    let private pTableFactor = pTablePrimary
 
     // 7.10 <joined table> — one suffix folded into a left-associative chain:
     // 7.10 <joined table> ::= <cross join> | <qualified join> | <natural join>
@@ -904,10 +970,12 @@ module QueryParser =
 
         // 7.10 <join specification> ::= <join condition> | <named columns join>
         // 7.10 <named columns join> ::= USING ( <join column list> ) [ AS <join correlation name> ]
+        // 7.10 <join condition> ::= ON <search condition> — the 8.21 gate, not the full
+        // <value expression> (a bare 6.29 <term> like `ON a.x + 1` is not a search condition).
         // Returns the condition plus the optional USING join correlation name.
         let pJoinSpecification =
             choice
-                [ pKeyword "ON" >>. pExpression |>> fun e -> On e, None
+                [ pKeyword "ON" >>. pSearchCondition |>> fun e -> On e, None
                   pKeyword "USING"
                   >>. between
                           (token (pstring "("))
@@ -944,38 +1012,77 @@ module QueryParser =
                 // 7.10 <qualified join> ::= { <table reference> | <partitioned join table> }
                 //     [ <join type> ] JOIN { <table reference> | <partitioned join table> }
                 //     <join specification>
-                // So the right operand's clause follows the right table, exactly as the left
-                // one (consumed before this suffix) does. `>>=` binds tighter than `.>>.`, so
-                // explicit binds keep the grouping unambiguous.
+                // The left operand's partition clause precedes the join type (consumed above);
+                // the right operand's follows the right table. `>>=` binds tighter than `.>>.`,
+                // so explicit binds keep the grouping unambiguous.
                 joinType
                 >>= fun jt ->
-                    pTablePrimary
-                    >>= fun right ->
-                        opt (attempt pPartitionedJoinColumnReferenceList)
-                        >>= fun rightPartitionBy ->
-                            // JoinSource has a single PartitionBy slot, so the left clause wins
-                            // when both are present; the combination is a semantic case.
-                            let partitionBy =
-                                if Option.isSome leftPartitionBy then
-                                    leftPartitionBy
-                                else
-                                    rightPartitionBy
+                    // 7.10 — the right operand differs by production:
+                    //   <cross join>     ::= <table reference> CROSS JOIN <table factor>
+                    //   <qualified join> ::= { <table reference> | <partitioned join table> }
+                    //       [ <join type> ] JOIN { <table reference> | <partitioned join table> }
+                    //       <join specification>
+                    //   <natural join>   ::= { <table factor> | <partitioned join table> }
+                    //       NATURAL [ <join type> ] JOIN { <table factor> | <partitioned join table> }
+                    // A <qualified join>'s right operand may be a whole <table reference>, so
+                    // `a JOIN b CROSS JOIN c USING (y)` parses with `b CROSS JOIN c` on the right.
+                    let pRightOperand =
+                        if jt = CrossJoin then
+                            pTableFactor |>> fun f -> f, None
+                        elif Option.isSome nat then
+                            pTableFactor .>>. opt (attempt pPartitionedJoinColumnReferenceList)
+                        else
+                            attempt (
+                                pTableFactor
+                                >>= fun f -> pPartitionedJoinColumnReferenceList |>> fun cols -> f, Some cols
+                            )
+                            <|> (pTableReference |>> fun tr -> tr, None)
 
-                            // <cross join> and <natural join> have NO <join specification> slot.
-                            if jt = CrossJoin || Option.isSome nat then
-                                preturn (Option.defaultValue false nat, jt, right, None, None, partitionBy)
+                    pRightOperand
+                    >>= fun (right, rightPartitionBy) ->
+                        // <cross join> and <natural join> have NO <join specification> slot, and a
+                        // <cross join> takes plain <table factor>s — no <partitioned join table>.
+                        if jt = CrossJoin then
+                            if leftPartitionBy.IsSome || rightPartitionBy.IsSome then
+                                fail "a <cross join> operand cannot be a <partitioned join table> (7.10)"
                             else
-                                pJoinSpecification
-                                |>> fun (cond, usingAlias) ->
-                                    (Option.defaultValue false nat, jt, right, Some cond, usingAlias, partitionBy)
+                                preturn (
+                                    Option.defaultValue false nat,
+                                    jt,
+                                    right,
+                                    None,
+                                    None,
+                                    leftPartitionBy,
+                                    rightPartitionBy
+                                )
+                        elif Option.isSome nat then
+                            preturn (
+                                Option.defaultValue false nat,
+                                jt,
+                                right,
+                                None,
+                                None,
+                                leftPartitionBy,
+                                rightPartitionBy
+                            )
+                        else
+                            pJoinSpecification
+                            |>> fun (cond, usingAlias) ->
+                                Option.defaultValue false nat,
+                                jt,
+                                right,
+                                Some cond,
+                                usingAlias,
+                                leftPartitionBy,
+                                rightPartitionBy
 
     // 7.6 <table reference> ::= <table factor> | <joined table>
     pTableReferenceRef.Value <-
-        pTablePrimary .>>. many pJoinedTableSuffix
+        pTableFactor .>>. many pJoinedTableSuffix
         |>> fun (first, rests) ->
             rests
             |> List.fold
-                (fun acc (nat, jt, right, cond, usingAlias, partitionBy) ->
+                (fun acc (nat, jt, right, cond, usingAlias, leftPartitionBy, rightPartitionBy) ->
                     { Kind =
                         JoinedTable
                             { JoinType = jt
@@ -984,7 +1091,8 @@ module QueryParser =
                               Right = right
                               Condition = cond
                               UsingAlias = usingAlias
-                              PartitionBy = partitionBy }
+                              LeftPartitionBy = leftPartitionBy
+                              RightPartitionBy = rightPartitionBy }
                       Pos = acc.Pos })
                 first
 
@@ -992,7 +1100,7 @@ module QueryParser =
     let pFromClause = pKeyword "FROM" >>. sepBy1 pTableReference (token (pstring ","))
 
     // 7.12 <where clause> ::= WHERE <search condition>
-    let pWhereClause = pKeyword "WHERE" >>. pExpression
+    let pWhereClause = pKeyword "WHERE" >>. pSearchCondition
 
     // 7.16 <set quantifier> ::= DISTINCT | ALL — the SELECT form collapses to the IsDistinct
     // flag (ALL is the default), so a bool option is enough there.
@@ -1062,7 +1170,7 @@ module QueryParser =
         .>>. sepBy1 pGroupingElement (token (pstring ","))
 
     // 7.14 <having clause> ::= HAVING <search condition>
-    let pHavingClause = pKeyword "HAVING" >>. pExpression
+    let pHavingClause = pKeyword "HAVING" >>. pSearchCondition
 
     // 7.15 <window clause> ::= WINDOW <window definition list>
     let pWindowClause =
@@ -1173,21 +1281,22 @@ module QueryParser =
 
         pQualifiedAsterisk <|> pDerivedColumn
 
+    // 7.16 <select list> ::= <asterisk> | <select sublist> [ { <comma> <select sublist> }... ]
+    // A bare <asterisk> is an alternative to the whole sublist list, NOT a sublist
+    // itself — "SELECT *, a" is rejected. Public because the 14.7
+    // <select statement: single row> uses the same production.
+    let pSelectList =
+        (pstring "*" .>> ws .>>. getPosition
+         |>> fun (_, pos) ->
+             [ Column(
+                   { Expression.Kind = ExpressionKind.Star
+                     Pos = { Line = pos.Line; Column = pos.Column } },
+                   None
+               ) ])
+        <|> sepBy1 pSelectSublist (token (pstring ","))
+
     // 7.16 <query specification> ::= SELECT [ <set quantifier> ] <select list> <table expression>
     let private pQuerySpecification =
-        // 7.16 <select list> ::= <asterisk> | <select sublist> [ { <comma> <select sublist> }... ]
-        // A bare <asterisk> is an alternative to the whole sublist list, NOT a sublist
-        // itself — "SELECT *, a" is rejected.
-        let pSelectList =
-            (pstring "*" .>> ws .>>. getPosition
-             |>> fun (_, pos) ->
-                 [ Column(
-                       { Expression.Kind = ExpressionKind.Star
-                         Pos = { Line = pos.Line; Column = pos.Column } },
-                       None
-                   ) ])
-            <|> sepBy1 pSelectSublist (token (pstring ","))
-
         // <query specification> — the SELECT core without ORDER BY/OFFSET/FETCH/LOCKING.
         // Those trailing clauses are parsed at the <query expression> level (7.17) so
         // they apply to the whole query, not just the last SELECT.
@@ -1302,7 +1411,8 @@ module QueryParser =
                 // Already wrapped (defensive; not produced by the current grammar)
                 q
 
-    // 7.17 <query expression body> ::= <query term> | <query expression body> UNION|EXCEPT ... | <query expression body> EXCEPT ...
+    // 7.17 <query expression body> is left-recursive, and <query primary>'s parenthesised form
+    // needs it — forward reference, wired below once <query term> exists.
     let private pQueryExpressionBody, private pQueryExpressionBodyRef =
         createParserForwardedToRef<Query, unit> ()
 
@@ -1310,11 +1420,13 @@ module QueryParser =
     let private pQueryTerm =
         // 7.17 <simple table> ::= <query specification> | <table value constructor> | <explicit table>
         // Set-operation operands do not consume ORDER BY/OFFSET/FETCH/LOCKING so those apply to the whole expression.
+        // 7.17 <explicit table> ::= TABLE <table or query name> — <table name> (5.4) is a
+        // <local or schema qualified name>, so `a.b.c` and `MODULE.c` are both legal.
         let pSimpleTable =
             choice
                 [ attempt (pQuerySpecification |>> SelectQuery)
                   attempt (pTableValueConstructor |>> TableValueConstructor)
-                  attempt (pKeyword "TABLE" >>. pSchemaQualifiedNameExpression |>> ExplicitTable) ]
+                  attempt (pKeyword "TABLE" >>. pTableNameExpression |>> ExplicitTable) ]
 
         // 7.17 <query primary> ::= <simple table>
         //   | ( <query expression body> [ <order by clause> ] [ <result offset clause> ]
@@ -1331,7 +1443,8 @@ module QueryParser =
                   )
                   pSimpleTable ]
 
-        // 7.17 <query term> — INTERSECT operator (higher precedence than UNION/EXCEPT)
+        // 7.17 <query term> — INTERSECT operator (higher precedence than UNION/EXCEPT).
+        // The left-recursive production permits a chain; fold it left to preserve its grammar shape.
         let pIntersectOp =
             pKeyword "INTERSECT"
             >>. opt (pKeyword "ALL" >>% (true, false) <|> (pKeyword "DISTINCT" >>% (false, true)))
@@ -1344,7 +1457,9 @@ module QueryParser =
                   IsDistinct = isDist
                   Corresponding = corr }
 
-        chainl1 pQueryPrimary (pIntersectOp |>> fun op -> fun l r -> SetOperation(l, op, r))
+        // 7.17 <query term> ::= <query primary>
+        //     | <query term> INTERSECT [ ALL | DISTINCT ] [ <corresponding spec> ] <query primary>
+        chainl1 pQueryPrimary (pIntersectOp |>> fun op left right -> SetOperation(left, op, right))
 
     // 7.17 <query expression body> — UNION/EXCEPT operator (lower precedence than INTERSECT)
     let private pUnionExceptOp =
@@ -1361,7 +1476,11 @@ module QueryParser =
 
     // 7.17 <query expression body> ::= <query term>
     //     | <query expression body> UNION|EXCEPT [ <corresponding spec> ] <query term>
-    pQueryExpressionBodyRef.Value <- chainl1 pQueryTerm (pUnionExceptOp |>> fun op -> fun l r -> SetOperation(l, op, r))
+    // This left-recursive production permits repeated and mixed UNION/EXCEPT operators.
+    let private pQueryExpressionBodyImpl =
+        chainl1 pQueryTerm (pUnionExceptOp |>> fun op left right -> SetOperation(left, op, right))
+
+    pQueryExpressionBodyRef.Value <- pQueryExpressionBodyImpl
 
     // 7.17 <with clause> ::= WITH [ RECURSIVE ] <with list>
     let pWithClause =

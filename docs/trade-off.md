@@ -69,18 +69,38 @@ The parser rejects what the standard does not permit, even in common vendor dial
   (three parts) is shared, but narrower slots use a dedicated parser in
   `ExpressionParser.fs`: `pIdentifierNameExpression` (bare `<identifier>` — the 20.15
   `<statement name>` and `<non-extended descriptor name>`, so `EXECUTE a.b` is
-  rejected); `pSchemaNameExpression` / `pCharacterSetNameExpression` (≤ 2 parts —
-  `DROP SCHEMA`, `CREATE SCHEMA … DEFAULT CHARACTER SET`, 11.41/11.42, the 11.43
-  `FOR` slot, the 6.1 `CHARACTER SET` modifier; `<collation name>` keeps three);
-  `pLocalQualifiedNameExpression` (`<local qualified name>`, every `<cursor name>`
-  slot — `MODULE.c` yes, `a.b.c` no). Checked *after* parsing (`pNameOfArity`) so the
-  failure can name the production. The other direction: `<constraint name>` (10.8) is
-  a `<schema qualified name>`, so 11.4/11.6/11.24–11.26 and 17.4 `SET CONSTRAINTS`
-  accept qualified names, and 11.8's referenced `<table name>` may be three parts.
+  rejected); `pSchemaNameExpression` (≤ 2 parts — `DROP SCHEMA`, 10.3
+  `PATH <schema name list>`); `pCharacterSetNameExpression` (`[ <schema name> . ]
+  <SQL language identifier>`, so up to THREE parts with an ASCII-only final part —
+  `CREATE SCHEMA … DEFAULT CHARACTER SET`, 11.41/11.42, the 11.43 `FOR` slot, 11.45's
+  `FOR`/`TO` slots, 12.3's `CHARACTER SET`, and the 6.1 `CHARACTER SET` modifier);
+  `<collation name>` keeps three; `pLocalQualifiedNameExpression` (`<local qualified
+  name>`, every `<cursor name>` slot — `MODULE.c` yes, `a.b.c` no); `pTableNameExpression`
+  (5.4 `<table name> ::= <local or schema qualified name>` — **both** `a.b.c` and
+  `MODULE.c`, used by 11.3/11.8/11.10/11.17/11.31/11.32/11.49, 12.3's bare
+  `[ TABLE ] <table name>`, 14.x targets and the 7.6/7.17 table-name slots); and
+  `pIdentifierExpression` where the production is a bare `<identifier>` — 5.4
+  `<external routine name>` (11.60/11.61 `EXTERNAL NAME`) and 11.67 `<group name>`
+  (11.67/11.68/11.71 transforms). Checked *after* parsing (`pNameOfArity`) so the failure
+  can name the production. The other direction: `<constraint name>` (10.8) is a
+  `<schema qualified name>`, so 11.4/11.6/11.24–11.26 and 17.4 `SET CONSTRAINTS` accept
+  qualified names, and 11.8's referenced `<table name>` may be three parts or `MODULE.t`.
 - **6.4 value-specification widths:** `?` is a `<dynamic parameter specification>` and
   belongs to `<general value specification>` / `<target specification>` only — a slot
   whose BNF says `<simple value specification>` rejects it (`OFFSET ? ROWS`,
   `CONNECT TO ?`, …); 6.11 `<row marker offset>` re-adds it explicitly.
+- **6.1 type slots are exact.** `<predefined type>` has no `<row type>` alternative
+  (`CREATE DOMAIN d AS ROW(a INT)` rejected), and `<referenced type>` is only a
+  `<path-resolved user-defined type name>` (`REF(INTEGER)` rejected). 6.26
+  `<logical offset>` / `<physical offset>` re-add `?` beside `<simple value
+  specification>` (`FIRST(x, ?)` parses).
+- **Operand slots use the grammar's narrower production.** 6.4 `<current collation
+  specification>` takes a `<string value expression>` (`COLLATION FOR (1 = 1)`
+  rejected), 6.25 `<multiset element reference>` a `<multiset value expression>`
+  (`ELEMENT(1 = 1)` rejected), and 6.17 `<generalized invocation>` / 6.23
+  `<reference resolution>` take a `<value expression primary>` (`(1 + 1 AS t).m` /
+  `DEREF(1 = 1)` rejected). 6.27 `<JSON value empty/error behavior>` `DEFAULT` takes a
+  full `<value expression>` (`DEFAULT (1 = 1)` parses).
 - **Comparison operands must be `<row value predicand>`s (8.2/7.2).** 7.2 reaches
   `<common value expression>` through 7.1 `<row value constructor predicand>`, so terms
   and signed primaries are valid (`a + b = c`, `-x = 1`); the only rejection is a
@@ -90,6 +110,19 @@ The parser rejects what the standard does not permit, even in common vendor dial
   items are `<row value expression>` and stay strict (`x IN (1 + 1)` rejected,
   `isRowValueExpression`); a `<period predicate>`'s left operand is checked post-parse
   (`findExpressionViolationIn`).
+- **`<search condition>` (8.21) rejects a `<term>` but not a bare primary.** 6.39
+  `<boolean value expression>` bottoms out at `<boolean primary> ::= <predicate> |
+  <boolean predicand>`, and `<boolean predicand>` includes any
+  `<nonparenthesized value expression primary>`. So `WHERE 1`, `CHECK (1)` and
+  `HAVING 'x'` are **grammar-valid** (rejecting them would be a type check — semantic,
+  and deliberately out of scope), while `WHERE 1 + 1` and `CHECK (a + b)` are not: a
+  6.29 `<term>` or a signed `<numeric primary>` is not a primary. `pSearchCondition`
+  (`ExpressionParser.fs`) draws exactly that line and gates 7.9 `<row pattern
+  definition>`, 7.12 `<where clause>`, 7.14 `<having clause>`, 10.9 `<filter clause>`,
+  the `CHECK` clauses of 11.4/11.6/11.34/11.47, 11.49 `<triggered action>` and the
+  `WHERE`/`ON`/`AND` slots of 14.9/14.12/14.14. 11.60 `<parameter default>` uses the
+  mirrored rule (`isBooleanTopLevel`), because 6.28 `<value expression>` there excludes
+  booleans entirely.
 - **`pRoutineInvocation` is gated by the reserved *function* keyword whitelist**
   (`functionKeywords` in `Lexer.fs`), so `EXISTS`/`UNIQUE`/`PERIOD`-style words cannot
   degrade to `FunctionCall`; `OVER`/`WITHIN GROUP` suffixes are enforced, and dedicated
@@ -112,9 +145,9 @@ direction.
 
 ### Extensions (accept syntax the grammar does not)
 
-- `BEGIN ATOMIC` in routine bodies (11.60) and triggers (11.49) — a compound-statement
-  extension; 13.4 has no `<compound statement>`.
-- `REVOKE … HIERARCHY OPTION FOR` (12.7).
+- `BEGIN ATOMIC` in routine bodies (11.60) — a compound-statement extension mirroring
+  the 11.49 `<triggered SQL statement>` arm (`{ <SQL procedure statement> <semicolon> }... END`,
+  trailing `;` included); 13.4 has no `<compound statement>`.
 - Trailing `--` comment without a final newline (5.2) — `<newline>` is
   implementation-defined, which makes it defensible.
 - 20.15 dynamic `DECLARE CURSOR` is reachable through `parseStatement` although the
@@ -128,14 +161,37 @@ direction.
 - `<embedded variable specification>` (6.4) is not parsed by
   `pGeneralValueSpecification` / `pSimpleValueSpecification` — embedded SQL is out of
   scope; host-language names degrade to host parameters elsewhere.
-- 11.4's optional `<data type or domain name>` (typed-table columns) is unreachable in
-  our AST: typed-table columns route through `ColumnOptions` (no type slot), and
-  making the slot optional in `pColumnDefinition` would let the 11.3
-  `( <column name list> )` slot misread `CREATE TABLE t (id, name) AS SELECT …`.
 - 14.1 `<declare cursor>` / 14.16 `<temporary table declaration>` are parsed but
   unreachable — see "Entry points".
+- **11.4's optional `<data type or domain name>` inside 11.3 `<table element list>`**
+  — the type stays REQUIRED there, because `CREATE TABLE t (id, name) AS SELECT …`
+  needs `pColumnDefinition` to reject `(id, name)` so the `( <column name list> )` slot
+  of 11.3 `<as subquery clause>` can match. Typed-table columns route through
+  `ColumnOptions`, which has no type slot. The optional form **is** used by 11.11
+  `<add column definition>` and 11.27 `<add system time period column list>`, which
+  have no competing alternative (`pColumnDefinitionNoType`).
+- **11.27 with UNTYPED period columns** is genuinely ambiguous —
+  `… ADD PERIOD FOR SYSTEM_TIME (s, e) ADD COLUMN s ADD COLUMN e` reads as columns
+  `s`/`s` or `s`/`e`, and greedy parsing takes the first. Only the typed form is
+  exercised by the tests.
 - §13.1–13.3 (SQL-client module definition) and all of §21 (embedded SQL) are out of
   scope — no public surface.
+- **`MATCH_RECOGNIZE` after a non-`<table or query name>`** (7.6). 7.6 puts
+  `<row pattern recognition clause and name>` in the `<correlation or recognition>` slot
+  of *every* `<table primary>`, but only `<table or query name>` has an AST node
+  (`TableSourceKind.MatchRecognize`) that can represent it — `Subquery`, `ValuesTable`,
+  `Lateral`, `Unnest` and `JsonTable` all record a correlation **name**. Accepting
+  `FROM UNNEST(a) MATCH_RECOGNIZE (…)` would hand consumers a plain `Unnest` with the
+  whole clause silently dropped, so those forms are **rejected** with an explanatory
+  message instead (`pNamedCorrelation` / `pOptionalNamedCorrelation` in
+  `QueryParser.fs`). `FROM t MATCH_RECOGNIZE (…)` works and folds the table name into the
+  clause's optional input-name slot.
+- **`PERMUTE` inside a row pattern primary is a committed keyword** (7.9). `PERMUTE` is
+  not in `Lexer.reservedWords` (keeping it usable as an ordinary identifier, like
+  `MEASURES`), so the `PERMUTE ( … )` branch of `pRowPatternPrimary` is deliberately NOT
+  `attempt`-wrapped: fewer than two comma-separated `<row pattern>`s (e.g.
+  `PATTERN (PERMUTE (A))`) fails the whole pattern instead of backtracking into a
+  variable-named-`PERMUTE` + parenthesized-group reading.
 
 ### Relaxations (accept input the grammar rejects)
 
@@ -143,6 +199,16 @@ direction.
   operand>` accepting predicate part-2 (6.12) — see "Interval / point-in-time parsing"
   and "Predicate, comparison and period operands".
 - `<embedded variable name>` degrades to a host parameter (6.4/14.17).
+- **7.17 set-operation associativity follows the left-recursive grammar.** Repeated
+  `UNION`/`EXCEPT` within a query-expression body and repeated `INTERSECT` within a query
+  term are accepted and folded left; `INTERSECT` still binds more tightly than
+  `UNION`/`EXCEPT`. Parentheses can override that grouping.
+- **AST collapses** (parsed, but the node cannot represent every alternative):
+  - 8.22 `<JSON key uniqueness constraint> [ KEYS ]` — the optional `KEYS` keyword is
+    parsed and discarded, so `IS JSON WITH UNIQUE` and `IS JSON WITH UNIQUE KEYS` yield
+    an identical AST.
+  - 7.11 `[ <quotes behavior> QUOTES [ ON SCALAR STRING ] ]` — `JsonQueryQuotes` is
+    `Keep | Omit`, so the `ON SCALAR STRING` qualifier is parsed and discarded.
 
 ---
 
@@ -171,9 +237,11 @@ deviations" below), and the syntactic ambiguities listed there.
   navigation, `RUNNING`/`FINAL`, …); the four regex functions (6.30/6.32) share one
   argument record, but each production's parser only accepts its own optional clauses
   (`WITH` / `OCCURRENCE` / `GROUP`).
-- **Postfix constructs reuse existing layers** (`COLLATE` as predicate suffix, multiset
-  set-ops as a postfix fold, `<time zone specifier>` over `<interval primary>`) — slightly
-  more permissive parents, no new precedence levels.
+- **Postfix constructs reuse existing layers** (`COLLATE` as a primary postfix — 6.31
+  `<character factor>` — so it binds tighter than every operator and a comparison operand
+  like `x = 'a' COLLATE c` parses; multiset set-ops as a postfix fold; `<time zone
+  specifier>` over `<interval primary>`) — slightly more permissive parents, no new
+  precedence levels.
 - **Interval / point-in-time parsing.** 6.37 tries the narrow `(d1 - d2) <qualifier>`
   alternative (`pDatetimeDifference`) first, or `pIntervalPrimary` swallows it; the ±
   chain is left-folded. The 6.35/6.37/6.43/7.16 chain uses the conforming
@@ -228,8 +296,12 @@ of flattening, so `(1 = 1)` is a `<boolean predicand>` and `x BETWEEN (1 = 1) AN
   `isPredicateOperand` (ExpressionParser.fs) is exactly "not top-level boolean".
   `pInValueItem` = `<row value expression>` (`x IN (1 + 1)` / `x IN ((1), 2)` /
   `x IN (-1)` rejected — parenthesized items are NOT accepted there), `pValueOperand` =
-  value-shaped (LIKE/SIMILAR/regex pattern, escape, FLAG, multiset operands reject
-  explicit rows). Type-level distinctions stay unchecked — semantic.
+  value-shaped (LIKE/SIMILAR/regex pattern, escape and FLAG — an explicit row value
+  constructor AND a 6.29 `<term>` / signed primary are rejected, while a 6.31
+  concatenation or a `COLLATE` suffix stays legal), and a `<multiset value expression>`
+  rejects an explicit row value constructor at its base (`x MEMBER OF (1, 2)` /
+  `x SUBMULTISET OF ROW(1, 2)` rejected). Type-level distinctions stay unchecked —
+  semantic.
 - **Desugars narrow the checks deliberately**: `COALESCE` → searched case with `IsNull`
   conditions, `NULLIF` → `BinaryOp(Equal, …)` — hence parse-time gating for the null
   predicate and a top-node-only comparison check (`COALESCE(1 = 2, TRUE)` and
@@ -268,7 +340,7 @@ of flattening, so `(1 = 1)` is a `<boolean predicand>` and `x BETWEEN (1 = 1) AN
   `ConstraintCharacteristics` is three `bool option`s in grammar order.
   `<references specification>` is shared by 11.4 and 11.8 and carries
   `[ MATCH <match type> ]`, the referencing/referenced `<period specification>`s, and a
-  `<table name>` (5.4, at most two parts) for the referenced table.
+  `<table name>` (5.4 — up to three parts, or `MODULE.t`) for the referenced table.
 - **`CREATE TABLE`** carries optional clauses as dedicated fields (`Under`/`Like`/
   `Periods`/`AsQuery`/`TypedElements`…) rather than exploding DU cases; `<table element>`
   is a four-way `Choice`. The 11.3 `<as subquery clause>` requires the `<subquery>`
@@ -278,12 +350,14 @@ of flattening, so `(1 = 1)` is a `<boolean predicand>` and `x BETWEEN (1 = 1) AN
   option kind leaks into the wrong clause).
 - **`ALTER TABLE`** models every 11.10 action; `<drop behavior>` is a `bool`;
   `AddTablePeriod`'s column list holds exactly 0 or 2 entries (11.27 requires both).
-- **DML**: `SetClause` tried MultipleSet → MutatedSet → SingleSet; `DEFAULT` is only an
+- **DML**: `SetClause` tries MultipleSet → MutatedSet → SingleSet; `DEFAULT` is only an
   insert/update value, never a general expression; `DmlTarget = TableTarget |
   OmittedTarget` guards positioned forms; `ONLY ( t )` applies to UPDATE/DELETE/MERGE,
   not `INSERT` (14.11 has no ONLY form); 14.15 `<update target>` admits the
-  array-element form in all three set-clause shapes, and `MergeAction.MergeUpdate`
-  holds a `SetClause list`.
+  array-element form where the grammar permits it, multiple-assignment targets retain
+  their ordinary-vs-mutated distinction, and `MergeAction.MergeUpdate`
+  holds a `SetClause list`. 14.11 `<from constructor>` admits a nonparenthesized
+  `<contextually typed value specification>` row (`INSERT INTO t VALUES NULL` parses).
 - **Flat `StatementKind` cases** for every `DROP` variant and every 12.3 `<object name>`
   kind of `GRANT`/`REVOKE` (`GrantTable`, …, `GrantRoutine`), wrapping
   shared payload records; `GrantRoles`/`RevokeRoles` stay separate. `PrivilegeSelectTarget`
@@ -321,6 +395,9 @@ of flattening, so `(1 = 1)` is a `<boolean predicand>` and `x BETWEEN (1 = 1) AN
   specification>`, 20.17) on `Prepare`, `DeallocatePrepare`, `Execute`,
   `DescribeStatement`, `AllocateDescriptor`, `DeallocateDescriptor`, `GetDescriptor`,
   `SetDescriptor`, `CopyDescriptorStatement.Source`, and `UsingClause.UsingDescriptor`.
+  The scope slot stays `None` where the grammar has no extended form — `ALLOCATE
+  DESCRIPTOR` takes only a `<conventional descriptor name>` (the scope option belongs to
+  the cursor form, `ALLOCATE <extended cursor name> FOR <extended statement name>`).
   Exceptions kept strict: the CURSOR branch of 20.10 uses the 5.4
   `<local qualified name>`; 20.15 uses the plain `<statement name>` (`Scope = None`) —
   `DECLARE c CURSOR FOR LOCAL :s` is rejected while 20.17 `ALLOCATE … FOR LOCAL :s`
@@ -351,13 +428,24 @@ of flattening, so `(1 = 1)` is a `<boolean predicand>` and `x BETWEEN (1 = 1) AN
   families are validated in the shared routine validation block. A bare `<measure
   name>` followed by OVER (6.10 `<window row pattern measure>`) reuses `WindowFunction`
   with an empty argument list.
-- **10.9**: `COUNT ( <asterisk> )` rejects a `<set quantifier>`; `<listagg set function>`
-  accepts one (binary set functions still do not). 6.10 `<lead or lag function>`'s
-  `<offset>` is an `<exact numeric literal>` (exponent notation rejected — approximate
-  literals are a distinct `Literal.ApproximateNumber` case).
-- **10.9 `<listagg overflow clause>`** is a seventh `FunctionCall` field
+- **10.9**: the `<set quantifier>` belongs to `<general set function>` and
+  `<listagg set function>` only — binary / array / JSON / row-pattern-count alternatives
+  reject one (`my_func(DISTINCT 1)` too). The `[ <filter clause> ]` is admitted on every
+  `<aggregate function>` alternative (binary set functions, `ARRAY_AGG`, the JSON
+  aggregates), and `OVER` additionally on the aggregate families that
+  `<window function type>` reaches. A bare `<rank function type>` or
+  `<inverse distribution function>` is rejected — the former needs OVER or WITHIN GROUP,
+  the latter its mandatory WITHIN GROUP. `COUNT ( <asterisk> )` and the 10.9 row pattern
+  count `COUNT ( <row pattern variable name> . <asterisk> )` are the only `*` arguments.
+  6.10 `<lead or lag function>`'s `<offset>` is an `<exact numeric literal>` (exponent
+  notation rejected — approximate literals are a distinct `Literal.ApproximateNumber`
+  case).
+- **10.9 `<array aggregate function>`** — the ORDER BY form carries a dedicated
+  `ArrayAgg` node (`Argument` / `OrderBy` / `Filter`); a plain `ARRAY_AGG(x)` stays a
+  `FunctionCall`. `<listagg overflow clause>` is a seventh `FunctionCall` field
   (`ListaggError | ListaggTruncate of Expression option * bool`), parsed inside the
-  argument parentheses and rejected for any routine other than `LISTAGG`.
+  argument parentheses and rejected for any routine other than `LISTAGG`; the JSON
+  aggregate constructors take the `<filter clause>` as their fifth tuple field.
 - **6.32 `<normalize function result length>`** gets a typed `NormalizeResultLength`
   (`<character length> | <character large object length>`), so
   `NORMALIZE(x, NFC, 10 + 1)` is rejected. A bare integer is ambiguous, so
@@ -378,8 +466,9 @@ descriptor forms live in 10.4's `<descriptor argument>`: `DESCRIPTOR ( a INT, b 
 Invocation nodes carry a `SqlArgumentList` (`StaticMethodInvocation`'s is optional —
 `my_type::prune` parses without parentheses, 6.18); each argument is `SqlArgumentValue |
 Generalized | Named | Table | Descriptor`. Heuristics, since a parse-only library cannot
-resolve names: a table-function/`TABLE (query)` proper counts as a `<table argument>` only
-with a following clause; `expr AS name` is generalized unless a column list/clause
+resolve names: a table-function invocation counts as a `<table argument>` only with a
+following clause (`TABLE ( <query> )` needs none); `expr AS name` is generalized unless a
+column list/clause
 follows; `COPARTITION` (non-reserved) is excluded from correlation/routine-name
 positions; reserved built-ins take value arguments only (`SUM(a, TABLE(t))` rejected).
 
@@ -406,12 +495,19 @@ positions; reserved built-ins take value arguments only (`SUM(a, TABLE(t))` reje
   arguments (`CARDINALITY`).
 - **Syntactic ambiguities**: kind-less `GRANT ... ON <name>` reads as a table grant;
   `TABLE (expr)` PTF classification is shape-based; a lone `TRANSFORM GROUP g` is
-  reported as `<single group specification>`, and a `<multiple group specification>`
-  types only its final group (11.60).
+  reported as `<single group specification>` (11.60).
 - **Opaque embedded languages**: the SQL/JSON path grammar (9.38/9.39) and XQuery-regex
   patterns (8.6) are kept as strings by design.
+- **Aggregate window forms beyond `pRoutineInvocation`** — `ARRAY_AGG(x ORDER BY y)` and
+  `JSON_ARRAYAGG(x ORDER BY y)` parse, and a plain `ARRAY_AGG(x) OVER (…)` follows the
+  grammar through `pRoutineInvocation`; but a window suffix on the ORDER BY / FILTER
+  variants (`ARRAY_AGG(x ORDER BY y) OVER (…)`) and `JSON_ARRAYAGG(x) OVER (…)` are not
+  wired — the dedicated parsers leave the trailing OVER unconsumed and the statement is
+  rejected.
 - **20.26 `<preparable dynamic cursor name>` scope option.** 20.23–20.27 share their
   `WHERE CURRENT OF` parser with the static 14.8/14.13 (a bare `<cursor name>`), so the
   scope option is accepted there too — `WHERE CURRENT OF LOCAL c` parses in static
   statements as well. Chosen over rejecting the grammar-valid dynamic forms; the scope
   is validated but not stored (the AST slot is an `Expression`).
+- **14.11** `<from subquery>` query expressions beginning with a table value constructor
+  are parsed as the query alternative, preserving any following set operations.

@@ -206,32 +206,42 @@ let ``BETWEEN verification`` () =
 [<Fact>]
 let ``Predicate part-2 operands are row value predicands (8.x)`` () =
     // A TOP-LEVEL boolean-producing expression is not a <row value predicand>.
-    parseFails "SELECT 1 BETWEEN 1 = 1 AND 2"
-    parseFails "SELECT 'a' LIKE 'b' = 'c'"
-    parseFails "SELECT 1 IN (1 = 2)"
-    parseFails "SELECT x IS DISTINCT FROM 1 = 2"
-    parseFails "SELECT x OVERLAPS 1 = 2"
+    parseFails "SELECT 1 BETWEEN 1 = 1 AND 2 FROM t"
+    parseFails "SELECT 'a' LIKE 'b' = 'c' FROM t"
+    parseFails "SELECT 1 IN (1 = 2) FROM t"
+    parseFails "SELECT x IS DISTINCT FROM 1 = 2 FROM t"
+    parseFails "SELECT x OVERLAPS 1 = 2 FROM t"
 
-    // A term (e.g. `1 + 1`) is not a <row value predicand> either — only a parenthesized
-    // expression stays legal (the Parenthesized node keeps the parens).
-    parseFails "SELECT x = 1 + 1"
-    parseFails "SELECT x BETWEEN 1 + 1 AND 2"
-    parseFails "SELECT x OVERLAPS 1 + 1"
-    parseFails "SELECT x IS NOT DISTINCT FROM 1 + 1"
+    // A 6.29 <term> IS a <row value predicand> (7.1 <row value constructor predicand>
+    // reaches 6.28 <common value expression>), so a term stays legal in a part-2 operand;
+    // only the TOP-LEVEL boolean above is excluded.
+    parse "SELECT x = 1 + 1 FROM t" |> ignore
+    parse "SELECT x BETWEEN 1 + 1 AND 2 FROM t" |> ignore
+    parse "SELECT x OVERLAPS 1 + 1 FROM t" |> ignore
+    parse "SELECT x IS NOT DISTINCT FROM 1 + 1 FROM t" |> ignore
 
     // 8.5/8.6/8.7 — the pattern/escape slots are *value* expressions: an explicit row value
-    // constructor is not one.
-    parseFails "SELECT 'a' LIKE (1, 2)"
-    parseFails "SELECT 'a' LIKE 'b' ESCAPE (1, 2)"
-    parseFails "SELECT 'a' SIMILAR TO (1, 2)"
-    parseFails "SELECT 'a' LIKE_REGEX (1, 2)"
-    parseFails "SELECT 'a' LIKE_REGEX 'b' FLAG (1, 2)"
+    // constructor and a 6.29 <term> are not value expression primaries, so both fail.
+    parseFails "SELECT 'a' LIKE (1, 2) FROM t"
+    parseFails "SELECT 'a' LIKE 'b' ESCAPE (1, 2) FROM t"
+    parseFails "SELECT 'a' SIMILAR TO (1, 2) FROM t"
+    parseFails "SELECT 'a' LIKE_REGEX (1, 2) FROM t"
+    parseFails "SELECT 'a' LIKE_REGEX 'b' FLAG (1, 2) FROM t"
+    parseFails "SELECT 'a' LIKE 1 + 1 FROM t"
+    parseFails "SELECT 'a' LIKE -x FROM t"
+    parseFails "SELECT 'a' SIMILAR TO 1 + 1 FROM t"
+    parseFails "SELECT x LIKE_REGEX 1 + 1 FROM t"
+
+    // … while a 6.31 concatenation and the 10.7 COLLATE suffix ARE character-shaped.
+    match parse "SELECT 'a' LIKE 'b' COLLATE cs || 'c' FROM t" with
+    | Like(_, _, { Kind = BinaryOp(Concatenate, { Kind = Collate _ }, _) }, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected a COLLATE-bearing pattern, got %A" res)
 
     // 8.16/8.17 — the operand is a <multiset value expression>.
-    parseFails "SELECT x MEMBER OF (1, 2)"
-    parseFails "SELECT x SUBMULTISET OF (1, 2)"
-    parseFails "SELECT x MEMBER OF 1 = 2"
-    parseFails "SELECT x LIKE_REGEX 'a' FLAG 'i' = 'j'"
+    parseFails "SELECT x MEMBER OF (1, 2) FROM t"
+    parseFails "SELECT x SUBMULTISET OF (1, 2) FROM t"
+    parseFails "SELECT x MEMBER OF 1 = 2 FROM t"
+    parseFails "SELECT x LIKE_REGEX 'a' FLAG 'i' = 'j' FROM t"
 
     // A PARENTHESIZED boolean expression is a 6.39 <boolean predicand> and stays
     // legal — the AST keeps a Parenthesized node, so the content is not top-level.
@@ -377,6 +387,12 @@ let ``MATCH predicate verification`` () =
     | Match({ Kind = Identifier "X" }, true, Some Full, _) -> ()
     | res -> Assert.Fail(sprintf "Expected Match UNIQUE FULL, got %A" res)
 
+    // 8.13 — `UNIQUE` without an explicit match type is its own form (the SR defines the
+    // absent type as FULL), distinct from an explicit SIMPLE/FULL in the AST.
+    match parse "SELECT x MATCH UNIQUE (SELECT y FROM t)" with
+    | Match({ Kind = Identifier "X" }, true, Some MatchOption.Unique, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected Match UNIQUE, got %A" res)
+
 [<Fact>]
 let ``OVERLAPS predicate verification`` () =
     match parse "SELECT x OVERLAPS y" with
@@ -412,6 +428,18 @@ let ``SUBMULTISET OF predicate verification`` () =
     match parse "SELECT x NOT SUBMULTISET m" with
     | SubmultisetOf({ Kind = Identifier "X" }, true, { Kind = Identifier "M" }) -> ()
     | res -> Assert.Fail(sprintf "Expected SubmultisetOf NOT, got %A" res)
+
+[<Fact>]
+let ``MEMBER and SUBMULTISET operands reject a term`` () =
+    // 8.16 / 8.17 name a 6.43 <multiset value expression>, which bottoms out at a
+    // <multiset primary> = <value expression primary>. A 6.29 <term> is not a primary.
+    parseFails "SELECT x MEMBER OF m + 1"
+    parseFails "SELECT x SUBMULTISET OF a || b"
+
+    // A <multiset primary> and a 6.44 <multiset set function> both stay legal.
+    parse "SELECT x MEMBER OF m" |> ignore
+
+    parse "SELECT x MEMBER OF SET(m)" |> ignore
 
 [<Fact>]
 let ``IS A SET predicate verification`` () =
@@ -477,6 +505,42 @@ let ``Period predicate verification`` () =
     // boolean predicates and other non-datetime operators are rejected in both slots.
     parseFails "SELECT PERIOD (s = e, f) EQUALS p FROM t"
     parseFails "SELECT p CONTAINS PERIOD (s IS NULL, f) FROM t"
+
+[<Fact>]
+let ``Period overlaps predicate verification`` () =
+    // 8.20 <period overlaps predicate> ::= <period predicand 1> OVERLAPS <period predicand 2>
+    // OVERLAPS is one of the seven 8.20 alternatives and BOTH sides are <period predicand>s,
+    // so `PERIOD ( … )` is legal on either side. A PERIOD ( … ) left operand distinguishes it
+    // from the 8.14 <overlaps predicate>, which keeps its own `Overlaps` node.
+    match parse "SELECT PERIOD (s, e) OVERLAPS PERIOD (t, u)" with
+    | PeriodPredicate(PeriodOverlaps, { Kind = PeriodValue(_, _) }, { Kind = PeriodValue(_, _) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected PeriodOverlaps, got %A" res)
+
+    match parse "SELECT p1 OVERLAPS PERIOD (t, u)" with
+    | PeriodPredicate(PeriodOverlaps, { Kind = Identifier "P1" }, { Kind = PeriodValue(_, _) }) -> ()
+    | res -> Assert.Fail(sprintf "Expected PeriodOverlaps, got %A" res)
+
+    match parse "SELECT PERIOD (s, e) OVERLAPS p2" with
+    | PeriodPredicate(PeriodOverlaps, { Kind = PeriodValue(_, _) }, { Kind = Identifier "P2" }) -> ()
+    | res -> Assert.Fail(sprintf "Expected PeriodOverlaps, got %A" res)
+
+    // 8.14 <overlaps predicate> keeps its own node when neither side is a PERIOD ( … ).
+    match parse "SELECT p1 OVERLAPS p2" with
+    | PeriodPredicate(PeriodOverlaps, _, _) -> Assert.Fail("Expected the 8.14 Overlaps node, got 8.20 PeriodOverlaps")
+    | Overlaps(_, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected Overlaps, got %A" res)
+
+[<Fact>]
+let ``Period contains predicate rejects a non-datetime right operand`` () =
+    // 8.20 <period contains predicate part 2> ::= CONTAINS <period or point-in-time predicand>,
+    // and a <point in time> is a 6.35 <datetime value expression> — which has no
+    // concatenation. A term is therefore not admissible.
+    parseFails "SELECT p1 CONTAINS a || b"
+    parseFails "SELECT p1 CONTAINS a + 1"
+
+    match parse "SELECT p1 CONTAINS a + INTERVAL '1' DAY" with
+    | PeriodPredicate(PeriodContains, _, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected a datetime <point in time>, got %A" res)
 
 [<Fact>]
 let ``IS JSON predicate verification`` () =
@@ -581,6 +645,14 @@ let ``When operand predicate part-2 forms are applied to the case operand (6.12)
     parseFails "SELECT CASE 1 = 2 WHEN 1 THEN 2 END FROM t"
 
 [<Fact>]
+let ``Period predicates take period predicands (8.20)`` () =
+    // The right operand of EQUALS / OVERLAPS / ... is a <period predicand>: PERIOD ( ... )
+    // or an (unbounded) <basic identifier chain> <period reference>.
+    parse "SELECT PERIOD(s, e) EQUALS a.b.c.d FROM t" |> ignore
+    // …but a row value constructor is not one.
+    parseFails "SELECT PERIOD(s, e) OVERLAPS (1, 2) FROM t"
+
+[<Fact>]
 let ``Predicate part-1 left operands are row value predicands (8.x)`` () =
     // Every 8.x predicate's left operand is a <row value predicand>, so a predicate may not
     // sit on a boolean result. 6.39 `IS [NOT] TRUE|FALSE|UNKNOWN` is the exception — its
@@ -592,7 +664,12 @@ let ``Predicate part-1 left operands are row value predicands (8.x)`` () =
     parseFails "SELECT 1 FROM t WHERE 1 BETWEEN 1 AND 2 IS NULL"
     parseFails "SELECT 1 FROM t WHERE x IS NULL IS NULL"
     parseFails "SELECT 1 FROM t WHERE EXISTS (SELECT 1 FROM u) IS NULL"
-    parseFails "SELECT 1 FROM t WHERE 1 = 2 COLLATE c"
+    // …but a COLLATE suffix binds to the right operand's primary, not to the boolean —
+    // `1 = 2 COLLATE c` is `1 = (2 COLLATE c)` (6.31 <character factor>), so it parses.
+    match parse "1 = 2 COLLATE c" with
+    | BinaryOp(Equal, _, { Kind = Collate _ }) -> ()
+    | res -> Assert.Fail(sprintf "Expected COLLATE on the comparison's right operand, got %A" res)
+
     parseFails "SELECT 1 FROM t WHERE 1 = 2 IS JSON"
     parseFails "SELECT 1 FROM t WHERE 1 = 2 OVERLAPS x"
     parseFails "SELECT 1 FROM t WHERE 1 = 2 MEMBER OF m"

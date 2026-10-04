@@ -5,8 +5,8 @@ open SqlParser.Lexer
 open SqlParser.ExpressionParser
 
 module DynamicParser =
-    // `pExtendedName` (5.4 <extended descriptor name>, 20.17 <extended statement name>,
-    // 20.17 <extended cursor name>) lives in DataManipulationParser.fs because the
+    // `pExtendedName` (5.4 <extended descriptor name>, 5.4 <extended statement name>,
+    // 5.4 <extended cursor name>) lives in DataManipulationParser.fs because the
     // 20.10/20.11 <using descriptor> tail in this module compiles later than that
     // module; the shared parser is consumed by both.
 
@@ -107,12 +107,14 @@ module DynamicParser =
 
     // 20.5 <set descriptor statement> ::= SET [ SQL ] DESCRIPTOR <descriptor name> <set descriptor information>
     let pSetDescriptorStatement =
-        // 20.5 <set header information> ::= <header item name> <equals operator> <value>
+        // 20.5 <set header information> ::= <header item name> <equals operator>
+        //     <simple value specification 1>
         let pSetHeaderInformation =
             pHeaderItemName .>> token (pstring "=") .>>. pSimpleValueSpecification
             |>> fun (name, value) -> name, value
 
-        // 20.5 <set item information> ::= <descriptor item name> <equals operator> <value> (item form)
+        // 20.5 <set item information> ::= <descriptor item name> <equals operator>
+        //     <simple value specification 2> (item form)
         let pSetItemInformation =
             pDescriptorItemName .>> token (pstring "=") .>>. pSimpleValueSpecification
             |>> fun (name, value) -> name, value
@@ -194,7 +196,7 @@ module DynamicParser =
     // <describe input statement>  ::= DESCRIBE INPUT <SQL statement name> <using descriptor> [ <nesting option> ]
     // <describe output statement> ::= DESCRIBE [ OUTPUT ] <described object> <using descriptor> [ <nesting option> ]
     // <described object>           ::= <SQL statement name> | CURSOR <cursor name> STRUCTURE
-    // Both <SQL statement name> and <cursor name> admit the 20.17 extended form
+    // Both <SQL statement name> and <cursor name> admit the 5.4 extended form
     // `[ <scope option> ] <simple value specification>`. INPUT commits to <describe input
     // statement> (no backtracking) so DESCRIBE INPUT CURSOR ... is rejected.
     let pDescribeStatement =
@@ -249,7 +251,7 @@ module DynamicParser =
             |>> Describe
 
     // 20.13 <execute statement> ::= EXECUTE <SQL statement name> [ <output using clause> ] [ <input using clause> ]
-    // <SQL statement name> admits the 20.17 extended form.
+    // <SQL statement name> admits the 5.4 extended form.
     let pExecuteStatement =
         pKeyword "EXECUTE" >>. DataManipulationParser.pExtendedName
         .>>. opt (attempt DataManipulationParser.pOutputUsingClause)
@@ -263,8 +265,8 @@ module DynamicParser =
         pKeyword "EXECUTE" >>. pKeyword "IMMEDIATE" >>. pSimpleValueSpecification
         |>> ExecuteImmediate
 
-    // 5.4 <extended descriptor name> / 20.17 <extended statement name> /
-    // 20.17 <extended cursor name> are now defined in DataManipulationParser.fs
+    // 5.4 <extended descriptor name> / 5.4 <extended statement name> /
+    // 5.4 <extended cursor name> are now defined in DataManipulationParser.fs
     // (`pExtendedName`).
 
     // 20.15 <dynamic declare cursor> ::= DECLARE <cursor name> <cursor properties> FOR <statement name>

@@ -125,6 +125,11 @@ let ``SET CATALOG verification`` () =
     | SetCatalog { Kind = Literal(String "c1") } -> ()
     | res -> Assert.Fail(sprintf "Expected SetCatalog, got %A" res)
 
+    // 5.3 <literal> includes <signed numeric literal>.
+    match parse "SET CATALOG -5" with
+    | SetCatalog { Kind = Literal(Number -5m) } -> ()
+    | res -> Assert.Fail(sprintf "Expected a signed numeric SetCatalog, got %A" res)
+
 [<Fact>]
 let ``SET SCHEMA verification`` () =
     match parse "SET SCHEMA 's1'" with

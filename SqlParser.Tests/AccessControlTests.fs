@@ -205,6 +205,38 @@ let ``GRANT object name as qualified chain verification`` () =
     | res -> Assert.Fail(sprintf "Expected RevokeTable, got %A" res)
 
 [<Fact>]
+let ``GRANT and REVOKE CHARACTER SET object name arity`` () =
+    // 12.3 <object name> ::= CHARACTER SET <character set name>, and a <character set name>
+    // (5.4) is [ <schema name> . ] <SQL language identifier> — <schema name> itself is
+    // [ <catalog name> . ] <unqualified schema name>, so THREE parts are legal.
+    match parse "GRANT USAGE ON CHARACTER SET info.cs1 TO alice" with
+    | GrantCharacterSet stmt ->
+        match stmt.Object with
+        | { Kind = ColumnReference [ "INFO"; "CS1" ] } -> ()
+        | res -> Assert.Fail(sprintf "Expected a schema-qualified character set, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected GrantCharacterSet, got %A" res)
+
+    match parse "GRANT USAGE ON CHARACTER SET cat.info.cs1 TO alice" with
+    | GrantCharacterSet stmt ->
+        match stmt.Object with
+        | { Kind = ColumnReference [ "CAT"; "INFO"; "CS1" ] } -> ()
+        | res -> Assert.Fail(sprintf "Expected a catalog-qualified character set, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected GrantCharacterSet, got %A" res)
+
+    match parse "REVOKE USAGE ON CHARACTER SET cat.info.cs1 FROM alice CASCADE" with
+    | RevokeCharacterSet stmt ->
+        match stmt.Object with
+        | { Kind = ColumnReference [ "CAT"; "INFO"; "CS1" ] } -> ()
+        | res -> Assert.Fail(sprintf "Expected a catalog-qualified character set, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected RevokeCharacterSet, got %A" res)
+
+    // A FOUR-part name is beyond <schema name> (5.4).
+    parseFails "GRANT USAGE ON CHARACTER SET a.b.c.d TO alice"
+
+    // … while a three-part <collation name> is still accepted (12.3 COLLATION).
+    parse "GRANT USAGE ON COLLATION cat.info.c1 TO alice" |> ignore
+
+[<Fact>]
 let ``GRANT UNDER privilege verification`` () =
     match parse "GRANT UNDER ON TABLE users TO alice" with
     | GrantTable stmt ->

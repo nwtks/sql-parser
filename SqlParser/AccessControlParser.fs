@@ -84,7 +84,6 @@ module AccessControlParser =
                 [ pKeyword "TABLE" >>% ObjectKind.Table
                   pKeyword "DOMAIN" >>% ObjectKind.Domain
                   pKeyword "COLLATION" >>% ObjectKind.Collation
-                  attempt (pKeyword "CHARACTER" >>. pKeyword "SET" >>% ObjectKind.CharacterSet)
                   pKeyword "TRANSLATION" >>% ObjectKind.Translation
                   pKeyword "TYPE" >>% ObjectKind.Type
                   pKeyword "SEQUENCE" >>% ObjectKind.Sequence ]
@@ -94,17 +93,21 @@ module AccessControlParser =
         // plain <qualified name>. The kind branch is separate from the bare <qualified
         // name> branch so a non-reserved kind word used as a schema name
         // (`domain.users`) does not commit to kind + name and then fail on `.users`.
-        // 10.6 <specific routine designator> ::= SPECIFIC <routine type> <specific name>
-        //     | <routine type> <member name> [ FOR <schema-resolved user-defined type name> ]
-        // — both alternatives are legal in a 12.3 <object name>, and the literal (typed) form
-        // is required: the permissive one would swallow the bare-`<table name>` alternatives.
+        // 12.3 CHARACTER SET takes a <character set name> — up to THREE parts
+        // ([ <catalog> . ] <schema> . <SQL language identifier>) — while the
+        // other kinds keep their own productions (see trade-off.md), so that one branch
+        // needs the narrow parser.
         choice
             [ attempt (SchemaParser.pTypedSpecificRoutineDesignator |>> fun d -> None, Some d, d.Name)
+              attempt (
+                  pKeyword "CHARACTER" >>. pKeyword "SET" >>. pCharacterSetNameExpression
+                  |>> fun name -> Some ObjectKind.CharacterSet, None, name
+              )
               attempt (
                   pKind .>>. pSchemaQualifiedNameExpression
                   |>> fun (kind, name) -> Some kind, None, name
               )
-              attempt (pSchemaQualifiedNameExpression |>> fun name -> None, None, name) ]
+              attempt (pTableNameExpression |>> fun name -> None, None, name) ]
 
     // 12.2 <grant privilege statement> ::= GRANT <privileges> TO <grantee> [ { , <grantee> }... ]
     //     [ WITH HIERARCHY OPTION ] [ WITH GRANT OPTION ] [ GRANTED BY <grantor> ]

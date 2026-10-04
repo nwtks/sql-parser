@@ -74,16 +74,21 @@ module SchemaParser =
             | Some(RoutineType.Method _) -> pMethodNameExpression
             | _ -> pSchemaQualifiedNameExpression
 
-        // <data type list> belongs to 10.6 <member name> in BOTH alternatives, so a caller that
-        // wants the <routine type> mandatory (a 12.3 <object name>) passes false and gives up
-        // only the bare-name form. What that slot still needs narrowed is the <routine type>
-        // itself: without it, `ON ROUTINE_TABLE` would be read as a routine designator and
-        // shadow the optional-[ TABLE ] <table name> alternative.
+        // <data type list> and the FOR clause belong to 10.6 <member name>, which only occurs
+        // in the `<routine type> <member name>` alternative — the documented bare-name
+        // extension carries neither (10.6 has no production for them without a <routine type>).
         let memberNameParts routineType =
             pMemberNameAfter routineType
             .>>. opt (attempt pDataTypeList)
             .>>. opt (attempt (pKeyword "FOR" >>. pSchemaQualifiedNameExpression))
-            |>> fun ((name, dataTypeList), forType) -> (name, dataTypeList, forType)
+            >>= fun ((name, dataTypeList), forType) ->
+                if
+                    Option.isNone routineType
+                    && (Option.isSome dataTypeList || Option.isSome forType)
+                then
+                    fail "a bare routine name takes neither a <data type list> nor a FOR clause (10.6)"
+                else
+                    preturn (name, dataTypeList, forType)
 
         let pMemberName =
             if allowBareRoutineName then
@@ -136,9 +141,11 @@ module SchemaParser =
     //   | <constraint enforcement>
     let private pConstraintCharacteristics =
         // 10.8 <constraint check time> ::= INITIALLY DEFERRED | INITIALLY IMMEDIATE
-        // NOTE: both alternatives are parenthesized — `<|>` binds tighter than `>>.`/`>>%`,
-        // so an unparenthesized `INITIALLY >>. DEFERRED >>% true <|> (...)` would group as
-        // `INITIALLY >>. (DEFERRED >>% (true <|> ...))` and never try IMMEDIATE.
+        // NOTE: both alternatives are parenthesized. In F#, `>>.`, `>>%`, `<|` and `|>>` all
+        // begin with a relational character, so they share ONE precedence level and associate
+        // LEFT to right — an unparenthesized `INITIALLY >>. DEFERRED >>% true <|> (...)`
+        // would group as `INITIALLY >>. (DEFERRED >>% (true <|> ...))` and never try
+        // IMMEDIATE.
         let pCheckTime =
             attempt (pKeyword "INITIALLY" >>. pKeyword "DEFERRED" >>% true)
             <|> (pKeyword "INITIALLY" >>. pKeyword "IMMEDIATE" >>% false)
@@ -203,9 +210,9 @@ module SchemaParser =
                 >>. pKeyword "SET"
                 >>. pCharacterSetNameExpression
 
-            // 10.3 <path specification> ::= PATH <path-resolved user-defined type name> [ { <comma> ... }... ]
-            let pPath =
-                pKeyword "PATH" >>. sepBy1 pSchemaQualifiedNameExpression (token (pstring ","))
+            // 10.3 <path specification> ::= PATH <schema name list>
+            // <schema name list> holds <schema name>s, so at most TWO parts each.
+            let pPath = pKeyword "PATH" >>. sepBy1 pSchemaNameExpression (token (pstring ","))
 
             choice
                 [ attempt (pCharset .>>. opt (attempt pPath) |>> fun (c, p) -> Some c, p)
@@ -244,18 +251,20 @@ module SchemaParser =
     // 12.6 <drop role statement> ::= DROP ROLE <role name>
     let pDropStatement =
         // 11.71 <transforms to be dropped> ::= ALL | <transform group element>
+        // 11.71 <transform group element> ::= <group name>, and 11.67 <group name> ::=
+        //     <identifier> — a single part (the 11.60 slot already uses pIdentifierExpression).
         // Local because pDropStatement is its only consumer.
         let pTransformsToBeDropped =
             pKeyword "ALL" >>% TransformDropTarget.AllTransforms
-            <|> (pSchemaQualifiedNameExpression |>> TransformDropTarget.TransformGroup)
+            <|> (pIdentifierExpression |>> TransformDropTarget.TransformGroup)
 
         pKeyword "DROP"
         >>. choice
                 [ attempt (pKeyword "SCHEMA" >>. pSchemaNameExpression .>>. pDropBehavior)
                   |>> DropSchema
-                  attempt (pKeyword "TABLE" >>. pSchemaQualifiedNameExpression .>>. pDropBehavior)
+                  attempt (pKeyword "TABLE" >>. pTableNameExpression .>>. pDropBehavior)
                   |>> DropTable
-                  attempt (pKeyword "VIEW" >>. pSchemaQualifiedNameExpression .>>. pDropBehavior)
+                  attempt (pKeyword "VIEW" >>. pTableNameExpression .>>. pDropBehavior)
                   |>> DropView
                   attempt (pKeyword "DOMAIN" >>. pSchemaQualifiedNameExpression .>>. pDropBehavior)
                   |>> DropDomain
@@ -365,10 +374,10 @@ module SchemaParser =
         |>> fun (columns, period) -> (columns: Expression list), (period: Expression option)
 
     // 5.4 <table name> is a <local or schema qualified name>, whose <local or schema qualifier>
-    // is a <schema name> — so the catalog part makes three parts legal here, the same as in
-    // every other <table name> slot.
+    // is a <schema name> or the <local qualifier> MODULE — so `MODULE.t` and the catalog
+    // part make three parts legal here, the same as in every other <table name> slot.
     let private pReferencedTableAndColumns =
-        pSchemaQualifiedNameExpression
+        pTableNameExpression
         .>>. opt (between (token (pstring "(")) (token (pstring ")")) pReferencedColumnListAndPeriod)
 
     // 11.8 <references specification> ::=
@@ -417,7 +426,7 @@ module SchemaParser =
                   )
                   attempt (
                       pKeyword "CHECK"
-                      >>. between (token (pstring "(")) (token (pstring ")")) pExpression
+                      >>. between (token (pstring "(")) (token (pstring ")")) pSearchCondition
                       |>> ColumnConstraintKind.Check
                   ) ]
 
@@ -498,7 +507,7 @@ module SchemaParser =
         >>. (pKeyword "ALWAYS" >>% true <|> (pKeyword "BY" >>. pKeyword "DEFAULT" >>% false))
         .>> pKeyword "AS"
         .>> pKeyword "IDENTITY"
-        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (many1 pCommonSequenceGeneratorOption))
+        .>>. opt (between (token (pstring "(")) (token (pstring ")")) (many pCommonSequenceGeneratorOption))
         |>> fun (isAlways, opts) ->
             { IsAlways = isAlways
               Options = Option.defaultValue [] opts }
@@ -536,67 +545,87 @@ module SchemaParser =
     //       [ <default clause> | <identity column specification> | <generation clause>
     //       | <system time period start column specification> | <system time period end column specification> ]
     //       [ <column constraint definition>... ] [ <collate clause> ]
-    // The type slot is OPTIONAL per 11.4, but in practice it is required: typed-table
-    // columns (11.3 <typed table element>) route through `pColumnOptions` (no type slot)
-    // and the required type here is load-bearing for the <as subquery clause> dispatch —
-    // `CREATE TABLE t (id, name) AS SELECT …` would otherwise be misread by the
-    // `( <column name list> )` slot.
-    let pColumnDefinition =
+    // The type slot IS optional per 11.4, so `pColumnDefinitionNoType` below drops it. Inside
+    // 11.3 <table element list> it must stay REQUIRED: `CREATE TABLE t (id, name) AS SELECT …`
+    // would otherwise be misread by the `( <column name list> )` slot of 11.3
+    // <as subquery clause>. 11.11 <add column definition> and 11.27's
+    // <add system time period column list> have no competing alternative, so they take the
+    // optional-type variant. Both share the body below.
+    let private buildColumnDefinition
+        (name: Expression)
+        (typ: DataType option)
+        (valueClause: Choice<Expression, ColumnGeneration> option)
+        (constraints: ColumnConstraint list)
+        (collation: Expression option)
+        =
+        let defaultValue, identity, generation, systemTimePeriod =
+            match valueClause with
+            | Some(Choice1Of2 d) -> Some d, None, None, None
+            | Some(Choice2Of2(IdentityColumn spec)) -> None, Some spec, None, None
+            | Some(Choice2Of2(GeneratedColumn expr)) -> None, None, Some expr, None
+            | Some(Choice2Of2(SystemTimePeriodColumn kind)) -> None, None, None, Some kind
+            | None -> None, None, None, None
+
+        let kinds = constraints |> List.map (fun c -> c.Kind)
+
+        { Name = name
+          DataType = typ
+          IsNullable =
+            kinds
+            |> List.tryPick (function
+                | ColumnConstraintKind.NotNull -> Some false
+                | _ -> None)
+          IsPrimaryKey =
+            kinds
+            |> List.exists (function
+                | ColumnConstraintKind.PrimaryKey -> true
+                | _ -> false)
+          DefaultValue = defaultValue
+          IsUnique =
+            kinds
+            |> List.exists (function
+                | ColumnConstraintKind.Unique -> true
+                | _ -> false)
+          References =
+            kinds
+            |> List.tryPick (function
+                | ColumnConstraintKind.References r -> Some r
+                | _ -> None)
+          Check =
+            kinds
+            |> List.tryPick (function
+                | ColumnConstraintKind.Check e -> Some e
+                | _ -> None)
+          Identity = identity
+          Generation = generation
+          SystemTimePeriod = systemTimePeriod
+          Collation = collation
+          Constraints = constraints }
+
+    // Everything after the type slot, shared by the two variants.
+    let private pColumnDefinitionTail =
         // 10.7 <collate clause> ::= COLLATE <collation name>
         let pCollateClause = pKeyword "COLLATE" >>. pSchemaQualifiedNameExpression
 
-        pIdentifierExpression
-        .>>. pDataType
-        .>>. opt (
+        opt (
             attempt (pDefaultClause |>> Choice1Of2)
             <|> attempt (pColumnGeneration |>> Choice2Of2)
         )
         .>>. many (attempt pColumnConstraintDefinition)
         .>>. opt (attempt pCollateClause)
-        |>> fun ((((name, typ), valueClause), constraints), collation) ->
-            let defaultValue, identity, generation, systemTimePeriod =
-                match valueClause with
-                | Some(Choice1Of2 d) -> Some d, None, None, None
-                | Some(Choice2Of2(IdentityColumn spec)) -> None, Some spec, None, None
-                | Some(Choice2Of2(GeneratedColumn expr)) -> None, None, Some expr, None
-                | Some(Choice2Of2(SystemTimePeriodColumn kind)) -> None, None, None, Some kind
-                | None -> None, None, None, None
 
-            let kinds = constraints |> List.map (fun c -> c.Kind)
+    let pColumnDefinition =
+        pIdentifierExpression .>>. pDataType .>>. pColumnDefinitionTail
+        |>> fun (((name, typ), ((valueClause, constraints), collation))) ->
+            buildColumnDefinition name (Some typ) valueClause constraints collation
 
-            { Name = name
-              DataType = typ
-              IsNullable =
-                kinds
-                |> List.tryPick (function
-                    | ColumnConstraintKind.NotNull -> Some false
-                    | _ -> None)
-              IsPrimaryKey =
-                kinds
-                |> List.exists (function
-                    | ColumnConstraintKind.PrimaryKey -> true
-                    | _ -> false)
-              DefaultValue = defaultValue
-              IsUnique =
-                kinds
-                |> List.exists (function
-                    | ColumnConstraintKind.Unique -> true
-                    | _ -> false)
-              References =
-                kinds
-                |> List.tryPick (function
-                    | ColumnConstraintKind.References r -> Some r
-                    | _ -> None)
-              Check =
-                kinds
-                |> List.tryPick (function
-                    | ColumnConstraintKind.Check e -> Some e
-                    | _ -> None)
-              Identity = identity
-              Generation = generation
-              SystemTimePeriod = systemTimePeriod
-              Collation = collation
-              Constraints = constraints }
+    // 11.11 <add column definition> / 11.27 <column definition 1> / 11.27 <column definition 2>
+    //     — the type slot is optional and there is no `( <column name list> )` alternative to
+    //     disambiguate against, so `ALTER TABLE t ADD COLUMN c` is valid SQL-2016.
+    let pColumnDefinitionNoType =
+        pIdentifierExpression .>>. opt (attempt pDataType) .>>. pColumnDefinitionTail
+        |>> fun (((name, typ), ((valueClause, constraints), collation))) ->
+            buildColumnDefinition name typ valueClause constraints collation
 
     // 11.6 <table constraint definition> ::=
     //     [ <constraint name definition> ] <table constraint> [ <constraint characteristics> ]
@@ -677,7 +706,7 @@ module SchemaParser =
                   )
                   attempt (
                       pName .>> pKeyword "CHECK"
-                      .>>. between (token (pstring "(")) (token (pstring ")")) pExpression
+                      .>>. between (token (pstring "(")) (token (pstring ")")) pSearchCondition
                       |>> fun (n, e) -> TableConstraint.Check(n, e)
                   ) ]
 
@@ -743,7 +772,7 @@ module SchemaParser =
                       attempt (pKeyword "INCLUDING" >>. pKeyword "GENERATED" >>% LikeOption.IncludingGenerated)
                       attempt (pKeyword "EXCLUDING" >>. pKeyword "GENERATED" >>% LikeOption.ExcludingGenerated) ]
 
-            pKeyword "LIKE" >>. pSchemaQualifiedNameExpression .>>. many pLikeOption
+            pKeyword "LIKE" >>. pTableNameExpression .>>. many pLikeOption
 
         // 11.3 <table element> ::= <column definition> | <table period definition>
         //     | <table constraint definition> | <like clause>
@@ -803,9 +832,11 @@ module SchemaParser =
 
         // 11.3 <typed table clause> ::= OF <path-resolved user-defined type name>
         //     [ <subtable clause> ] [ <typed table element list> ]
+        // <subtable clause> ::= UNDER <supertable clause>; <supertable name> ::= <table name>,
+        // so `MODULE.s` is legal.
         let pTypedTableClause =
             pKeyword "OF" >>. pSchemaQualifiedNameExpression
-            .>>. opt (pKeyword "UNDER" >>. pSchemaQualifiedNameExpression)
+            .>>. opt (pKeyword "UNDER" >>. pTableNameExpression)
             .>>. opt pTypedTableElementList
 
         // 11.3 <system versioning clause> ::= SYSTEM VERSIONING
@@ -821,7 +852,7 @@ module SchemaParser =
             attempt (pKeyword "ON" >>. pKeyword "COMMIT" >>. pTableCommitAction .>> pKeyword "ROWS")
 
         pKeyword "CREATE" >>. opt pTableScope .>> pKeyword "TABLE"
-        .>>. pSchemaQualifiedNameExpression
+        .>>. pTableNameExpression
         .>>. (attempt (
                   between (token (pstring "(")) (token (pstring ")")) (sepBy1 pTableElement (token (pstring ",")))
                   |>> fun elems -> elems, None, None, None, None, []
@@ -864,7 +895,7 @@ module SchemaParser =
 
             let like =
                 elems
-                |> List.tryPick (function
+                |> List.choose (function
                     | Choice4Of4 l -> Some l
                     | _ -> None)
 
@@ -923,10 +954,13 @@ module SchemaParser =
         // 11.27 <add system time period column list>
         //     ::= ADD [ COLUMN ] <column definition 1> ADD [ COLUMN ] <column definition 2>
         // Both columns are required by the grammar, so this parser yields exactly two entries.
+        // <column definition 1> / <column definition 2> are 11.4 <column definition>s with the
+        // type slot OPTIONAL — defining the period's columns together with the period is the
+        // whole point of 11.27, so an untyped `ADD COLUMN s` is legal.
         // Local because pAlterTableStatement is its only consumer.
         let pAddSystemTimePeriodColumnList =
-            pKeyword "ADD" >>. opt (pKeyword "COLUMN") >>. pColumnDefinition
-            .>>. (pKeyword "ADD" >>. opt (pKeyword "COLUMN") >>. pColumnDefinition)
+            pKeyword "ADD" >>. opt (pKeyword "COLUMN") >>. pColumnDefinitionNoType
+            .>>. (pKeyword "ADD" >>. opt (pKeyword "COLUMN") >>. pColumnDefinitionNoType)
             |>> fun (first, second) -> [ first; second ]
 
         let pColumnAction =
@@ -968,7 +1002,10 @@ module SchemaParser =
         //     | <add system versioning clause> | <drop system versioning clause>
         let pAction =
             choice
-                [ attempt (pKeyword "ADD" >>. opt (pKeyword "COLUMN") >>. pColumnDefinition |>> AddColumn)
+                [ attempt (
+                      pKeyword "ADD" >>. opt (pKeyword "COLUMN") >>. pColumnDefinitionNoType
+                      |>> AddColumn
+                  )
                   attempt (pKeyword "ADD" >>. pTableConstraintDefinition |>> AlterTableAction.AddConstraint)
                   // 11.27 <add table period definition> ::= ADD <table period definition>
                   //     [ <add system time period column list> ]
@@ -1024,8 +1061,7 @@ module SchemaParser =
                       |>> AlterColumn
                   ) ]
 
-        pKeyword "ALTER" >>. pKeyword "TABLE" >>. pSchemaQualifiedNameExpression
-        .>>. pAction
+        pKeyword "ALTER" >>. pKeyword "TABLE" >>. pTableNameExpression .>>. pAction
         |>> fun (name, action) -> { Table = name; Action = action } |> AlterTable
 
     // 11.32 <view definition> ::= CREATE [ RECURSIVE ] VIEW <table name> <view specification>
@@ -1072,13 +1108,13 @@ module SchemaParser =
                   )
                   attempt (
                       pKeyword "OF" >>. pSchemaQualifiedNameExpression
-                      .>>. opt (pKeyword "UNDER" >>. pSchemaQualifiedNameExpression)
+                      .>>. opt (pKeyword "UNDER" >>. pTableNameExpression)
                       .>>. opt pViewElementList
                       |>> Choice2Of2
                   ) ]
 
         pKeyword "CREATE" >>. opt (pKeyword "RECURSIVE" >>% true) .>> pKeyword "VIEW"
-        .>>. pSchemaQualifiedNameExpression
+        .>>. pTableNameExpression
         .>>. opt pViewSpecification
         .>> pKeyword "AS"
         .>>. QueryParser.pQueryExpression
@@ -1112,7 +1148,7 @@ module SchemaParser =
     let private pDomainConstraint =
         opt (pKeyword "CONSTRAINT" >>. pSchemaQualifiedNameExpression)
         .>>. (pKeyword "CHECK"
-              >>. between (token (pstring "(")) (token (pstring ")")) pExpression)
+              >>. between (token (pstring "(")) (token (pstring ")")) pSearchCondition)
         .>>. pConstraintCharacteristics
         |>> fun ((name, check), chars) ->
             { Name = name
@@ -1179,12 +1215,15 @@ module SchemaParser =
         |>> fun (((name, cs), existing), pad) -> CreateCollation(name, cs, existing, pad)
 
     // 11.45 <transliteration definition> ::= CREATE TRANSLATION <transliteration name> FOR <source character set> TO <target character set> FROM <transliteration source>
+    // 11.45 <source character set specification> / <target character set specification>
+    //     ::= <character set specification> — a <character set name>, so at most TWO parts
+    //     (11.43's FOR slot already uses the narrow parser; SchemaTests.fs pins it).
     // 11.45 <transliteration source> ::= <existing transliteration name> | <transliteration routine>
     // 11.45 <transliteration routine> ::= <specific routine designator>
     let pTransliterationDefinition =
         pKeyword "CREATE" >>. pKeyword "TRANSLATION" >>. pSchemaQualifiedNameExpression
-        .>>. (pKeyword "FOR" >>. pSchemaQualifiedNameExpression)
-        .>>. (pKeyword "TO" >>. pSchemaQualifiedNameExpression)
+        .>>. (pKeyword "FOR" >>. pCharacterSetNameExpression)
+        .>>. (pKeyword "TO" >>. pCharacterSetNameExpression)
         .>>. (pKeyword "FROM" >>. pSpecificRoutineDesignator)
         |>> fun (((name, source), target), trSource) -> CreateTransliteration(name, source, target, trSource)
 
@@ -1192,7 +1231,7 @@ module SchemaParser =
     let pAssertionDefinition =
         pKeyword "CREATE" >>. pKeyword "ASSERTION" >>. pSchemaQualifiedNameExpression
         .>>. (pKeyword "CHECK"
-              >>. between (token (pstring "(")) (token (pstring ")")) pExpression)
+              >>. between (token (pstring "(")) (token (pstring ")")) pSearchCondition)
         .>>. pConstraintCharacteristics
         |>> fun ((name, check), chars) -> CreateAssertion(name, check, chars)
 
@@ -1254,13 +1293,15 @@ module SchemaParser =
                       |>> TransitionTableOrVariable.NewRow
                   ) ]
 
-        // 11.49 <triggered SQL statement> ::= <SQL procedure statement> | BEGIN ATOMIC { <SQL procedure statement>; }... END
+        // 11.49 <triggered SQL statement> ::= <SQL procedure statement>
+        //     | BEGIN ATOMIC { <SQL procedure statement> <semicolon> }... END
+        // Every statement carries its trailing <semicolon> — no optional final separator.
         let pTriggeredStatement =
             choice
                 [ attempt (
                       pKeyword "BEGIN"
                       >>. pKeyword "ATOMIC"
-                      >>. sepEndBy1 pStatement (token (pstring ";"))
+                      >>. many1 (pStatement .>> token (pstring ";"))
                       .>> pKeyword "END"
                       |>> fun stmts -> TriggeredStatement.BeginAtomic(List.map (fun s -> s.Kind) stmts)
                   )
@@ -1275,7 +1316,7 @@ module SchemaParser =
             )
             .>>. opt (
                 pKeyword "WHEN"
-                >>. between (token (pstring "(")) (token (pstring ")")) pExpression
+                >>. between (token (pstring "(")) (token (pstring ")")) pSearchCondition
             )
             .>>. pTriggeredStatement
             |>> fun ((forEach, whenCond), statement) ->
@@ -1286,7 +1327,7 @@ module SchemaParser =
         pKeyword "CREATE" >>. pKeyword "TRIGGER" >>. pSchemaQualifiedNameExpression
         .>>. pTriggerActionTime
         .>>. pTriggerEvent
-        .>>. (pKeyword "ON" >>. pSchemaQualifiedNameExpression)
+        .>>. (pKeyword "ON" >>. pTableNameExpression)
         .>>. opt (
             pKeyword "REFERENCING"
             >>= fun _ ->
@@ -1404,6 +1445,20 @@ module SchemaParser =
                 opt pParameterMode .>>. pParameterType
                 |>> fun (mode, paramType) -> mode, None, paramType
 
+            // 11.60 <parameter default> ::= <value expression> | <contextually typed value specification>
+            //     | <descriptor value constructor>
+            // 6.28 <value expression> EXCLUDES boolean-valued expressions, so a TOP-LEVEL
+            // boolean (`DEFAULT 1 = 1`) is not valid there — the same gate `isPredicateOperand`
+            // applies to the 8.x operand slots. A PARENTHESIZED boolean survives, because the
+            // AST keeps the parens (6.39 <boolean predicand>).
+            let pParameterDefault =
+                pExpression
+                >>= fun e ->
+                    if isBooleanTopLevel e then
+                        fail "11.60 <parameter default>: <value expression> excludes a boolean expression"
+                    else
+                        preturn e
+
             attempt (
                 attempt pWithName <|> pWithoutName
                 .>>. opt (pKeyword "RESULT")
@@ -1411,7 +1466,7 @@ module SchemaParser =
                     pKeyword "DEFAULT"
                     >>. (attempt pDescriptorValueConstructor
                          <|> pContextuallyTypedValueSpecification
-                         <|> pExpression)
+                         <|> pParameterDefault)
                 )
                 |>> fun (((mode, name, paramType), isResult), defaultVal) ->
                     { Mode = mode
@@ -1431,11 +1486,12 @@ module SchemaParser =
         >>. (pKeyword "SQL" >>% "SQL" <|> (pKeyword "GENERAL" >>% "GENERAL"))
 
     // 5.4 <external routine name> ::= <identifier> | <character string literal>
-    // The canonical ISO form is the string literal (`EXTERNAL NAME 'mylib.myfn'`). Shared by
-    // 11.60 <external body reference> and 11.61 <alter routine characteristic> (NAME).
+    // BOTH arms are a single part — the canonical ISO form is the string literal
+    // (`EXTERNAL NAME 'mylib.myfn'`). Shared by 11.60 <external body reference> and
+    // 11.61 <alter routine characteristic> (NAME).
     let private pExternalRoutineName =
         attempt (pCharacterStringLiteral |>> Choice1Of2)
-        <|> (pSchemaQualifiedNameExpression |>> Choice2Of2)
+        <|> (pIdentifierExpression |>> Choice2Of2)
 
     // 11.60 <returns clause> ::= RETURNS <returns type>
     // 11.60 <returns data type> ::= <data type> [ <locator indication> ]
@@ -1707,10 +1763,12 @@ module SchemaParser =
                   // 11.58 <drop method specification> ::= DROP
                   //     [ INSTANCE | STATIC | CONSTRUCTOR ] METHOD <method name>
                   //     <data type list> RESTRICT
+                  // 10.6 <data type list> ::= ( [ <data type> [ , ... ] ] ) — the bracket is
+                  // OUTSIDE, so `m1 ()` is legal (10.6's own parser already uses `sepBy`).
                   attempt (
                       pKeyword "DROP" >>. opt pMethodKind .>> pKeyword "METHOD"
                       .>>. pIdentifierExpression
-                      .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pDataType (token (pstring ",")))
+                      .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy pDataType (token (pstring ",")))
                       .>> pKeyword "RESTRICT"
                       |>> fun ((kind, name), types) -> AlterTypeAction.DropMethod(kind, name, types)
                   ) ]
@@ -1823,20 +1881,21 @@ module SchemaParser =
         // 11.60 <single group specification> ::= <group name>
         // 11.60 <multiple group specification> ::= <group specification> [ { <comma> <group specification> }... ]
         // 11.60 <group specification> ::= <group name> FOR TYPE <path-resolved user-defined type name>
-        // A lone <group name> with no FOR TYPE is syntactically identical to a one-element
-        // <multiple group specification>, so it is reported as <single group specification>
-        // (see docs/trade-off.md).
+        // Every element of a multiple group specification requires FOR TYPE. The standalone
+        // single-group alternative is the only form without a type.
         let pTransformGroupSpecification =
+            let pGroupSpecification =
+                pIdentifierExpression .>> pKeyword "FOR" .>> pKeyword "TYPE"
+                .>>. pSchemaQualifiedNameExpression
+                |>> fun (groupName, typeName) -> groupName, typeName
+
             pKeyword "TRANSFORM"
             >>. pKeyword "GROUP"
-            >>. sepBy1
-                    (pIdentifierExpression
-                     .>>. opt (attempt (pKeyword "FOR" >>. pKeyword "TYPE" >>. pSchemaQualifiedNameExpression)))
-                    (token (pstring ","))
-            |>> fun groups ->
-                match groups with
-                | [ name, None ] -> TransformGroupSpecification.SingleTransformGroup name
-                | _ -> TransformGroupSpecification.MultipleTransformGroups groups
+            >>. (attempt (
+                     sepBy1 pGroupSpecification (token (pstring ","))
+                     |>> TransformGroupSpecification.MultipleTransformGroups
+                 )
+                 <|> (pIdentifierExpression |>> TransformGroupSpecification.SingleTransformGroup))
 
         // 11.60 <external body reference> ::= EXTERNAL [ NAME <external routine name> ]
         //     [ <parameter style clause> ] [ <transform group specification> ] [ <external security clause> ]
@@ -1885,7 +1944,7 @@ module SchemaParser =
               attempt (
                   pKeyword "BEGIN"
                   >>. pKeyword "ATOMIC"
-                  >>. sepEndBy1 pStatement (token (pstring ";"))
+                  >>. many1 (pStatement .>> token (pstring ";"))
                   .>> pKeyword "END"
                   |>> fun stmts -> RoutineBody.BeginAtomic(List.map (fun s -> s.Kind) stmts)
               )
@@ -2121,8 +2180,10 @@ module SchemaParser =
     // The groups are SPACE-separated repetitions — no comma between them.
     let pTransformDefinition =
         // 11.67 <transform group> ::= <group name> ( <transform element list> )
+        // 11.67 <group name> ::= <identifier> — ONE part (the 11.60 <transform group
+        // specification> slot already uses pIdentifierExpression).
         let pTransformGroup =
-            pSchemaQualifiedNameExpression
+            pIdentifierExpression
             .>>. between (token (pstring "(")) (token (pstring ")")) pTransformElementList
             |>> fun (name, elements) -> { Name = name; Elements = elements }
 
@@ -2163,7 +2224,7 @@ module SchemaParser =
 
         // 11.68 <alter group> ::= <group name> ( <alter transform action list> )
         let pAlterTransformGroup =
-            pSchemaQualifiedNameExpression
+            pIdentifierExpression
             .>>. between
                 (token (pstring "("))
                 (token (pstring ")"))

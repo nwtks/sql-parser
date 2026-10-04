@@ -63,6 +63,14 @@ let ``CALL statement verification`` () =
     | res -> Assert.Fail(sprintf "Expected Call with CAST ( NULL AS DESCRIPTOR ), got %A" res)
 
 [<Fact>]
+let ``CALL argument takes a target specification (10.4)`` () =
+    // 10.4 <SQL argument> includes <target specification>, whose <host parameter
+    // specification> carries the optional <indicator parameter>.
+    match parseStatement "CALL f(:h INDICATOR :i)" with
+    | Call(_, { Arguments = [ SqlArgumentValue { Kind = IndicatorParameter _ } ] }) -> ()
+    | res -> Assert.Fail(sprintf "Expected an INDICATOR argument, got %A" res)
+
+[<Fact>]
 let ``CALL without routine is rejected`` () = parseStatementFails "CALL"
 
 [<Fact>]

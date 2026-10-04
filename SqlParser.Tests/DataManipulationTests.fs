@@ -186,6 +186,24 @@ let ``SELECT INTO verification`` () =
     | res -> Assert.Fail(sprintf "Expected SelectInto, got %A" res)
 
 [<Fact>]
+let ``SELECT * INTO selects the whole row (14.7)`` () =
+    // 14.7 <select statement: single row> ::= SELECT [ <set quantifier> ] <select list> INTO ...
+    // — and 7.16 <select list> includes the bare <asterisk>.
+    match parseStatement "SELECT * INTO :a, :b FROM t" with
+    | SelectInto { Columns = [ Column({ Kind = ExpressionKind.Star }, _) ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected SELECT * INTO, got %A" res)
+
+[<Fact>]
+let ``MODULE-qualified names in DML and cursors (14.x)`` () =
+    // <table name> = <local or schema qualified name> in every 14.x slot.
+    parse "INSERT INTO MODULE.t VALUES (1)" |> ignore
+    parse "UPDATE MODULE.t SET a = 1" |> ignore
+    parse "DELETE FROM MODULE.t" |> ignore
+    parse "DECLARE LOCAL TEMPORARY TABLE MODULE.t (a INT)" |> ignore
+    parseStatement "DELETE FROM MODULE.t WHERE CURRENT OF c" |> ignore
+    parseStatement "UPDATE MODULE.t SET a = 1 WHERE CURRENT OF c" |> ignore
+
+[<Fact>]
 let ``SELECT DISTINCT INTO verification`` () =
     match parseStatement "SELECT DISTINCT a INTO x FROM t" with
     | SelectInto { IsDistinct = true
@@ -436,7 +454,7 @@ let ``MERGE update specification shares the 14.15 set clause list`` () =
     match parse "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN UPDATE SET (a, b) = (1, 2)" with
     | Merge { WhenClauses = [ clause ] } ->
         match clause.Action with
-        | MergeUpdate [ MultipleSet([ { Kind = Identifier "A" }; { Kind = Identifier "B" } ],
+        | MergeUpdate [ MultipleSet([ UpdateTarget { Kind = Identifier "A" }; UpdateTarget { Kind = Identifier "B" } ],
                                     [ { Kind = Literal(Number 1m) }; { Kind = Literal(Number 2m) } ]) ] -> ()
         | res -> Assert.Fail(sprintf "Expected a multiple column assignment, got %A" res)
     | res -> Assert.Fail(sprintf "Expected Merge, got %A" res)
@@ -528,7 +546,9 @@ let ``UPDATE ONLY target table verification`` () =
 [<Fact>]
 let ``UPDATE multiple assignment verification`` () =
     match parse "UPDATE users SET (first, last) = ('a', 'b')" with
-    | Update { Set = [ MultipleSet([ { Kind = Identifier "FIRST" }; { Kind = Identifier "LAST" } ], _) ] } -> ()
+    | Update { Set = [ MultipleSet([ UpdateTarget { Kind = Identifier "FIRST" }
+                                     UpdateTarget { Kind = Identifier "LAST" } ],
+                                   _) ] } -> ()
     | res -> Assert.Fail(sprintf "Expected Update multiple assignment, got %A" res)
 
 [<Fact>]
@@ -589,6 +609,10 @@ let ``UPDATE mutated set clause verification`` () =
         ()
     | res -> Assert.Fail(sprintf "Expected Update mutated set clause, got %A" res)
 
+    // 14.15 <mutated target> ::= <object column> | <mutated set clause> — the array-subscript
+    // form of <update target> is NOT available here.
+    parseFails "UPDATE users SET a[1].b = 1"
+
 [<Fact>]
 let ``UPDATE nested mutated set clause verification`` () =
     match parse "UPDATE users SET a.b.c = 1" with
@@ -596,6 +620,22 @@ let ``UPDATE nested mutated set clause verification`` () =
                                   { Kind = Identifier "C" },
                                   { Kind = Literal(Number 1m) }) ] } -> ()
     | res -> Assert.Fail(sprintf "Expected Update nested mutated set clause, got %A" res)
+
+[<Fact>]
+let ``INSERT from constructor accepts a nonparenthesized contextually typed value (14.11)`` () =
+    // 7.1 <contextually typed row value constructor> admits a nonparenthesized
+    // <contextually typed value specification>.
+    match parse "INSERT INTO t VALUES NULL" with
+    | Insert { Source = Values [ [ { Kind = Literal Null } ] ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected Insert VALUES NULL, got %A" res)
+
+[<Fact>]
+let ``INSERT query may begin with a table value constructor (14.11)`` () =
+    match parse "INSERT INTO t VALUES 1 UNION SELECT 2 FROM s" with
+    | Insert { Source = Query(SetOperation(TableValueConstructor [ [ { Kind = Literal(Number 1m) } ] ],
+                                           { Kind = Union },
+                                           SelectQuery _)) } -> ()
+    | res -> Assert.Fail(sprintf "Expected an INSERT query with a VALUES operand, got %A" res)
 
 [<Fact>]
 let ``UPDATE mutated set clause error`` () = parseFails "UPDATE users SET a. = 1"
@@ -610,9 +650,29 @@ let ``UPDATE array element target verification (14.15)`` () =
     | res -> Assert.Fail(sprintf "Expected an array element target, got %A" res)
 
     match parse "UPDATE users SET (a[1], b) = ('x', 2)" with
-    | Update { Set = [ MultipleSet([ { Kind = ArrayElement({ Kind = Identifier "A" }, _) }; { Kind = Identifier "B" } ],
+    | Update { Set = [ MultipleSet([ UpdateTarget { Kind = ArrayElement({ Kind = Identifier "A" }, _) }
+                                     UpdateTarget { Kind = Identifier "B" } ],
                                    _) ] } -> ()
     | res -> Assert.Fail(sprintf "Expected array elements in a set target list, got %A" res)
+
+[<Fact>]
+let ``UPDATE multiple assignment supports mutated targets and ROW values (14.15)`` () =
+    match parse "UPDATE users SET (a.b, c) = ROW(1, 2)" with
+    | Update { Set = [ MultipleSet([ MutatedTarget({ Kind = Identifier "A" }, { Kind = Identifier "B" })
+                                     UpdateTarget { Kind = Identifier "C" } ],
+                                   [ { Kind = Literal(Number 1m) }; { Kind = Literal(Number 2m) } ]) ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected mutated target and ROW constructor in multiple assignment, got %A" res)
+
+    match parse "UPDATE users SET (a, b) = ROW(NULL, DEFAULT)" with
+    | Update { Set = [ MultipleSet([ UpdateTarget { Kind = Identifier "A" }; UpdateTarget { Kind = Identifier "B" } ],
+                                   [ { Kind = Literal Null }; { Kind = ExpressionKind.Default } ]) ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected contextually typed ROW elements, got %A" res)
+
+    match parse "UPDATE users SET (a) = (NULL)" with
+    | Update { Set = [ MultipleSet([ UpdateTarget { Kind = Identifier "A" } ], [ { Kind = Literal Null } ]) ] } -> ()
+    | res -> Assert.Fail(sprintf "Expected parenthesized contextual value specification, got %A" res)
+
+    parseFails "UPDATE users SET (a) = ()"
 
 [<Fact>]
 let ``UPDATE without target table and no CURRENT OF is rejected`` () =

@@ -43,7 +43,7 @@ let ``column collate clause verification`` () =
     match parse "CREATE TABLE t (c VARCHAR(10) COLLATE en_us)" with
     | CreateTable { Columns = [ column ] } ->
         match column.DataType with
-        | CharacterTypeWithModifiers(Varchar { Value = 10; Unit = None }, modifiers) ->
+        | Some(CharacterTypeWithModifiers(Varchar { Value = 10; Unit = None }, modifiers)) ->
             Assert.Equal<ExpressionKind option>(
                 Some(Identifier "EN_US"),
                 modifiers.Collation |> Option.map (fun e -> e.Kind)
@@ -54,7 +54,7 @@ let ``column collate clause verification`` () =
     | res -> Assert.Fail(sprintf "Expected CreateTable, got %A" res)
 
     match parse "CREATE TABLE t (c VARCHAR(10) NOT NULL COLLATE en_us)" with
-    | CreateTable { Columns = [ { DataType = Varchar { Value = 10; Unit = None }
+    | CreateTable { Columns = [ { DataType = Some(Varchar { Value = 10; Unit = None })
                                   Collation = Some { Kind = Identifier "EN_US" } } ] } -> ()
     | res -> Assert.Fail(sprintf "Expected a column COLLATE clause, got %A" res)
 
@@ -125,6 +125,17 @@ let ``CREATE SCHEMA verification`` () =
                      Path = Some [ { Kind = Identifier "P1" } ] } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateSchema with charset then path, got %A" res)
 
+    // 10.3 <path specification> ::= PATH <schema name list>, and a <schema name> (5.4) is at
+    // most two parts — the same rule as <character set name>.
+    match parse "CREATE SCHEMA s PATH info.p1, info.p2" with
+    | CreateSchema { Path = Some path } ->
+        match path with
+        | [ { Kind = ColumnReference [ "INFO"; "P1" ] }; { Kind = ColumnReference [ "INFO"; "P2" ] } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected a schema-qualified path, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected CreateSchema, got %A" res)
+
+    parseFails "CREATE SCHEMA s PATH cat.info.p1"
+
     match parse "CREATE SCHEMA s CREATE TABLE t (id INT)" with
     | CreateSchema { Name = Some { Kind = Identifier "S" }
                      Elements = [ CreateTable _ ] } -> ()
@@ -168,6 +179,21 @@ let ``DROP statements verification`` () =
     match parse "DROP VIEW my_view CASCADE" with
     | DropView({ Kind = Identifier "MY_VIEW" }, true) -> ()
     | res -> Assert.Fail(sprintf "Expected DropView CASCADE, got %A" res)
+
+[<Fact>]
+let ``MODULE-qualified table name verification`` () =
+    // 5.4 <table name> ::= <local or schema qualified name>, whose qualifier is either a
+    // <schema name> (up to two parts, so `a.b.c` reaches three) or the single <local qualifier>
+    // MODULE. Hence `MODULE.c` IS a table name — and `MODULE.a.b` is not.
+    match parse "DROP TABLE MODULE.users CASCADE" with
+    | DropTable({ Kind = ColumnReference [ "MODULE"; "USERS" ] }, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected a MODULE-qualified table name, got %A" res)
+
+    match parse "DROP TABLE cat.info.users CASCADE" with
+    | DropTable({ Kind = ColumnReference [ "CAT"; "INFO"; "USERS" ] }, true) -> ()
+    | res -> Assert.Fail(sprintf "Expected a schema-qualified table name, got %A" res)
+
+    parseFails "DROP TABLE MODULE.info.users CASCADE"
 
     match parse "DROP VIEW my_view RESTRICT" with
     | DropView({ Kind = Identifier "MY_VIEW" }, false) -> ()
@@ -228,7 +254,22 @@ let ``DROP CHARACTER SET verification`` () =
     | DropCharacterSet({ Kind = ColumnReference [ "INFO"; "UTF8" ] }) -> ()
     | res -> Assert.Fail(sprintf "Expected a schema-qualified character set, got %A" res)
 
-    parseFails "DROP CHARACTER SET cat.info.utf8"
+    // <schema name> is [ <catalog name> . ] <unqualified schema name>, so three parts are legal.
+    match parse "DROP CHARACTER SET cat.info.utf8" with
+    | DropCharacterSet({ Kind = ColumnReference [ "CAT"; "INFO"; "UTF8" ] }) -> ()
+    | res -> Assert.Fail(sprintf "Expected a catalog-qualified character set, got %A" res)
+
+    // A FOUR-part name is beyond <schema name> (5.4).
+    parseFails "DROP CHARACTER SET a.b.c.d"
+
+[<Fact>]
+let ``MODULE-qualified table names in DDL slots (5.4)`` () =
+    // <table name> = <local or schema qualified name>; MODULE is the only <local qualifier>,
+    // so every <table name> slot admits `MODULE.x`.
+    parse "CREATE TABLE t (a INT REFERENCES MODULE.u (x))" |> ignore
+    parse "ALTER TABLE people ALTER COLUMN addr ADD SCOPE MODULE.tbl" |> ignore
+    parse "CREATE TABLE t OF my_type UNDER MODULE.super" |> ignore
+    parse "CREATE VIEW v OF my_type UNDER MODULE.super AS SELECT * FROM t" |> ignore
 
 [<Fact>]
 let ``DROP COLLATION verification`` () =
@@ -458,6 +499,28 @@ let ``Column-level constraints verification`` () =
     | res -> Assert.Fail(sprintf "Expected CreateTable with column constraints, got %A" res)
 
 [<Fact>]
+let ``CHECK constraint rejects a term`` () =
+    // 8.21 <search condition> ::= <boolean value expression>. A 6.29 <term> or a signed
+    // <numeric primary> is not a <value expression primary>, so `CHECK (a + b)` and
+    // `CHECK (-a)` are not SQL-2016. A bare primary is a <boolean predicand> and stays legal,
+    // and so does a comparison whose OPERANDS are terms (`a + b > 0`) — only the top-level
+    // shape matters.
+    parseFails "CREATE TABLE t (a INT, CHECK (a + b))"
+
+    parseFails "CREATE TABLE t (a INT CHECK (a + b))"
+
+    parseFails "CREATE TABLE t (a INT, CHECK (-a))"
+
+    parseFails "CREATE DOMAIN d AS INT CHECK (x + 1)"
+
+    parseFails "CREATE ASSERTION a CHECK (x || y)"
+
+    parse "CREATE TABLE t (a INT, CHECK (1))" |> ignore
+    parse "CREATE TABLE t (a INT CHECK (a > 0))" |> ignore
+    parse "CREATE TABLE t (a INT, CHECK (a + b > 0))" |> ignore
+    parse "CREATE DOMAIN d AS INT CHECK (x > 0)" |> ignore
+
+[<Fact>]
 let ``named column constraint with characteristics verification`` () =
     match parse "CREATE TABLE t (c INT CONSTRAINT nn NOT NULL NOT DEFERRABLE)" with
     | CreateTable { Columns = [ { Constraints = [ columnConstraint ] } ] } ->
@@ -564,8 +627,17 @@ let ``IDENTITY combined with a default clause is rejected`` () =
     parseFails "CREATE TABLE t (c INT GENERATED ALWAYS AS IDENTITY DEFAULT 5)"
 
 [<Fact>]
-let ``IDENTITY with an empty option list is rejected`` () =
-    parseFails "CREATE TABLE t (c INT GENERATED ALWAYS AS IDENTITY ())"
+let ``IDENTITY with an empty option list is accepted`` () =
+    // 11.4 <identity column specification> ::= GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY
+    //     [ ( <common sequence generator options> ) ]
+    // and <common sequence generator options> ::= <option>... — zero or more, so `IDENTITY ( )`
+    // is legal SQL-2016.
+    match parse "CREATE TABLE t (c INT GENERATED ALWAYS AS IDENTITY ())" with
+    | CreateTable { Columns = [ { Identity = identity } ] } ->
+        match identity with
+        | Some { IsAlways = true; Options = [] } -> ()
+        | res -> Assert.Fail(sprintf "Expected an empty identity option list, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected CreateTable, got %A" res)
 
 [<Fact>]
 let ``the single-value clause precedes the column constraints`` () =
@@ -693,41 +765,47 @@ let ``CREATE TABLE with table period definition verification`` () =
 [<Fact>]
 let ``User-defined type does not crash`` () =
     match parse "CREATE TABLE t (c MyType)" with
-    | CreateTable { Columns = [ { DataType = UserDefinedType { Kind = Identifier "MYTYPE" } } ] } -> ()
+    | CreateTable { Columns = [ { DataType = Some(UserDefinedType { Kind = Identifier "MYTYPE" }) } ] } -> ()
     | res -> Assert.Fail(sprintf "Expected UserDefinedType, got %A" res)
 
     // 6.1 <path-resolved user-defined type name> may be schema-qualified.
     match parse "CREATE TABLE t (c app.my_type)" with
-    | CreateTable { Columns = [ { DataType = UserDefinedType { Kind = ColumnReference [ "APP"; "MY_TYPE" ] } } ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected a schema-qualified UserDefinedType, got %A" res)
+    | CreateTable { Columns = [ column ] } ->
+        match column.DataType with
+        | Some(UserDefinedType { Kind = ColumnReference [ "APP"; "MY_TYPE" ] }) -> ()
+        | res -> Assert.Fail(sprintf "Expected a qualified UDT column, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected CreateTable, got %A" res)
 
 [<Fact>]
 let ``CREATE TABLE with REF type verification`` () =
     match parse "CREATE TABLE t (r REF(my_type) SCOPE users)" with
-    | CreateTable { Columns = [ { Name = { Kind = Identifier "R" }
-                                  DataType = ReferenceType(UserDefinedType { Kind = Identifier "MY_TYPE" },
-                                                           Some { Kind = Identifier "USERS" }) } ] } -> ()
-    | res -> Assert.Fail(sprintf "Expected CreateTable REF, got %A" res)
+    | CreateTable { Columns = [ column ] } ->
+        match column.DataType with
+        | Some(ReferenceType(UserDefinedType { Kind = Identifier "MY_TYPE" }, Some { Kind = Identifier "USERS" })) -> ()
+        | res -> Assert.Fail(sprintf "Expected a REF column type, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected CreateTable, got %A" res)
 
-[<Fact>]
-let ``Array type is parsed`` () =
+    // 6.1 <referenced type> ::= <path-resolved user-defined type name> — NOT the whole
+    // <data type>, so `REF(INTEGER)` is rejected.
+    parseFails "CREATE TABLE t (r REF(INTEGER))"
+
     match parse "CREATE TABLE t (c INT ARRAY)" with
-    | CreateTable { Columns = [ { DataType = ArrayType(Integer, None) } ] } -> ()
+    | CreateTable { Columns = [ { DataType = Some(ArrayType(Integer, None)) } ] } -> ()
     | res -> Assert.Fail(sprintf "Expected ArrayType, got %A" res)
 
 [<Fact>]
 let ``Nested collection types are parsed`` () =
     match parse "CREATE TABLE t (c INT ARRAY ARRAY)" with
-    | CreateTable { Columns = [ { DataType = ArrayType(ArrayType(Integer, None), None) } ] } -> ()
+    | CreateTable { Columns = [ { DataType = Some(ArrayType(ArrayType(Integer, None), None)) } ] } -> ()
     | res -> Assert.Fail(sprintf "Expected nested ArrayType, got %A" res)
 
     match parse "CREATE TABLE t (c INT MULTISET ARRAY [3])" with
-    | CreateTable { Columns = [ { DataType = ArrayType(MultisetType Integer, Some 3) } ] } -> ()
+    | CreateTable { Columns = [ { DataType = Some(ArrayType(MultisetType Integer, Some 3)) } ] } -> ()
     | res -> Assert.Fail(sprintf "Expected ArrayType of MultisetType, got %A" res)
 
     // 6.1 <array type>: the cardinality brackets admit the ??( / ??) trigraphs (5.1).
     match parse "CREATE TABLE t (c INT ARRAY ??(5 ??))" with
-    | CreateTable { Columns = [ { DataType = ArrayType(Integer, Some 5) } ] } -> ()
+    | CreateTable { Columns = [ { DataType = Some(ArrayType(Integer, Some 5)) } ] } -> ()
     | res -> Assert.Fail(sprintf "Expected trigraph array cardinality, got %A" res)
 
     // <maximum cardinality> is an <unsigned integer> narrowed to int — out of range fails.
@@ -738,10 +816,10 @@ let ``CREATE TABLE verification`` () =
     match parse "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(100) NOT NULL)" with
     | CreateTable { Table = { Kind = Identifier "USERS" }
                     Columns = [ { Name = { Kind = Identifier "ID" }
-                                  DataType = Integer
+                                  DataType = Some Integer
                                   IsPrimaryKey = true }
                                 { Name = { Kind = Identifier "NAME" }
-                                  DataType = Varchar { Value = 100; Unit = None }
+                                  DataType = Some(Varchar { Value = 100; Unit = None })
                                   IsNullable = Some false } ] } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateTable, got %A" res)
 
@@ -796,12 +874,21 @@ let ``CREATE TABLE AS SELECT verification`` () =
 [<Fact>]
 let ``CREATE TABLE with like clause verification`` () =
     match parse "CREATE TABLE t (LIKE s INCLUDING IDENTITY EXCLUDING DEFAULTS)" with
-    | CreateTable { Like = Some({ Kind = Identifier "S" },
-                                [ LikeOption.IncludingIdentity; LikeOption.ExcludingDefaults ]) } -> ()
+    | CreateTable { Like = [ ({ Kind = Identifier "S" }, [ LikeOption.IncludingIdentity; LikeOption.ExcludingDefaults ]) ] } ->
+        ()
     | res -> Assert.Fail(sprintf "Expected CREATE TABLE LIKE, got %A" res)
 
+    // 11.3 <table element list> repeats <table element>, and <like clause> is one of them —
+    // every clause is kept, not just the first.
+    match parse "CREATE TABLE t (LIKE a, LIKE b INCLUDING IDENTITY)" with
+    | CreateTable { Like = like } ->
+        match like with
+        | [ _; ({ Kind = Identifier "B" }, [ LikeOption.IncludingIdentity ]) ] -> ()
+        | res -> Assert.Fail(sprintf "Expected two LIKE clauses, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected CreateTable, got %A" res)
+
     match parse "CREATE TABLE t (a INT)" with
-    | CreateTable { Like = None } -> ()
+    | CreateTable { Like = [] } -> ()
     | res -> Assert.Fail(sprintf "Expected no LIKE clause, got %A" res)
 
 [<Fact>]
@@ -903,9 +990,49 @@ let ``malformed typed table and view element lists are rejected`` (sql: string) 
 let ``ALTER TABLE verification`` () =
     match parse "ALTER TABLE users ADD COLUMN age INT" with
     | AlterTable { Table = { Kind = Identifier "USERS" }
-                   Action = AddColumn { Name = { Kind = Identifier "AGE" }
-                                        DataType = Integer } } -> ()
+                   Action = AddColumn column } ->
+        match column with
+        | { Name = { Kind = Identifier "AGE" }
+            DataType = Some Integer } -> ()
+        | res -> Assert.Fail(sprintf "Expected a typed ADD COLUMN, got %A" res)
     | res -> Assert.Fail(sprintf "Expected AlterTable, got %A" res)
+
+[<Fact>]
+let ``ALTER TABLE ADD COLUMN without a data type verification`` () =
+    // 11.4 <column definition> ::= <column name> [ <data type or domain name> ] — the type
+    // slot is OPTIONAL, and 11.11 <add column definition> has no competing
+    // `( <column name list> )` alternative, so an untyped column is valid SQL-2016.
+    match parse "ALTER TABLE users ADD COLUMN age" with
+    | AlterTable { Action = AddColumn column } ->
+        match column with
+        | { Name = { Kind = Identifier "AGE" }
+            DataType = None } -> ()
+        | res -> Assert.Fail(sprintf "Expected an untyped ADD COLUMN, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected AlterTable, got %A" res)
+
+    match parse "ALTER TABLE users ADD age" with
+    | AlterTable { Action = AddColumn column } ->
+        match column with
+        | { Name = { Kind = Identifier "AGE" }
+            DataType = None } -> ()
+        | res -> Assert.Fail(sprintf "Expected an untyped ADD COLUMN, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected AlterTable, got %A" res)
+
+    // 11.27 <add system time period column list> takes two 11.4 <column definition>s. With
+    // UNTYPED columns the production is genuinely ambiguous — `… (s, e) ADD COLUMN s ADD
+    // COLUMN e` can be read as columns `s`/`s` or `s`/`e`, and greedy parsing picks the
+    // first — so only the typed form is exercised (see docs/trade-off.md).
+    match parse "ALTER TABLE t ADD PERIOD FOR SYSTEM_TIME (s, e) ADD COLUMN s TIMESTAMP ADD COLUMN e TIMESTAMP" with
+    | AlterTable { Action = AddTablePeriod(_, columns) } ->
+        match columns with
+        | [ { DataType = Some(TimestampType(_, _)) }; { DataType = Some(TimestampType(_, _)) } ] -> ()
+        | res -> Assert.Fail(sprintf "Expected two typed period columns, got %A" res)
+    | res -> Assert.Fail(sprintf "Expected AlterTable, got %A" res)
+
+    // Inside 11.3 <table element list> the type stays REQUIRED — `CREATE TABLE t (id, name)
+    // AS SELECT …` needs pColumnDefinition to reject `(id, name)` so the
+    // `( <column name list> )` slot of 11.3 <as subquery clause> can match.
+    parseFails "CREATE TABLE t (id, name) AS SELECT 1, 2 FROM u"
 
 [<Fact>]
 let ``ALTER TABLE ALTER COLUMN actions verification`` () =
@@ -1242,6 +1369,8 @@ let ``CREATE DOMAIN requires a data type`` () = parseFails "CREATE DOMAIN d"
 let ``CREATE DOMAIN type is a predefined type (11.34)`` () =
     // A UDT name is NOT a <predefined type>.
     parseFails "CREATE DOMAIN d my_udt"
+    // 6.1 <predefined type> has no <row type> alternative.
+    parseFails "CREATE DOMAIN d AS ROW(a INT)"
 
 [<Fact>]
 let ``CREATE TYPE representation is a predefined or collection type (11.51)`` () =
@@ -1286,15 +1415,24 @@ let ``CREATE CHARACTER SET verification`` () =
         ()
     | res -> Assert.Fail(sprintf "Expected CreateCharacterSet with collation, got %A" res)
 
-    // 11.41 — both name slots are <character set name> (5.4): at most a schema and a name.
+    // 11.41 — both name slots are <character set name> (5.4): [ <schema name> . ]
+    // <SQL language identifier>, where <schema name> is [ <catalog name> . ] <identifier>.
     match parse "CREATE CHARACTER SET info.utf8 AS GET info.utf8" with
     | CreateCharacterSet({ Kind = ColumnReference [ "INFO"; "UTF8" ] },
                          { Kind = ColumnReference [ "INFO"; "UTF8" ] },
                          None) -> ()
     | res -> Assert.Fail(sprintf "Expected qualified CreateCharacterSet names, got %A" res)
 
-    parseFails "CREATE CHARACTER SET cat.info.utf8 AS GET cat.info.utf8"
-    parseFails "CREATE CHARACTER SET cat.info.utf8 AS GET utf8"
+    // …so THREE parts (catalog.schema.charset) are legal,
+    match parse "CREATE CHARACTER SET cat.info.utf8 AS GET cat.info.utf8" with
+    | CreateCharacterSet({ Kind = ColumnReference [ "CAT"; "INFO"; "UTF8" ] },
+                         { Kind = ColumnReference [ "CAT"; "INFO"; "UTF8" ] },
+                         None) -> ()
+    | res -> Assert.Fail(sprintf "Expected catalog-qualified CreateCharacterSet names, got %A" res)
+
+    // …but a FOUR-part name is beyond <schema name> (5.4).
+    parseFails "CREATE CHARACTER SET a.b.c.d AS GET utf8"
+    parseFails "CREATE CHARACTER SET cat.info.utf8 AS GET a.b.c.d"
 
 [<Fact>]
 let ``CREATE COLLATION verification`` () =
@@ -1314,12 +1452,18 @@ let ``CREATE COLLATION verification`` () =
     | res -> Assert.Fail(sprintf "Expected CreateCollation without pad, got %A" res)
 
     // 11.43 — the `FOR` slot is a <character set specification>, always a
-    // <character set name> (5.4): at most a schema and a name.
+    // <character set name> (5.4): [ <schema name> . ] <SQL language identifier>.
     match parse "CREATE COLLATION c4 FOR info.utf8 FROM ec" with
     | CreateCollation({ Kind = Identifier "C4" }, { Kind = ColumnReference [ "INFO"; "UTF8" ] }, _, None) -> ()
     | res -> Assert.Fail(sprintf "Expected a schema-qualified character set, got %A" res)
 
-    parseFails "CREATE COLLATION c5 FOR cat.info.utf8 FROM ec"
+    // …and a catalog-qualified (three-part) name is legal too.
+    match parse "CREATE COLLATION c5 FOR cat.info.utf8 FROM ec" with
+    | CreateCollation({ Kind = Identifier "C5" }, { Kind = ColumnReference [ "CAT"; "INFO"; "UTF8" ] }, _, None) -> ()
+    | res -> Assert.Fail(sprintf "Expected a catalog-qualified character set, got %A" res)
+
+    // A FOUR-part name is beyond <schema name> (5.4).
+    parseFails "CREATE COLLATION c6 FOR a.b.c.d FROM ec"
 
 [<Fact>]
 let ``CREATE TRANSLATION verification`` () =
@@ -1339,6 +1483,25 @@ let ``CREATE TRANSLATION verification`` () =
         Assert.Equal(Some RoutineType.Function, designator.RoutineType)
         Assert.Equal(Identifier "TR_FN", designator.Name.Kind)
     | res -> Assert.Fail(sprintf "Expected CreateTransliteration with a routine, got %A" res)
+
+    // 11.45 <source character set specification> / <target character set specification>
+    //     ::= <character set specification> — a <character set name> (5.4):
+    //     [ <schema name> . ] <SQL language identifier>, so THREE parts are legal.
+    match parse "CREATE TRANSLATION tr FOR info.utf8 TO info.utf16 FROM translit" with
+    | CreateTransliteration(_, { Kind = ColumnReference [ "INFO"; "UTF8" ] }, _, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected a schema-qualified source charset, got %A" res)
+
+    match parse "CREATE TRANSLATION tr FOR cat.info.utf8 TO utf16 FROM translit" with
+    | CreateTransliteration(_, { Kind = ColumnReference [ "CAT"; "INFO"; "UTF8" ] }, _, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected a catalog-qualified source charset, got %A" res)
+
+    match parse "CREATE TRANSLATION tr FOR utf8 TO cat.info.utf16 FROM translit" with
+    | CreateTransliteration(_, _, { Kind = ColumnReference [ "CAT"; "INFO"; "UTF16" ] }, _) -> ()
+    | res -> Assert.Fail(sprintf "Expected a catalog-qualified target charset, got %A" res)
+
+    // A FOUR-part name is beyond <schema name> (5.4).
+    parseFails "CREATE TRANSLATION tr FOR a.b.c.d TO utf16 FROM translit"
+    parseFails "CREATE TRANSLATION tr FOR utf8 TO a.b.c.d FROM translit"
 
 [<Fact>]
 let ``CREATE ASSERTION verification`` () =
@@ -1456,6 +1619,14 @@ let ``CREATE PROCEDURE with DEFAULT NULL parameter verification`` () =
         | Some { Kind = Literal Null } -> ()
         | other -> Assert.Fail(sprintf "Expected DEFAULT NULL, got %A" other)
     | res -> Assert.Fail(sprintf "Expected CreateProcedure, got %A" res)
+
+    // 11.60 <parameter default> ::= <value expression> | … and 6.28 <value expression> is a
+    // NON-boolean value expression, so a top-level boolean is not valid there. A PARENTHESIZED
+    // boolean survives (6.39 <boolean predicand> — the AST keeps the parens).
+    parseFails "CREATE PROCEDURE p (x INT DEFAULT 1 = 1) RETURN 1"
+    parseFails "CREATE PROCEDURE p (x INT DEFAULT a IS NULL) RETURN 1"
+
+    parse "CREATE PROCEDURE p (x INT DEFAULT (1 = 1)) RETURN 1" |> ignore
 
 [<Fact>]
 let ``SQL parameter type verification`` () =
@@ -1673,6 +1844,15 @@ let ``ALTER TYPE method actions verification`` () =
     | AlterType { Action = AlterTypeAction.DropMethod(None, { Kind = Identifier "M1" }, [ Integer ]) } -> ()
     | res -> Assert.Fail(sprintf "Expected AlterType DROP METHOD, got %A" res)
 
+    // 10.6 <data type list> ::= ( [ <data type> [ , ... ] ] ) — the bracket is OUTSIDE, so an
+    // empty list is legal (10.6's own <specific routine designator> already accepted it).
+    match parse "ALTER TYPE my_type DROP METHOD m1 () RESTRICT" with
+    | AlterType { Action = AlterTypeAction.DropMethod(None, { Kind = Identifier "M1" }, []) } -> ()
+    | res -> Assert.Fail(sprintf "Expected an empty DROP METHOD data type list, got %A" res)
+
+    // 11.55 / 11.58 both require RESTRICT.
+    parseFails "ALTER TYPE my_type DROP METHOD m1"
+
 [<Fact>]
 let ``ALTER TYPE without action is rejected`` () = parseFails "ALTER TYPE my_type"
 
@@ -1703,6 +1883,12 @@ let ``CREATE PROCEDURE with EXTERNAL body verification`` () =
     | CreateProcedure { Body = ExternalRoutine { Name = Some(Choice1Of2 "mylib.myfn") } } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateProcedure EXTERNAL NAME string, got %A" res)
 
+    // 5.4 <external routine name> ::= <identifier> | <character string literal> — BOTH arms
+    // are a single part, in 11.60 <external body reference> and 11.61
+    // <alter routine characteristic> alike.
+    parseFails "CREATE PROCEDURE p () EXTERNAL NAME lib.ext_proc"
+    parseFails "ALTER PROCEDURE p NAME a.b.c RESTRICT"
+
     match parse "CREATE PROCEDURE p () EXTERNAL" with
     | CreateProcedure { Body = ExternalRoutine { Name = None } } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateProcedure EXTERNAL, got %A" res)
@@ -1730,16 +1916,23 @@ let ``CREATE PROCEDURE external body reference extras verification`` () =
 
     // 11.60 <multiple group specification> ::= <group specification> [ { , <group specification> }... ]
     // 11.60 <group specification> ::= <group name> FOR TYPE <path-resolved user-defined type name>
-    match parse "CREATE PROCEDURE p () EXTERNAL TRANSFORM GROUP g1, g2 FOR TYPE my_type EXTERNAL SECURITY DEFINER" with
+    match
+        parse
+            "CREATE PROCEDURE p () EXTERNAL TRANSFORM GROUP g1 FOR TYPE type1, g2 FOR TYPE type2 EXTERNAL SECURITY DEFINER"
+    with
     | CreateProcedure { Body = ExternalRoutine ext } ->
         match ext.TransformGroup with
-        | Some(MultipleTransformGroups [ (g1, None); (g2, Some _) ]) ->
+        | Some(MultipleTransformGroups [ (g1, type1); (g2, type2) ]) ->
             Assert.Equal(Identifier "G1", g1.Kind)
             Assert.Equal(Identifier "G2", g2.Kind)
+            Assert.Equal(Identifier "TYPE1", type1.Kind)
+            Assert.Equal(Identifier "TYPE2", type2.Kind)
         | other -> Assert.Fail(sprintf "Expected multiple transform groups, got %A" other)
 
         Assert.Equal(Some ExternalSecurity.Definer, ext.ExternalSecurity)
     | res -> Assert.Fail(sprintf "Expected multiple transform groups, got %A" res)
+
+    parseFails "CREATE PROCEDURE p () EXTERNAL TRANSFORM GROUP g1, g2 FOR TYPE type2"
 
 [<Fact>]
 let ``CREATE FUNCTION with polymorphic table function body verification`` () =
@@ -1824,6 +2017,18 @@ let ``CREATE PROCEDURE with BEGIN ATOMIC body verification`` () =
     match parse "CREATE PROCEDURE p () BEGIN ATOMIC SELECT 1 INTO a FROM t; SELECT 2 INTO b FROM t; END" with
     | CreateProcedure { Body = RoutineBody.BeginAtomic [ SelectInto _; SelectInto _ ] } -> ()
     | res -> Assert.Fail(sprintf "Expected CreateProcedure BEGIN ATOMIC, got %A" res)
+
+[<Fact>]
+let ``BEGIN ATOMIC requires a trailing semicolon (11.49/11.60)`` () =
+    // 11.49 <triggered SQL statement> = BEGIN ATOMIC { <SQL procedure statement> <semicolon> }... END
+    // — every statement carries its `;`, including the last one.
+    parseFails "CREATE PROCEDURE p () BEGIN ATOMIC SELECT 1 INTO a FROM t END"
+    parseFails "CREATE TRIGGER trg AFTER INSERT ON t BEGIN ATOMIC DELETE FROM t END"
+
+    parse "CREATE PROCEDURE p () BEGIN ATOMIC SELECT 1 INTO a FROM t; END" |> ignore
+
+    parse "CREATE TRIGGER trg AFTER INSERT ON t BEGIN ATOMIC DELETE FROM t; END"
+    |> ignore
 
 [<Fact>]
 let ``routine parameter style may not appear twice verification`` () =
@@ -2100,6 +2305,11 @@ let ``CREATE TRANSFORM verification`` () =
     match parse "CREATE TRANSFORMS FOR t g (FROM SQL WITH f)" with
     | CreateTransform({ Kind = Identifier "T" }, [ { Elements = [ TransformElement.FromSql _ ] } ]) -> ()
     | res -> Assert.Fail(sprintf "Expected CreateTransform TRANSFORMS, got %A" res)
+
+    // 11.67 <group name> ::= <identifier> — ONE part, in 11.67 / 11.68 / 11.71 alike.
+    parseFails "CREATE TRANSFORM FOR t a.b (TO SQL WITH f)"
+    parseFails "ALTER TRANSFORM FOR t a.b (ADD (TO SQL WITH f))"
+    parseFails "DROP TRANSFORMS a.b FOR t RESTRICT"
 
 [<Fact>]
 let ``ALTER TRANSFORM verification`` () =

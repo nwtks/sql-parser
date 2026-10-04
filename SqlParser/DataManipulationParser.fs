@@ -62,9 +62,8 @@ module DataManipulationParser =
     let pDeclareCursor =
         pKeyword "DECLARE" >>. pLocalQualifiedNameExpression .>>. pCursorProperties
         .>> pKeyword "FOR"
-        .>>. QueryParser.pQueryExpression
-        .>>. opt (attempt pUpdatabilityClause)
-        |>> fun (((name, properties), specification), updatability) ->
+        .>>. (QueryParser.pQueryExpression .>>. opt (attempt pUpdatabilityClause))
+        |>> fun ((name, properties), (specification, updatability)) ->
             { Name = name
               Properties = properties
               Specification = specification
@@ -97,41 +96,23 @@ module DataManipulationParser =
                   { Expression.Kind = Parameter name
                     Pos = { Line = pos.Line; Column = pos.Column } } ]
 
-    // 6.4 <host parameter specification> ::= <host parameter name> [ <indicator parameter> ]
-    // <indicator parameter> ::= [ INDICATOR ] <host parameter name>
-    // Shared by <target specification> (below) and 20.11 <using argument>.
-    let private pHostParameterSpecification =
-        getPosition
-        .>>. pHostParameter
-        .>>. opt (attempt (opt (pKeyword "INDICATOR") >>. pHostParameter))
-        |>> fun ((pos, name), indicator) ->
-            let p = { Line = pos.Line; Column = pos.Column }
-
-            match indicator with
-            | Some ind ->
-                { Expression.Kind = IndicatorParameter(name, { Kind = Parameter ind; Pos = p })
-                  Pos = p }
-            | None ->
-                { Expression.Kind = Parameter name
-                  Pos = p }
-
     // 6.4 <target specification> ::=
     //     <host parameter specification> | <SQL parameter reference> | <column reference>
     //   | <target array element specification> | <dynamic parameter specification>
     //   | <embedded variable name>
     // Broader than <simple target specification> (23.1): admits `?`, an
     // <indicator parameter>, and <target array element specification>. Shared by
-    // 14.5 <fetch target list>, 14.7 <select target list> and 20.12 <into argument>.
-    let private pTargetSpecification =
+    // 14.5 <fetch target list>, 14.7 <select target list>, 20.12 <into argument> and
+    // the 10.4 <SQL argument> / <named argument SQL argument> slots (ControlParser).
+    // The <host parameter specification> is the shared ExpressionParser parser.
+    let pTargetSpecification =
         // 6.4 <target array element specification> ::=
         //   <target array reference> <left bracket> <simple value specification> <right bracket>
+        // 6.4 <target array reference> ::= <SQL parameter reference> | <column reference> —
+        // a <host parameter name> is NOT a <target array reference>.
         let pTargetArrayElement =
             attempt (
                 pColumnReferenceExpression
-                <|> (getPosition .>>. pHostParameter
-                     |>> fun (pos, name) ->
-                         { Expression.Kind = Parameter name
-                           Pos = { Line = pos.Line; Column = pos.Column } })
                 .>>. between (token (pstring "[")) (token (pstring "]")) pSimpleValueSpecification
                 |>> fun (arr, idx) ->
                     { Expression.Kind = ArrayElement(arr, idx)
@@ -147,8 +128,8 @@ module DataManipulationParser =
                     Pos = { Line = pos.Line; Column = pos.Column } }
               pColumnReferenceExpression ]
 
-    // 5.4 <extended descriptor name> / 20.17 <extended statement name> /
-    // 20.17 <extended cursor name> ::= [ <scope option> ] <simple value specification>
+    // 5.4 <extended descriptor name> / 5.4 <extended statement name> /
+    // 5.4 <extended cursor name> ::= [ <scope option> ] <simple value specification>
     // Defined here (rather than in DynamicParser.fs) because it is consumed earlier —
     // the 20.10/20.11 <using descriptor> tail is parsed in this module, and so is the
     // 20.10 <using descriptor> tail that 20.10 <describe statement> needs.
@@ -175,7 +156,7 @@ module DataManipulationParser =
     // 20.10 <using descriptor> / 20.12 <into descriptor>
     // The `[ SQL ] DESCRIPTOR <descriptor name>` tail shared by both.
     // 5.4 <descriptor name> ::= <conventional descriptor name> | <PTF descriptor name> — the
-    // 20.17 extended form is also admitted via `pExtendedName`.
+    // 5.4 extended form is also admitted via `pExtendedName`.
     let private pDescriptorName =
         opt (pKeyword "SQL" >>% ()) .>> pKeyword "DESCRIPTOR"
         >>. (pExtendedName <|> pPtfName)
@@ -261,8 +242,7 @@ module DataManipulationParser =
     // The <table expression> (FROM/WHERE/GROUP BY/HAVING/WINDOW) reuses the
     // QueryParser clause parsers; INTO sits between the select list and FROM.
     let pSelectStatementSingleRow =
-        pKeyword "SELECT" >>. QueryParser.pSetQuantifier
-        .>>. sepBy1 QueryParser.pSelectSublist (token (pstring ","))
+        pKeyword "SELECT" >>. QueryParser.pSetQuantifier .>>. QueryParser.pSelectList
         >>= fun (dist, cols) ->
             pKeyword "INTO" >>. sepBy1 pTargetSpecification (token (pstring ","))
             >>= fun into ->
@@ -310,17 +290,18 @@ module DataManipulationParser =
                  >>= fun _scope -> pLocalQualifiedNameExpression
                  |>> fun c -> Some c, None
              )
-             <|> (pExpression |>> fun e -> None, Some e))
+             <|> (pSearchCondition |>> fun e -> None, Some e))
 
     // 14.8/14.9/14.13/14.14 <target table> ::= <table name> | ONLY ( <table name> )
+    // <table name> (5.4) is a <local or schema qualified name>, so `MODULE.t` is legal.
     // Returns (name, isOnly).
     let private pTargetTable =
         attempt (
             pKeyword "ONLY"
-            >>. between (token (pstring "(")) (token (pstring ")")) pSchemaQualifiedNameExpression
+            >>. between (token (pstring "(")) (token (pstring ")")) pTableNameExpression
             |>> fun name -> name, true
         )
-        <|> (pSchemaQualifiedNameExpression |>> fun name -> name, false)
+        <|> (pTableNameExpression |>> fun name -> name, false)
 
     // 14.9/14.14 FOR PORTION OF <application time period name> FROM <point in time 1> TO <point in time 2>
     //     FROM <point in time 1> TO <point in time 2>
@@ -431,23 +412,46 @@ module DataManipulationParser =
         // 7.3 <contextually typed table value constructor> ::= VALUES <contextually typed row value expression list>
         // Used as <from constructor> of <insert statement> (14.11). Each <contextually typed
         // row value constructor element> also admits a 6.5 <contextually typed value specification>.
+        // 7.1 <contextually typed row value constructor> admits a nonparenthesized
+        // <contextually typed value specification> (NULL / DEFAULT / ARRAY[] / MULTISET[])
+        // and a bare <common value expression>, so a row is not always parenthesized.
+        let pContextuallyTypedRow =
+            attempt (
+                between
+                    (token (pstring "("))
+                    (token (pstring ")"))
+                    (sepBy1 (pContextuallyTypedValueSpecification <|> pExpression) (token (pstring ",")))
+            )
+            <|> ((pContextuallyTypedValueSpecification <|> pExpression) |>> fun e -> [ e ])
+
         let pContextuallyTypedTableValueConstructor =
-            pKeyword "VALUES"
-            >>. sepBy1
-                    (between
-                        (token (pstring "("))
-                        (token (pstring ")"))
-                        (sepBy1 (pContextuallyTypedValueSpecification <|> pExpression) (token (pstring ","))))
-                    (token (pstring ","))
+            pKeyword "VALUES" >>. sepBy1 pContextuallyTypedRow (token (pstring ","))
             |>> Values
 
-        pKeyword "INSERT" >>. pKeyword "INTO" >>. pSchemaQualifiedNameExpression
+        let pQueryContinuation =
+            choice
+                [ pKeyword "UNION" >>% ()
+                  pKeyword "EXCEPT" >>% ()
+                  pKeyword "INTERSECT" >>% ()
+                  pKeyword "ORDER" >>. pKeyword "BY" >>% ()
+                  pKeyword "OFFSET" >>% ()
+                  pKeyword "FETCH" >>% () ]
+
+        let pConstructorSource =
+            attempt (pContextuallyTypedTableValueConstructor .>> notFollowedBy pQueryContinuation)
+
+        // 14.11 <insertion target> ::= <table name> — a <local or schema qualified name>,
+        // so `MODULE.t` is legal.
+        pKeyword "INSERT" >>. pKeyword "INTO" >>. pTableNameExpression
         .>>. opt (
             between (token (pstring "(")) (token (pstring ")")) (sepBy1 pIdentifierExpression (token (pstring ",")))
         )
         .>>. pOverrideClause
-        .>>. (pContextuallyTypedTableValueConstructor
-              <|> (QueryParser.pQueryExpression |>> Query)
+        .>>. (pConstructorSource
+              <|> (QueryParser.pQueryExpression
+                   |>> function
+                       | TableValueConstructor rows -> Values rows
+                       | query -> Query query)
               <|> (pKeyword "DEFAULT" >>. pKeyword "VALUES" >>% DefaultValues))
         >>= fun (((table, cols), ovr), source) ->
             // 14.11 <from default> has neither an <insert column list> nor an <override clause>.
@@ -491,29 +495,10 @@ module DataManipulationParser =
                       Pos = column.Pos }
                 | None -> column
 
-        // 14.15 <multiple column assignment> ::= <set target list> <equals operator> <assigned row>
-        // <set target list> ::= ( <set target> [ { <comma> <set target> }... ] )
-        attempt (
-            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pUpdateTarget (token (pstring ",")))
-            .>> token (pstring "=")
-            // <assigned row> is a <contextually typed row value expression>: NULL is legal.
-            .>>. between
-                (token (pstring "("))
-                (token (pstring ")"))
-                (sepBy1 (pContextuallyTypedValueSpecification <|> pExpression) (token (pstring ",")))
-            |>> MultipleSet
-        )
-        <|> attempt (
-            // 14.15 <mutated set clause> ::= <mutated target> <period> <method name>
-            // <mutated target> ::= <object column> | <mutated set clause>
-            // <set clause> ::= <mutated set clause> <equals operator> <update source>
-            pUpdateTarget .>>. many1 (token (pstring ".") >>. pIdentifierExpression)
-            .>> token (pstring "=")
-            .>>. (pContextuallyTypedValueSpecification <|> pExpression)
-            |>> fun ((first, rest), value) ->
-                // The last segment is the method name; the rest is the
-                // mutated target (folded into a FieldReference chain).
-                let target: Expression =
+        let pMutatedTargetAndMethod =
+            pIdentifierExpression .>>. many1 (token (pstring ".") >>. pIdentifierExpression)
+            |>> fun (first, rest) ->
+                let target =
                     List.fold
                         (fun (acc: Expression) (name: Expression) ->
                             { Kind = FieldReference(acc, name)
@@ -521,7 +506,66 @@ module DataManipulationParser =
                         first
                         (List.take (rest.Length - 1) rest)
 
-                MutatedSet(target, List.last rest, value)
+                target, List.last rest
+
+        let pSetTarget =
+            attempt (
+                pMutatedTargetAndMethod
+                |>> fun (target, methodName) -> MutatedTarget(target, methodName)
+            )
+            <|> (pUpdateTarget |>> UpdateTarget)
+
+        let pAssignedRow =
+            let pRowConstructor =
+                pKeyword "ROW"
+                >>. between
+                        (token (pstring "("))
+                        (token (pstring ")"))
+                        (sepBy1 (pContextuallyTypedValueSpecification <|> pExpression) (token (pstring ",")))
+
+            let pParenthesizedRow =
+                between
+                    (token (pstring "("))
+                    (token (pstring ")"))
+                    (choice
+                        [ attempt (
+                              pContextuallyTypedValueSpecification .>> notFollowedBy (token (pstring ","))
+                              |>> List.singleton
+                          )
+                          attempt (
+                              (pContextuallyTypedValueSpecification <|> pExpression)
+                              .>>. many1 (
+                                  token (pstring ",") >>. (pContextuallyTypedValueSpecification <|> pExpression)
+                              )
+                              |>> fun (first, rest) -> first :: rest
+                          ) ])
+
+            let pExpressionRow =
+                (pContextuallyTypedValueSpecification <|> pExpression)
+                |>> fun expression ->
+                    match expression.Kind with
+                    | RowValueConstructor elements -> elements
+                    | _ -> [ expression ]
+
+            attempt pRowConstructor <|> attempt pParenthesizedRow <|> pExpressionRow
+
+        // 14.15 <multiple column assignment> ::= <set target list> <equals operator> <assigned row>
+        // <set target list> ::= ( <set target> [ { <comma> <set target> }... ] )
+        attempt (
+            between (token (pstring "(")) (token (pstring ")")) (sepBy1 pSetTarget (token (pstring ",")))
+            .>> token (pstring "=")
+            .>>. pAssignedRow
+            |>> MultipleSet
+        )
+        <|> attempt (
+            // 14.15 <mutated set clause> ::= <mutated target> <period> <method name>
+            // <mutated target> ::= <object column> | <mutated set clause> — an <object column>
+            // is a plain <column name>, so the array-subscript form of <update target> is NOT
+            // available here.
+            // <set clause> ::= <mutated set clause> <equals operator> <update source>
+            pMutatedTargetAndMethod .>> token (pstring "=")
+            .>>. (pContextuallyTypedValueSpecification <|> pExpression)
+            |>> fun ((target, methodName), value) -> MutatedSet(target, methodName, value)
         )
         <|> ( // 14.15 <set clause> ::= <set target> <equals operator> <update source>
         // <set target> ::= <update target> (<object column> [ [ <simple value specification> ] ])
@@ -566,7 +610,7 @@ module DataManipulationParser =
             >>. choice
                     [ attempt (pKeyword "NOT" .>> pKeyword "MATCHED") >>% NotMatched
                       pKeyword "MATCHED" >>% Matched ]
-            .>>. opt (pKeyword "AND" >>. pExpression)
+            .>>. opt (pKeyword "AND" >>. pSearchCondition)
             .>> pKeyword "THEN"
             >>= fun (cond, filter) ->
                 (match cond with
@@ -582,7 +626,7 @@ module DataManipulationParser =
         .>> pKeyword "USING"
         .>>. QueryParser.pTableReference
         .>> pKeyword "ON"
-        .>>. pExpression
+        .>>. pSearchCondition
         .>>. many1 pWhenMatch
         |>> fun (((((target, targetIsOnly), alias), source), on), whens) ->
             { Target = target
@@ -639,6 +683,7 @@ module DataManipulationParser =
 
     // 14.16 <temporary table declaration> ::= DECLARE LOCAL TEMPORARY TABLE <table name> <table element list>
     //     [ ON COMMIT <table commit action> ROWS ]
+    // <table name> (5.4) is a <local or schema qualified name>, so `MODULE.t` is legal.
     let pTemporaryTableDeclaration =
         // 11.3 <table element> ::= <column definition> | <table constraint definition>
         let pTableElement =
@@ -654,7 +699,7 @@ module DataManipulationParser =
         >>. pKeyword "LOCAL"
         >>. pKeyword "TEMPORARY"
         >>. pKeyword "TABLE"
-        >>. pSchemaQualifiedNameExpression
+        >>. pTableNameExpression
         .>>. between (token (pstring "(")) (token (pstring ")")) (sepBy1 pTableElement (token (pstring ",")))
         .>>. opt (attempt (pKeyword "ON" >>. pKeyword "COMMIT" >>. pTableCommitAction .>> pKeyword "ROWS"))
         |>> fun ((name, elements), onCommit) ->

@@ -12,8 +12,8 @@ module SessionParser =
     //     [ { <comma> <transaction mode> }... ]
     // 19.1 <session characteristic list> ::= <session characteristic> [ { <comma> <session characteristic> }... ]
     // So the trailing modes of one characteristic need no TRANSACTION keyword, while a SECOND
-    // characteristic repeats it. `pTransactionMode` cannot start with TRANSACTION (a reserved
-    // word), so trying the keyword first disambiguates.
+    // characteristic repeats it. No <transaction mode> alternative starts with TRANSACTION, so
+    // trying the keyword first disambiguates.
     let pSetSessionCharacteristicsStatement =
         let pSessionCharacteristic =
             pKeyword "TRANSACTION" >>. TransactionParser.pTransactionMode

@@ -37,7 +37,7 @@ match SqlParser.parseStatement "OPEN cur;" with
     printfn "Parse error: %s at line %d, col %d" msg pos.Line pos.Column
 ```
 
-A `Statement` carries a `Kind` (`StatementKind`) mirroring the grammar's alternatives and a `Pos` (`Line` / `Column`) for error reporting; see `SqlParser/Ast.fs`.
+A `Statement` carries a `Kind` (`StatementKind`, the grammar construct it implements) and a `Pos` (`Line` / `Column`) for error reporting; domain choices are modelled as discriminated unions (`Query`, `AlterTableAction`, …). See `SqlParser/Ast.fs` and [docs/architecture.md](docs/architecture.md#6-ast-design-astfs).
 
 ## Documentation
 
